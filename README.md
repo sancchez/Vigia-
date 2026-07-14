@@ -1,4 +1,4 @@
-# Proyecto Ciberseguridad IA
+# Vigia
 
 Plataforma de agentes de IA (LangGraph + FastAPI + Claude) para **gestión de superficie de ataque (attack surface management)** y **anti-suplantación de marca**, dirigida a pymes colombianas. No reinventa escáneres de vulnerabilidades: orquesta herramientas ya existentes, gratuitas y probadas por la industria (Nuclei, OWASP ZAP, Amass, Subfinder, dnstwist, Sherlock, entre otras) y pone encima una capa de inteligencia que esas herramientas no tienen — verificación determinista de hallazgos, priorización según el riesgo real de negocio, redacción de remediación entendible, y reportes que un dueño de pyme sin conocimiento técnico puede leer. El modelo de negocio es de suscripción (no proyecto único), inspirado en jugadores como Detectify, Intruder.io o BrandShield, adaptado a ticket y realidad de pyme colombiana.
 
@@ -21,7 +21,7 @@ ciberseguridad/
 
 ## Estado actual
 
-**Fase 0 (base legal)** y **andamiaje inicial del repositorio** en construcción. Ver `plan-proyecto-ciberseguridad.md` para el plan maestro completo (modelo de negocio, arquitectura de agentes, inventario de herramientas, fases 0-5, y estrategia open-core). La Fase 1 (MVP: Nuclei + ZAP baseline contra OWASP Juice Shop) es el siguiente paso, y solo se prueba contra aplicaciones de laboratorio hasta tener el primer cliente real con autorización firmada.
+**Fase 0 (base legal)** y **Fase 1 (MVP)** completas: pipeline LangGraph de punta a punta (`orchestrator/` + `agents/`), wrappers de herramientas (`tools/`), harness de evaluación contra OWASP Juice Shop (`eval/`), servicio FastAPI (`api/`), y un primer caso de estudio real de anti-suplantación (`docs/caso-miempresa.md`). Ver `plan-proyecto-ciberseguridad.md` para el plan maestro completo (modelo de negocio, arquitectura de agentes, inventario de herramientas, fases 0-5, y estrategia open-core). Solo se prueba contra aplicaciones de laboratorio hasta tener el primer cliente real con autorización firmada.
 
 ## Stack
 
