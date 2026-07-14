@@ -1,0 +1,61 @@
+{
+  "_comment": "Hallazgos de ejemplo para probar eval/run_eval.py. Mezcla deliberada: 6 true positives (coinciden en tipo + ubicación aproximada con ground_truth.yaml), 1 false positive claro (tipo 'open_redirect' que Juice Shop no tiene documentado), y 5 vulnerabilidades de la ground truth quedan sin cubrir a propósito (VULN-003, VULN-005, VULN-009, VULN-010, VULN-011) para generar false negatives reales. Ni precisión ni recall deben salir en 100%.",
+  "findings": [
+    {
+      "id": "F-001",
+      "type": "sql_injection",
+      "endpoint": "/rest/user/login",
+      "severity": "critical",
+      "confidence": 0.95,
+      "description": "Payload ' OR 1=1-- en el campo email del login autentica como admin sin contraseña."
+    },
+    {
+      "id": "F-002",
+      "type": "xss_reflected",
+      "endpoint": "/rest/products/search?q=<script>alert(1)</script>",
+      "severity": "medium",
+      "confidence": 0.88,
+      "description": "El parámetro q del buscador de productos refleja el payload sin escapar en el DOM."
+    },
+    {
+      "id": "F-003",
+      "type": "broken_access_control",
+      "endpoint": "/rest/basket/11",
+      "severity": "high",
+      "confidence": 0.8,
+      "description": "Un usuario autenticado como cliente B puede leer la cesta del cliente A cambiando el id numérico."
+    },
+    {
+      "id": "F-004",
+      "type": "jwt_vuln",
+      "endpoint": "/rest/user/login (token emitido, validado en middleware Authorization: Bearer)",
+      "severity": "high",
+      "confidence": 0.7,
+      "description": "El JWT emitido usa una clave de firma predecible; se pudo forjar un token con rol admin."
+    },
+    {
+      "id": "F-005",
+      "type": "sensitive_data_exposure",
+      "endpoint": "/ftp/acquisitions.md",
+      "severity": "high",
+      "confidence": 0.9,
+      "description": "Archivo interno de adquisiciones accesible públicamente sin autenticación bajo /ftp/."
+    },
+    {
+      "id": "F-006",
+      "type": "path_traversal",
+      "endpoint": "/ftp/..%2f..%2fpackage.json",
+      "severity": "high",
+      "confidence": 0.75,
+      "description": "Traversal codificado permite escapar del directorio /ftp/ y leer package.json de la raíz."
+    },
+    {
+      "id": "F-007",
+      "type": "open_redirect",
+      "endpoint": "/redirect?to=https://evil.example.com",
+      "severity": "low",
+      "confidence": 0.4,
+      "description": "Falso positivo deliberado: el escáner marcó un redirect abierto que no corresponde a ninguna vulnerabilidad documentada de Juice Shop en esta ground truth."
+    }
+  ]
+}

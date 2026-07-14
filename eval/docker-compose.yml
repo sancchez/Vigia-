@@ -1,0 +1,50 @@
+# eval/docker-compose.yml
+#
+# Levanta OWASP Juice Shop como aplicacion de laboratorio para el harness de
+# evaluacion (ver eval/README.md y eval/setup_juiceshop.md).
+#
+# ESTADO ACTUAL DE ESTA MAQUINA: Docker NO esta instalado (confirmado). Este
+# archivo queda documentado y listo para usarse el dia que Docker (o Docker
+# Desktop / Docker Engine) este disponible. Mientras tanto, usa la alternativa
+# sin Docker descrita en eval/setup_juiceshop.md (clonar el repo + npm install
+# + npm start).
+#
+# Uso (cuando Docker este disponible):
+#   cd eval
+#   docker compose up -d        # levanta el contenedor en segundo plano
+#   docker compose logs -f      # ver logs / confirmar arranque
+#   docker compose down         # apagar y remover el contenedor
+#
+# Verificacion de que esta corriendo:
+#   curl http://localhost:3000/rest/admin/application-version
+#   (o abrir http://localhost:3000 en el navegador — debe verse la tienda)
+
+services:
+  juice-shop:
+    # Imagen oficial mantenida por el proyecto OWASP Juice Shop.
+    # Tag "latest" trae la version mas reciente publicada; para reproducibilidad
+    # en evaluaciones de regresion (seccion 8.2 del plan maestro) considera fijar
+    # una version concreta, ej. bkimminich/juice-shop:v17.1.1
+    image: bkimminich/juice-shop:latest
+    container_name: juice-shop-eval
+
+    # Puerto por defecto de Juice Shop es 3000 dentro del contenedor.
+    # Se mapea 1:1 al host — cambia el puerto izquierdo si el 3000 ya esta en uso
+    # localmente, ej. "3001:3000".
+    ports:
+      - "3000:3000"
+
+    # Reinicia automaticamente si el contenedor se cae, pero no si se detiene
+    # manualmente con `docker compose down`.
+    restart: unless-stopped
+
+    # Juice Shop es una app de laboratorio deliberadamente vulnerable — NUNCA
+    # exponer este puerto a internet ni correrlo en una red compartida con
+    # sistemas reales. Debe vivir aislado (localhost o red docker interna),
+    # igual que exige la seccion 8.1 del plan maestro (sandboxing de escaneo activo).
+    networks:
+      - juiceshop-eval-net
+
+networks:
+  juiceshop-eval-net:
+    driver: bridge

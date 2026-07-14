@@ -1,0 +1,107 @@
+# Ground truth de vulnerabilidades conocidas — OWASP Juice Shop
+#
+# Versión parseable 1:1 de eval/known_vulnerabilities.md. Es el "examen con
+# respuestas" contra el que eval/run_eval.py mide precisión y recall de los
+# hallazgos que reporte el pipeline real (orchestrator/agents, cuando exista).
+#
+# Convención de campos:
+#   id:        identificador único, estable (no reusar ni reordenar tras publicar)
+#   type:      categoría de vulnerabilidad (snake_case), debe ser uno de:
+#              sql_injection, xss_reflected, xss_stored, broken_access_control,
+#              jwt_vuln, sensitive_data_exposure, path_traversal,
+#              broken_authentication
+#   location:  endpoint o ruta aproximada donde vive la vulnerabilidad
+#   severity:  critical | high | medium | low
+#   description: descripción corta (1-2 líneas)
+#
+# Si agregas una vulnerabilidad nueva, agrégala TAMBIÉN en known_vulnerabilities.md
+# con el mismo id (VULN-0XX) para mantener la correspondencia 1:1.
+
+vulnerabilities:
+  - id: VULN-001
+    type: sql_injection
+    location: "/rest/user/login"
+    severity: critical
+    description: >
+      Bypass de autenticación por inyección SQL en el campo email del login
+      (ej. ' OR 1=1--), permite iniciar sesión como cualquier usuario.
+
+  - id: VULN-002
+    type: xss_reflected
+    location: "/rest/products/search"
+    severity: medium
+    description: >
+      El parámetro de búsqueda de productos (q) se refleja sin sanitizar,
+      permitiendo ejecutar JavaScript arbitrario vía enlace manipulado.
+
+  - id: VULN-003
+    type: xss_stored
+    location: "/rest/products/reviews"
+    severity: high
+    description: >
+      Las reseñas de producto y el formulario de feedback no sanitizan el
+      contenido almacenado, permitiendo XSS persistente contra otros usuarios.
+
+  - id: VULN-004
+    type: broken_access_control
+    location: "/rest/basket/{id}"
+    severity: high
+    description: >
+      IDOR: un usuario puede ver/modificar la cesta de compra de otro usuario
+      cambiando el id en la petición, sin verificación de propiedad.
+
+  - id: VULN-005
+    type: broken_access_control
+    location: "/#/administration"
+    severity: critical
+    description: >
+      El panel de administración es alcanzable sin control de acceso robusto
+      basado en rol del lado del servidor, exponiendo datos y funciones sensibles.
+
+  - id: VULN-006
+    type: jwt_vuln
+    location: "/rest/user/login"
+    severity: high
+    description: >
+      JWT firmado con clave débil/predecible y susceptible a confusión de
+      algoritmo o manipulación de payload (ej. escalar rol a admin).
+
+  - id: VULN-007
+    type: sensitive_data_exposure
+    location: "/ftp/"
+    severity: high
+    description: >
+      Directorio ftp simulado expone públicamente archivos de respaldo y
+      documentos internos (acquisitions.md, package.json.bak, easter egg).
+
+  - id: VULN-008
+    type: path_traversal
+    location: "/ftp/:file"
+    severity: high
+    description: >
+      El endpoint de descarga de archivos del directorio ftp no valida
+      correctamente secuencias ../, permitiendo salir del directorio previsto.
+
+  - id: VULN-009
+    type: broken_access_control
+    location: "/rest/products/reviews"
+    severity: medium
+    description: >
+      Edición de reseñas de otro usuario (PATCH) sin validar propiedad del
+      recurso — variante de IDOR sobre reseñas en vez de la cesta.
+
+  - id: VULN-010
+    type: broken_authentication
+    location: "/rest/user/reset-password"
+    severity: medium
+    description: >
+      Flujo de recuperación de contraseña basado en preguntas de seguridad
+      predecibles/buscables, permite tomar cuentas ajenas sin la contraseña.
+
+  - id: VULN-011
+    type: sensitive_data_exposure
+    location: "/rest/user/login"
+    severity: medium
+    description: >
+      Ausencia de rate limiting en login permite fuerza bruta/credential
+      stuffing sin bloqueo ni captcha.

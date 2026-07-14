@@ -1,0 +1,12 @@
+# Dependencias Python de tools/ — instaladas y verificadas en esta máquina
+# salvo que se indique lo contrario. Instalar con:
+#   pip install -r tools/requirements.txt
+
+dnstwist>=20250130       # Agente Anti-Suplantación (núcleo) — instalado OK
+sherlock-project>=0.16.0 # Agente Anti-Suplantación (redes sociales) — instalado OK
+semgrep>=1.169.0         # Agente de Escaneo (SAST) — instalado OK
+requests>=2.31           # cliente HTTP: OSV.dev API, Google Safe Browsing API
+
+# Opcionales, no instalados en esta pasada (activar si se usa ese módulo):
+# certstream                # requerido por phishing_catcher (x0rz/phishing_catcher)
+# tqdm                      # requerido por phishing_catcher
