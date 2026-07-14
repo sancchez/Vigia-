@@ -1,0 +1,28 @@
+[project]
+name = "ciberseguridad-ia"
+version = "0.0.1"
+description = "Plataforma de agentes de IA para attack surface management y anti-suplantacion de marca, dirigida a pymes colombianas."
+requires-python = ">=3.12"
+readme = "README.md"
+dependencies = [
+    "langgraph>=0.3",
+    "langchain-anthropic",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*", "agents*", "tools*", "eval*"]
