@@ -1,0 +1,4 @@
+{
+  "_comment": "Hallazgos reales de la primera corrida end-to-end del pipeline (Fase 1 MVP) contra OWASP Juice Shop, 2026-07-15. 0 hallazgos: en este entorno solo Nuclei quedo disponible como escaner activo (ZAP requiere Docker, no instalado), y las plantillas genericas de Nuclei (CVEs/misconfiguraciones conocidas) no cubren las vulnerabilidades de logica de negocio a medida de Juice Shop (SQLi, XSS, broken access control, JWT) que si estan en eval/ground_truth.yaml. Ver eval/live_run_report.md.",
+  "findings": []
+}
