@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 
 from orchestrator.state import PipelineState, make_trace_event
-from tools._shared import ToolNotInstalledError
+from tools._shared import ToolExecutionError
 from tools.antisuplantacion import run_dnstwist, run_sherlock
 
 from ._llm import LLMNoDisponibleError, call_claude
@@ -54,7 +54,7 @@ def node(state: PipelineState) -> dict:
                     "registrado": variante.registered,
                 }
             )
-    except ToolNotInstalledError as exc:
+    except ToolExecutionError as exc:
         errores.append(f"dnstwist: {exc}")
 
     username = _username_desde_target(target)
@@ -62,7 +62,7 @@ def node(state: PipelineState) -> dict:
         sherlock_result = run_sherlock(username)
         for url in sherlock_result.findings:
             señales.append({"tipo": "perfil_red_social", "username": username, "url": url})
-    except ToolNotInstalledError as exc:
+    except ToolExecutionError as exc:
         errores.append(f"sherlock: {exc}")
 
     if not señales:

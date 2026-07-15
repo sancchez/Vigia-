@@ -26,7 +26,19 @@ TOOLS_DIR = Path(__file__).resolve().parent
 VENDOR_DIR = TOOLS_DIR / "vendor"
 
 
-class ToolNotInstalledError(RuntimeError):
+class ToolExecutionError(RuntimeError):
+    """Base para fallos esperables al ejecutar una herramienta externa.
+
+    Los agentes (`agents/*.py`) atrapan esta clase base — no cada subtipo
+    por separado — para que cualquier forma nueva de fallo "normal" (no
+    instalada, timeout, lo que venga después) degrade con gracia al log
+    de trazabilidad en vez de tumbar el request con un 500. Un fallo que
+    NO hereda de esta clase (ej. un bug real de programación) sí debe
+    propagarse y romper el pipeline — eso es intencional.
+    """
+
+
+class ToolNotInstalledError(ToolExecutionError):
     """Se lanza cuando una herramienta subyacente no está disponible.
 
     Nunca se lanza al importar un módulo de wrappers — solo cuando el
@@ -39,6 +51,25 @@ class ToolNotInstalledError(RuntimeError):
         super().__init__(
             f"'{tool}' no está instalado o no se encontró en PATH. "
             f"Para instalarlo: {install_hint}"
+        )
+
+
+class ToolTimeoutError(ToolExecutionError):
+    """Se lanza cuando el proceso de la herramienta excede su timeout.
+
+    Un escaneo real contra un objetivo con muchos activos puede tardar
+    más que el timeout por defecto (ej. Nuclei sin plantillas acotadas).
+    Esto es esperable, no un bug — el pipeline debe seguir con lo que sí
+    alcanzó a correr en vez de crashear la petición completa.
+    """
+
+    def __init__(self, tool: str, timeout: int, cmd: Sequence[str]):
+        self.tool = tool
+        self.timeout = timeout
+        super().__init__(
+            f"'{tool}' no terminó dentro del límite de {timeout}s y fue "
+            f"interrumpido. Comando: {' '.join(cmd)}. Considera acotar el "
+            f"alcance (plantillas, severidad) o subir el timeout."
         )
 
 
@@ -104,6 +135,8 @@ def run_command(
         )
     except FileNotFoundError as exc:
         raise ToolNotInstalledError(tool, f"binario no encontrado: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ToolTimeoutError(tool, timeout, list(cmd)) from exc
     return ToolResult(
         tool=tool,
         command=list(cmd),

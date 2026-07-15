@@ -20,7 +20,7 @@ import json
 import re
 
 from orchestrator.state import PipelineState, make_trace_event
-from tools._shared import ToolNotInstalledError
+from tools._shared import ToolExecutionError
 from tools.exploit_intel import find_exploits_for_cve
 
 SYSTEM_PROMPT = (
@@ -66,7 +66,7 @@ def _verificar_un_hallazgo(hallazgo: dict) -> dict:
     for cve in cves:
         try:
             registros = find_exploits_for_cve(cve)
-        except ToolNotInstalledError as exc:
+        except ToolExecutionError as exc:
             error_herramienta = str(exc)
             break
         if registros:

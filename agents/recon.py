@@ -11,7 +11,7 @@ sobre esta salida (Priorización, Reportería).
 from __future__ import annotations
 
 from orchestrator.state import PipelineState, make_trace_event
-from tools._shared import ToolNotInstalledError
+from tools._shared import ToolExecutionError
 from tools.recon import run_amass_passive, run_subfinder
 
 SYSTEM_PROMPT = (
@@ -35,14 +35,14 @@ def node(state: PipelineState) -> dict:
         subfinder_result = run_subfinder(target)
         for sub in subfinder_result.subdomains:
             findings.append({"subdominio": sub, "fuente": "subfinder"})
-    except ToolNotInstalledError as exc:
+    except ToolExecutionError as exc:
         errores.append(f"subfinder: {exc}")
 
     try:
         amass_result = run_amass_passive(target)
         for sub in amass_result.subdomains:
             findings.append({"subdominio": sub, "fuente": "amass-passive"})
-    except ToolNotInstalledError as exc:
+    except ToolExecutionError as exc:
         errores.append(f"amass: {exc}")
 
     resultado = f"{len(findings)} subdominios encontrados"

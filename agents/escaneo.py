@@ -13,7 +13,7 @@ construido bien.
 from __future__ import annotations
 
 from orchestrator.state import PipelineState, make_trace_event
-from tools._shared import ToolNotInstalledError
+from tools._shared import ToolExecutionError
 from tools.scan import run_nuclei
 
 SYSTEM_PROMPT = (
@@ -56,7 +56,7 @@ def node(state: PipelineState) -> dict:
             resultado_nuclei = run_nuclei(objetivo, severity="critical,high,medium")
             for hallazgo in resultado_nuclei.findings:
                 findings.append({"objetivo": objetivo, "herramienta": "nuclei", "raw": hallazgo})
-        except ToolNotInstalledError as exc:
+        except ToolExecutionError as exc:
             errores.append(f"nuclei[{objetivo}]: {exc}")
 
     resultado = f"{len(findings)} hallazgos crudos sobre {len(objetivos)} objetivo(s)"
