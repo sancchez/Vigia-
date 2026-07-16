@@ -72,7 +72,7 @@ class PipelineState(TypedDict, total=False):
     """Qué hace la empresa, qué sistemas son críticos (usado por Priorización)."""
 
     antisuplantacion_habilitado: bool
-    """Activa la rama opcional de Anti-Suplantación (sección 4, módulo miempresa)."""
+    """Activa la rama opcional de Anti-Suplantación (sección 4, módulo Anti-Suplantación)."""
 
     # --- Hallazgos crudos ---
     recon_findings: list[dict]

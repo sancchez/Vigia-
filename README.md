@@ -21,7 +21,7 @@ ciberseguridad/
 
 ## Estado actual
 
-**Fase 0 (base legal)** y **Fase 1 (MVP)** completas: pipeline LangGraph de punta a punta (`orchestrator/` + `agents/`), wrappers de herramientas (`tools/`), harness de evaluación contra OWASP Juice Shop (`eval/`), servicio FastAPI (`api/`), y un primer caso de estudio real de anti-suplantación (`docs/caso-miempresa.md`). Ver `plan-proyecto-ciberseguridad.md` para el plan maestro completo (modelo de negocio, arquitectura de agentes, inventario de herramientas, fases 0-5, y estrategia open-core). Solo se prueba contra aplicaciones de laboratorio hasta tener el primer cliente real con autorización firmada.
+**Fase 0 (base legal)** y **Fase 1 (MVP)** completas: pipeline LangGraph de punta a punta (`orchestrator/` + `agents/`), wrappers de herramientas (`tools/`), harness de evaluación contra OWASP Juice Shop (`eval/`), servicio FastAPI (`api/`), y una validación real (anonimizada) del módulo anti-suplantación contra un negocio pyme colombiano. Ver `plan-proyecto-ciberseguridad.md` para el plan maestro completo (modelo de negocio, arquitectura de agentes, inventario de herramientas, fases 0-5, y estrategia open-core). Solo se prueba contra aplicaciones de laboratorio hasta tener el primer cliente real con autorización firmada.
 
 ## Stack
 

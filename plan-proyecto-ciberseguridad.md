@@ -11,7 +11,7 @@ Regla de oro operativa: **nunca se escanea ni se prueba nada que el dueño no ha
 - Colombia registró 218.031 reclamaciones por fraude solo en el primer semestre de este año, y la SIC ya encendió alarmas por el crecimiento de la suplantación de identidad.
 - Acaba de entrar en vigencia la **Ley 2573 de 2026**, que obliga a las empresas a reforzar sus controles de validación digital y pone la carga de la prueba sobre quien tenga mejores condiciones de demostrar el fraude. La mayoría de pymes no tiene ni idea de cómo cumplir esto todavía — ventana de oportunidad real y con urgencia legal, no inventada.
 - El mercado internacional de esto (attack surface management / brand protection) ya es grande y probado: empresas como BrandShield, Bolster AI, PhishFort, Detectify, Intruder.io, Astra Security facturan entre $5.000 y $50.000+ USD/año por cliente. Para pyme colombiana el ticket baja mucho, pero el modelo de negocio (suscripción, no proyecto único) ya está validado afuera.
-- Ya tienes un caso de uso real identificado: miempresa (el concesionario de la moto) tuvo su WhatsApp hackeado y sufre suplantadores usando su nombre — es un ejemplo real y actual de la clase de problema que este proyecto resuelve.
+- Ya tienes un caso de uso real identificado (anonimizado en este documento): un concesionario de motos colombiano tuvo su WhatsApp hackeado y sufre suplantadores usando su nombre — es un ejemplo real y actual de la clase de problema que este proyecto resuelve. Es solo el caso semilla que motivó el proyecto, no un cliente ni un dato para publicar.
 
 ## 2. Qué es realmente el producto
 
@@ -50,7 +50,7 @@ Verifiqué que todo esto existe hoy, es de código abierto, y se puede envolver 
 | **PentAGI** | proyecto open source | Coordina múltiples agentes de IA especializados (investigación, código, infraestructura) para pruebas de seguridad — el mismo concepto que estás construyendo, ya existe como referencia. | Referencia de arquitectura completa |
 | **XBOW** | comercial (no open source) | La referencia número uno del sector — separa la verificación determinista de exploits del razonamiento de la IA, solo reporta hallazgos confirmados con pasos de reproducción. No lo usas directo, pero copias su principio de diseño. | Principio para tu Agente de Verificación |
 
-### 3.2 Frente anti-suplantación / phishing / identidad (el módulo miempresa)
+### 3.2 Frente anti-suplantación / phishing / identidad
 
 | Herramienta | Repositorio | Qué hace | Capa del pipeline |
 |---|---|---|---|
@@ -58,7 +58,7 @@ Verifiqué que todo esto existe hoy, es de código abierto, y se puede envolver 
 | **mcp-dnstwist** | `BurtTheCoder/mcp-dnstwist` | Ya existe un servidor MCP que envuelve dnstwist — se puede conectar directo a un agente sin escribir el wrapper tú mismo. | Integración directa con tu Orquestador |
 | **CertStream + phishing_catcher** | `x0rz/phishing_catcher` | Escucha en tiempo real los logs de Certificate Transparency (todo certificado SSL emitido en el mundo) y marca dominios sospechosos apenas se registran — antes de que el sitio de phishing esté siquiera activo. | Agente Anti-Suplantación (monitoreo continuo) |
 | **certthreat** | `PAST2212/certthreat` | Variante enfocada específicamente en monitorear nombres de marca y dominios de correo para detectar suplantación — más cercano a tu caso de uso que el genérico. | Agente Anti-Suplantación |
-| **Sherlock** | `sherlock-project/sherlock` | Busca un nombre de usuario/marca en +400 redes sociales y plataformas — sirve para detectar perfiles falsos que se hacen pasar por el negocio (justo el problema de miempresa con WhatsApp/Instagram). | Agente Anti-Suplantación (redes sociales) |
+| **Sherlock** | `sherlock-project/sherlock` | Busca un nombre de usuario/marca en +400 redes sociales y plataformas — sirve para detectar perfiles falsos que se hacen pasar por el negocio (justo el problema del caso semilla del proyecto con WhatsApp/Instagram). | Agente Anti-Suplantación (redes sociales) |
 | **Google Safe Browsing API** | API gratuita de Google | Verifica si una URL ya está marcada como maliciosa/phishing en la base de datos global de Google. | Agente de Verificación (anti-suplantación) |
 
 Con esta lista, tu trabajo real es: conectar estas piezas con LangGraph, decidir qué hace cada agente con la salida de cada herramienta, y poner a Claude a interpretar/priorizar/redactar encima. No hay que escribir un escáner ni un motor de permutación de dominios desde cero — ya existen, son gratis, y son los que usa la industria entera.
@@ -120,7 +120,7 @@ Con esta lista, tu trabajo real es: conectar estas piezas con LangGraph, decidir
 
 **Fase 2 — Multi-agente real (4-6 semanas).** Se arma el flujo completo en LangGraph: recon → escaneo → verificación → priorización → remediación → reporte.
 
-**Fase 3 — Módulo anti-suplantación.** Se integra dnstwist + CertStream + Sherlock como agente opcional, usando el caso miempresa como validación real.
+**Fase 3 — Módulo anti-suplantación.** Se integra dnstwist + CertStream + Sherlock como agente opcional, usando el caso semilla (anonimizado) como validación real.
 
 **Fase 4 — Productización.** Dashboard web simple, programación de escaneos recurrentes, portal de cliente, niveles de precio.
 
@@ -255,7 +255,7 @@ Este ciclo (evaluar → medir → versionar → probar regresión → desplegar 
 1. Redactar la plantilla de autorización de pruebas (Fase 0).
 2. Montar el MVP (Fase 1) contra OWASP Juice Shop como demo, con el set de evaluación de la sección 8.2 desde el primer día.
 3. Subir el motor base a GitHub como proyecto open source — esto ya es currículum aunque no tengas ni un cliente todavía.
-4. Usar la demo funcionando para ofrecerle un diagnóstico gratuito a un negocio real (miempresa es candidato natural) y de ahí escalar a clientes de pago.
+4. Usar la demo funcionando para ofrecerle un diagnóstico gratuito a un negocio real (el caso semilla es candidato natural, con su consentimiento explícito) y de ahí escalar a clientes de pago.
 
 ---
 

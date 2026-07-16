@@ -32,7 +32,7 @@ No se encontró ningún competidor colombiano o latinoamericano que combine ASM 
 - **T.I. Rescue, Cyberseguro, Background Colombia** y otras firmas locales: servicios tradicionales de consultoría/pentesting manual o protección de marca vía investigación privada (no producto de software recurrente ni IA).
 - **GatekeeperX** (startup colombiana, fraude/AML, no ciberseguridad técnica): ataca el problema de fraude financiero/lavado con IA, adyacente pero no competidor directo — confirma que sí hay apetito de inversión en Colombia para "IA + fraude/seguridad", pero en el segmento financiero, no en ASM de pyme.
 
-**Conclusión de la sección:** el hueco es real. Nadie en Colombia vende "vigilancia de superficie de ataque + anti-suplantación de marca" como producto de suscripción barato y self-service para pyme. Los jugadores locales son firmas de servicios/consultoría con ticket alto (orientadas a mediana-grande empresa que necesita certificación), no SaaS de bajo costo para el segmento que describe el caso miempresa.
+**Conclusión de la sección:** el hueco es real. Nadie en Colombia vende "vigilancia de superficie de ataque + anti-suplantación de marca" como producto de suscripción barato y self-service para pyme. Los jugadores locales son firmas de servicios/consultoría con ticket alto (orientadas a mediana-grande empresa que necesita certificación), no SaaS de bajo costo para el segmento pyme que motivó este proyecto.
 
 ## 3. Contexto regulatorio — Ley 2573 de 2026
 

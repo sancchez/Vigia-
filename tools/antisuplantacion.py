@@ -1,4 +1,4 @@
-"""Agente Anti-Suplantación — sección 3.2 del plan (módulo caso miempresa).
+"""Agente Anti-Suplantación — sección 3.2 del plan (caso de validación anonimizado).
 
 Envuelve dnstwist, Sherlock, y documenta certthreat / phishing_catcher
 (CertStream) y Google Safe Browsing. Capa del pipeline: "Agente
@@ -36,7 +36,7 @@ def run_dnstwist(domain: str, registered_only: bool = True, timeout: int = 300) 
 
     Repo: elceef/dnstwist. Capa: Agente Anti-Suplantación, núcleo (sección
     3.2). Detecta variaciones del dominio del cliente que ya están
-    registradas y activas — el caso central del módulo miempresa.
+    registradas y activas — el caso central de validación de este módulo.
 
     Nota: existe también `mcp-dnstwist` (BurtTheCoder/mcp-dnstwist), un
     servidor MCP que envuelve dnstwist y se puede conectar directo al
@@ -83,7 +83,7 @@ def run_sherlock(username: str, timeout: int = 180) -> AntiSuplantacionResult:
 
     Repo: sherlock-project/sherlock. Capa: Agente Anti-Suplantación, redes
     sociales (sección 3.2). Sirve para detectar perfiles falsos que se
-    hacen pasar por el negocio (caso miempresa: suplantación en
+    hacen pasar por el negocio (caso de validación: suplantación en
     WhatsApp/Instagram).
 
     Instalación si falta:
@@ -112,7 +112,7 @@ def check_certthreat(domain: str) -> AntiSuplantacionResult:
 
     Repo: PAST2212/certthreat. Capa: Agente Anti-Suplantación (sección
     3.2) — variante enfocada en monitorear nombres de marca y dominios de
-    correo, más cercana al caso de uso miempresa que el genérico
+    correo, más cercana a un caso de negocio real que al genérico
     phishing_catcher.
 
     Esta herramienta no es un paquete pip/go instalable de un comando —
