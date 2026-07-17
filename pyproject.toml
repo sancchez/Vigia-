@@ -11,6 +11,8 @@ dependencies = [
     "uvicorn[standard]",
     "pydantic>=2",
     "python-dotenv",
+    "bcrypt",
+    "pyjwt",
 ]
 
 [project.optional-dependencies]
