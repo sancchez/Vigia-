@@ -34,6 +34,7 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from auth.jwt_auth import (
@@ -95,6 +96,16 @@ app = FastAPI(
     ),
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    # Dev: el frontend (Vite) corre en otro puerto. Restringir a orígenes
+    # reales (dominio del panel en producción) antes de desplegar.
+    allow_origins=os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -204,6 +215,16 @@ class ScanHistoryItem(BaseModel):
     total_hallazgos: int
     created_at: str
     completed_at: Optional[str] = None
+
+
+class FindingOut(BaseModel):
+    id: str
+    scan_id: str
+    tipo: str
+    severidad: str
+    endpoint: str
+    confirmado: bool
+    created_at: str
 
 
 def _slugify(nombre: str) -> str:
@@ -359,6 +380,30 @@ def listar_scans(user: UserContext = Depends(get_current_user)) -> list[ScanHist
             total_hallazgos=r["total_hallazgos"],
             created_at=r["created_at"],
             completed_at=r["completed_at"],
+        )
+        for r in rows
+    ]
+
+
+@app.get("/findings", response_model=list[FindingOut])
+def listar_findings(user: UserContext = Depends(get_current_user)) -> list[FindingOut]:
+    """Todos los hallazgos del tenant, más recientes primero — usado por el panel para el resumen de riesgo."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM findings WHERE tenant_id = ? ORDER BY created_at DESC", (user.tenant_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        FindingOut(
+            id=r["id"],
+            scan_id=r["scan_id"],
+            tipo=r["tipo"],
+            severidad=r["severidad"],
+            endpoint=r["endpoint"],
+            confirmado=bool(r["confirmado"]),
+            created_at=r["created_at"],
         )
         for r in rows
     ]

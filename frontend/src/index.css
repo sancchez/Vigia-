@@ -1,0 +1,145 @@
+:root {
+  --c-ink: #10161c;
+  --c-fog: #edf0ee;
+  --c-deep: #1c3d4e;
+  --c-signal: #d99a34;
+  --c-verified: #4c7a63;
+  --c-alert: #a8453d;
+
+  --bg: var(--c-fog);
+  --bg-raised: #ffffff;
+  --bg-sunken: #e3e8e5;
+  --text-primary: var(--c-ink);
+  --text-secondary: #47535c;
+  --text-muted: #7c8890;
+  --border: rgba(16, 22, 28, 0.14);
+  --border-strong: rgba(16, 22, 28, 0.26);
+  --accent: #9c6a1b;
+  --accent-bg: #f7ecd8;
+  --accent-ink: #4a3009;
+  --deep-bg: var(--c-deep);
+  --deep-text: #f2f7f8;
+  --verified: #3b6350;
+  --verified-bg: #e5efe9;
+  --alert: #8c362f;
+  --alert-bg: #f7e6e4;
+
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  line-height: 1.6;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  margin: 0;
+  text-wrap: balance;
+}
+
+button {
+  font-family: var(--font-body);
+  font-size: 14.5px;
+  font-weight: 500;
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(0.97);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #141005;
+  border-color: transparent;
+}
+
+input,
+select {
+  font-family: var(--font-body);
+  font-size: 14.5px;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  border: 0.5px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+input:focus,
+select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 99px;
+  white-space: nowrap;
+  display: inline-block;
+}
+.chip.critical,
+.chip.critico {
+  background: var(--alert-bg);
+  color: var(--alert);
+}
+.chip.high,
+.chip.alto,
+.chip.medium,
+.chip.medio {
+  background: var(--accent-bg);
+  color: var(--accent-ink);
+}
+.chip.low,
+.chip.bajo,
+.chip.info {
+  background: var(--bg-sunken);
+  color: var(--text-secondary);
+}
+.chip.ok,
+.chip.verificado,
+.chip.completado {
+  background: var(--verified-bg);
+  color: var(--verified);
+}
+
+.card {
+  background: var(--bg-raised);
+  border: 0.5px solid var(--border);
+  border-radius: 12px;
+  padding: 1.1rem 1.25rem;
+}
