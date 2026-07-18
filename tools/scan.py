@@ -157,6 +157,7 @@ def run_zap_active_scan(
     target_url: str,
     minutes: int = 20,
     bearer_token: str | None = None,
+    ajax_spider: bool = True,
     timeout: int | None = None,
 ) -> ScanResult:
     """Escaneo ACTIVO de ZAP (`zap-full-scan.py`) — sí ataca parámetros (SQLi, XSS, etc.).
@@ -177,6 +178,13 @@ def run_zap_active_scan(
             autenticadas sin necesitar un script de login dentro de ZAP.
             Conseguir el token es responsabilidad del llamador (ej. un
             login previo contra el mismo target).
+        ajax_spider: usa el spider basado en navegador real (`-j`) además
+            del spider tradicional. El spider clásico solo sigue enlaces
+            `<a href>` en el HTML estático — en una SPA (Angular, React,
+            Vue) casi toda la navegación real pasa por JavaScript y nunca
+            aparece ahí, así que sin esto ZAP nunca descubre las rutas de
+            API que sí importan. Cuesta más tiempo de arranque (levanta un
+            navegador headless dentro del contenedor).
         timeout: límite del subprocess en segundos. Por defecto,
             `minutes * 60` más 5 minutos de margen para spidering/arranque.
 
@@ -184,6 +192,8 @@ def run_zap_active_scan(
         ToolNotInstalledError: si `docker` no está en PATH.
     """
     extra_args = ["-m", str(minutes)]
+    if ajax_spider:
+        extra_args += ["-j"]
     if bearer_token:
         replacer = (
             "-config replacer.full_list(0).description=vigia-auth "
