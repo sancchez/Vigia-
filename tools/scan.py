@@ -204,7 +204,12 @@ def run_zap_active_scan(
             f"-config replacer.full_list(0).replacement=Bearer%20{bearer_token}"
         )
         extra_args += ["-z", replacer]
-    effective_timeout = timeout if timeout is not None else (minutes * 60 + 300)
+    # El AJAX Spider levanta un navegador headless dentro del contenedor —
+    # overhead real de arranque/renderizado que el -m de ZAP no cubre del
+    # todo. Encontrado en una corrida real: con -j, 20 min de presupuesto
+    # más 5 min de margen no alcanzaron y el proceso se cortó a mitad.
+    margen = 900 if ajax_spider else 300
+    effective_timeout = timeout if timeout is not None else (minutes * 60 + margen)
     return _run_zap_script(
         "zap-full-scan.py", target_url, extra_args, "zap-full-scan", effective_timeout
     )
