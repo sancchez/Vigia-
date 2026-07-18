@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -48,6 +49,8 @@ from api.scheduler import start_scheduler, stop_scheduler
 from db.connection import dict_from_row, get_conn
 from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
+from tools._shared import ToolExecutionError
+from tools.scan import run_zap_active_scan
 
 load_dotenv()
 
@@ -503,4 +506,174 @@ def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) ->
         antisuplantacion_findings=estado_final.get("antisuplantacion_findings") or [],
         reporte_final=estado_final.get("reporte_final"),
         trace_log=estado_final.get("trace_log") or [],
+    )
+
+
+class ActiveScanRequest(BaseModel):
+    """Payload de `POST /scan/activo` — escaneo activo ZAP de larga duración, en background.
+
+    Existe separado de `POST /scan` a propósito: un `zap-full-scan` con
+    AJAX Spider puede tardar 30-90 minutos (probado en vivo, ver
+    `eval/live_run_report.md` corrida 4) — bloquear un request HTTP ese
+    tiempo no es viable. Este endpoint arranca el trabajo en un thread y
+    devuelve de inmediato; el estado se consulta con `GET /scans/{id}`.
+    """
+
+    target_url: str = Field(..., description="URL completa, ej. 'http://miempresa.com'")
+    minutes: int = Field(default=20, ge=1, le=180)
+    ajax_spider: bool = Field(default=True)
+    bearer_token: Optional[str] = Field(
+        default=None, description="JWT/token de sesión ya obtenido, si se quiere cubrir rutas autenticadas"
+    )
+    autorizacion_firmada: bool = Field(
+        ...,
+        description=(
+            "A diferencia de POST /scan, aquí SÍ se exige explícitamente en true — "
+            "un escaneo activo de larga duración no debe poder arrancar 'por accidente' "
+            "sin que quien llama confirme la autorización en el mismo request."
+        ),
+    )
+
+
+class ActiveScanAccepted(BaseModel):
+    scan_id: str
+    estado: str = "corriendo"
+
+
+def _correr_escaneo_activo_en_background(
+    scan_id: str, tenant_id: str, payload: ActiveScanRequest
+) -> None:
+    """Ejecuta el escaneo activo en un thread separado y actualiza la fila `scans` al terminar.
+
+    Nunca lanza hacia el llamador (no hay llamador esperando) — cualquier
+    error se captura y se guarda como `estado='error'` con el motivo en
+    `reporte_final`, visible vía GET /scans/{id}.
+    """
+    try:
+        resultado = run_zap_active_scan(
+            payload.target_url,
+            minutes=payload.minutes,
+            bearer_token=payload.bearer_token,
+            ajax_spider=payload.ajax_spider,
+        )
+        estado_final = "completado"
+        reporte = f"Escaneo activo completado — {len(resultado.findings)} hallazgo(s)."
+        hallazgos = resultado.findings
+    except ToolExecutionError as exc:
+        estado_final = "error"
+        reporte = f"Escaneo activo falló: {exc}"
+        hallazgos = []
+    except Exception as exc:  # noqa: BLE001 — este thread es el último punto de captura posible
+        estado_final = "error"
+        reporte = f"Escaneo activo falló con un error inesperado: {exc}"
+        hallazgos = []
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE scans SET estado = ?, reporte_final = ?, completed_at = ? WHERE id = ?",
+            (estado_final, reporte, now, scan_id),
+        )
+        for hallazgo in hallazgos:
+            conn.execute(
+                """
+                INSERT INTO findings (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    scan_id,
+                    tenant_id,
+                    hallazgo.get("name", "desconocido"),
+                    str(hallazgo.get("riskdesc", "info")).split(" ")[0].lower(),
+                    (hallazgo.get("instances") or [{}])[0].get("uri", ""),
+                    json.dumps(hallazgo),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.post("/scan/activo", response_model=ActiveScanAccepted, status_code=202)
+def escaneo_activo_async(
+    payload: ActiveScanRequest, user: UserContext = Depends(get_current_user)
+) -> ActiveScanAccepted:
+    if not payload.autorizacion_firmada:
+        raise HTTPException(
+            status_code=403,
+            detail="Escaneo activo requiere autorizacion_firmada=true explícito en este request.",
+        )
+
+    scan_id = str(uuid.uuid4())
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO scans (id, tenant_id, target, autorizacion_firmada, estado, trace_log_json)
+            VALUES (?, ?, ?, 1, 'corriendo', '[]')
+            """,
+            (scan_id, user.tenant_id, payload.target_url),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    hilo = threading.Thread(
+        target=_correr_escaneo_activo_en_background,
+        args=(scan_id, user.tenant_id, payload),
+        daemon=True,
+    )
+    hilo.start()
+
+    return ActiveScanAccepted(scan_id=scan_id, estado="corriendo")
+
+
+class ScanDetail(BaseModel):
+    id: str
+    target: str
+    estado: str
+    autorizacion_firmada: bool
+    reporte_final: Optional[str] = None
+    created_at: str
+    completed_at: Optional[str] = None
+    findings: list[FindingOut] = Field(default_factory=list)
+
+
+@app.get("/scans/{scan_id}", response_model=ScanDetail)
+def detalle_scan(scan_id: str, user: UserContext = Depends(get_current_user)) -> ScanDetail:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM scans WHERE id = ? AND tenant_id = ?", (scan_id, user.tenant_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Scan no encontrado")
+        hallazgos = conn.execute(
+            "SELECT * FROM findings WHERE scan_id = ? ORDER BY created_at DESC", (scan_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return ScanDetail(
+        id=row["id"],
+        target=row["target"],
+        estado=row["estado"],
+        autorizacion_firmada=bool(row["autorizacion_firmada"]),
+        reporte_final=row["reporte_final"],
+        created_at=row["created_at"],
+        completed_at=row["completed_at"],
+        findings=[
+            FindingOut(
+                id=f["id"],
+                scan_id=f["scan_id"],
+                tipo=f["tipo"],
+                severidad=f["severidad"],
+                endpoint=f["endpoint"],
+                confirmado=bool(f["confirmado"]),
+                created_at=f["created_at"],
+            )
+            for f in hallazgos
+        ],
     )

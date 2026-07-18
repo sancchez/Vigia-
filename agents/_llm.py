@@ -79,12 +79,19 @@ def _call_via_cli(system_prompt: str, user_message: str, model: str) -> str:
         "--allowedTools",
         "",
     ]
+    # Encontrado en una corrida real (agents/reporteria.py, ver
+    # eval/live_run_report.md): 180s fijo a veces se queda corto — la
+    # latencia de `claude -p` varía con la carga del sistema, no es
+    # constante. Configurable en vez de subir un número a ciegas otra vez.
+    cli_timeout = int(os.environ.get("VIGIA_CLAUDE_CLI_TIMEOUT", "300"))
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout)
     except FileNotFoundError as exc:
         raise LLMNoDisponibleError(f"No se pudo ejecutar 'claude': {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise LLMNoDisponibleError("La CLI de Claude no respondió a tiempo (180s).") from exc
+        raise LLMNoDisponibleError(
+            f"La CLI de Claude no respondió a tiempo ({cli_timeout}s)."
+        ) from exc
     if result.returncode != 0:
         raise LLMNoDisponibleError(
             f"La CLI de Claude devolvió un error (código {result.returncode}): "
