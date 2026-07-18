@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv",
     "bcrypt",
     "pyjwt",
+    "apscheduler",
 ]
 
 [project.optional-dependencies]

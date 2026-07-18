@@ -44,6 +44,7 @@ from auth.jwt_auth import (
     get_password_hash,
     verify_password,
 )
+from api.scheduler import start_scheduler, stop_scheduler
 from db.connection import dict_from_row, get_conn
 from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
@@ -83,7 +84,9 @@ async def lifespan(app: FastAPI):
     # Compila el grafo al arrancar (falla rápido si algo del ensamblaje del
     # StateGraph está roto, en vez de fallar en el primer /scan).
     _get_graph()
+    start_scheduler()
     yield
+    stop_scheduler()
 
 
 app = FastAPI(
