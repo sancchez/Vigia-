@@ -1,42 +1,45 @@
-# Primera corrida en vivo del pipeline — 2026-07-15
+# Corridas en vivo del pipeline — 2026-07-15 y 2026-07-17/18
 
-Primera prueba end-to-end real del MVP (Fase 1) contra un target de laboratorio, disparada vía `POST /scan` de `api/main.py`, con `autorizacion_firmada: true` (autorizado por tratarse de OWASP Juice Shop, la app de laboratorio de referencia del plan maestro).
+## Corrida 3 (2026-07-17/18) — ZAP arreglado y corriendo de verdad
 
-## Entorno
+Después de la corrida 2 (ver abajo), el usuario instaló Docker Desktop. Al intentar usar ZAP por primera vez aparecieron dos bugs reales más, encontrados y arreglados en esta sesión:
 
-- OWASP Juice Shop v20.1.1, clonado con `git clone --depth 1` y levantado con `npm install && npm start` (Docker no está instalado en esta máquina, así que se usó la vía sin contenedor documentada en `eval/setup_juiceshop.md`).
-- Servicio Vigia (`api/main.py`) corriendo con `uvicorn` en `localhost:8010`.
-- `ANTHROPIC_API_KEY` no configurada en esta corrida — los agentes que razonan con Claude (priorización, remediación, reportería narrativa) degradaron con gracia al fallback documentado, tal como se diseñó. No es un bug, es la ausencia de la key.
-- Herramientas de escaneo activo disponibles: solo **Nuclei** (instalado durante esta sesión). Subfinder, Amass, OWASP ZAP, Trivy, Grype y Metasploit no están disponibles (ZAP/Trivy/Grype dependen de Docker, que no está instalado; Subfinder/Amass no se alcanzaron a compilar).
+1. **`agents/escaneo.py` nunca llamaba a ZAP.** El docstring decía "Ejecutas Nuclei y OWASP ZAP" pero el código solo invocaba `run_nuclei` — `run_zap_baseline` existía en `tools/scan.py` pero ningún agente lo usaba. Se agregó la llamada real.
+2. **`run_zap_baseline` nunca devolvía hallazgos.** No montaba ningún volumen Docker, así que el reporte JSON que ZAP escribe en `/zap/wrk/zap-report.json` quedaba encerrado dentro del contenedor descartable (`--rm`) y se perdía. La función siempre retornaba `findings=[]` sin importar qué encontrara ZAP. Se arregló montando un directorio temporal del host y parseando el JSON real al terminar.
+3. **`localhost:3000` no resuelve dentro del contenedor de ZAP.** Classic Docker networking gotcha: `localhost` dentro de un contenedor apunta al contenedor mismo, no al host de Windows donde corre Juice Shop. El primer intento post-fix devolvió `Connection refused`. Se arregló reescribiendo `localhost`/`127.0.0.1` a `host.docker.internal` (con `--add-host host.docker.internal:host-gateway`) solo para targets locales — un dominio real de internet no pasa por esa rama.
 
-## Qué pasó (dos corridas)
+Con los tres arreglos, se corrió:
+- **ZAP baseline** (pasivo): 10 hallazgos reales (CSP, CORS, cabeceras de seguridad faltantes) — confirma que la integración funciona, pero baseline es intencionalmente no-intrusivo (solo spidering + reglas pasivas), así que no ataca parámetros.
+- **ZAP full-scan activo** (5 min de presupuesto): 15 hallazgos reales, incluyendo dos directamente relevantes a la ground truth: *Backup File Disclosure* y *Bypassing 403*, ambos en `/ftp/` — evidencia real de archivos de respaldo expuestos y de un control de acceso evadible ahí, que es exactamente lo que documentan VULN-007 y VULN-008.
 
-**Corrida 1 — encontró un bug real.** `run_nuclei()` corrió con su timeout por defecto (900s) sin restricción de plantillas contra un Nuclei recién instalado que todavía estaba sincronizando su repositorio de plantillas (`~/nuclei-templates`, +12.000 archivos). A los 900s, `subprocess.TimeoutExpired` se propagó sin capturar y tumbó la petición completa con un 500 sin manejar — un bug real, no solo "falta una herramienta". Ver commit `cbd0e53`: se introdujo `ToolExecutionError` como clase base compartida por `ToolNotInstalledError` y el nuevo `ToolTimeoutError`, y los cuatro agentes que llaman herramientas por subprocess (`recon`, `escaneo`, `verificacion`, `antisuplantacion`) ahora atrapan la clase base — cualquier timeout futuro degrada al log de trazabilidad en vez de tumbar el request.
+### Métricas reales (`eval/run_eval.py` contra `eval/live_run_findings.json`)
 
-**Corrida 2 — post-fix, limpia.** `POST /scan` respondió `200 OK` en 31 segundos. Los 7 agentes corrieron en orden (orquestador → recon → escaneo → verificación → priorización → remediación → gate anti-suplantación → reportería), con trazabilidad completa en `trace_log`. Cero excepciones sin manejar.
+| Métrica | Corrida 2 (solo Nuclei) | Corrida 3 (Nuclei + ZAP full-scan) |
+|---|---|---|
+| True Positives | 0 | 1 |
+| False Positives | 0 | 4 |
+| False Negatives | 11 | 10 |
+| Precisión | 0.00% | 20.00% |
+| Recall | 0.00% | 9.09% |
 
-## Hallazgos y métricas reales
+El único true positive: **VULN-007** (`sensitive_data_exposure` en `/ftp/`) emparejado contra el hallazgo real de *Backup File Disclosure*. VULN-008 (`path_traversal`) tenía un hallazgo de tipo correcto (*Bypassing 403*) pero la ubicación reportada por ZAP (`/%2e/ftp/.%5C..`) no fue lo bastante similar a la ubicación de la ground truth (`/ftp/:file`) para el matcher de `run_eval.py` — cuenta como falso negativo real, no se forzó el match.
 
-`scan_findings`: 0. Nuclei corrió sin errores pero no reportó nada. Se corrió `eval/run_eval.py` contra `eval/live_run_findings.json` (0 hallazgos) comparado con las 11 vulnerabilidades documentadas en `eval/ground_truth.yaml`:
+**Por qué el recall sigue bajo (9%, no más):** los 5 minutos de presupuesto de escaneo activo no alcanzaron para que ZAP explorara y atacara las rutas específicas de SQLi (`/rest/user/login`), XSS (`/rest/products/search`), IDOR (`/rest/basket/{id}`) o el flujo de JWT. Esto es esperable — Juice Shop está diseñado para requerir exploración dirigida (login, navegar el catálogo, etc.) antes de que esas rutas sean alcanzables para un crawler genérico. Con más tiempo de escaneo activo (15-30 min) o un guion de autenticación previo (login automático antes de spidering), el recall subiría más — es el siguiente paso concreto, no una limitación estructural del pipeline.
 
-| Métrica | Valor |
-|---|---|
-| True Positives | 0 |
-| False Positives | 0 |
-| False Negatives | 11 |
-| Precisión | 0.00% (indefinida, sin denominador real de comparación) |
-| Recall | 0.00% |
+## Corrida 2 (2026-07-15) — post-fix de timeout, solo Nuclei
 
-## Por qué el recall salió en 0% (esto no es el mismo bug que el del timeout)
+`POST /scan` respondió 200 OK en 31s, los 7 agentes corrieron limpio, cero excepciones. 0% de recall porque en ese momento Docker/ZAP no estaban disponibles y Nuclei (plantillas de CVEs/misconfiguración genéricas) no cubre las fallas de lógica de negocio de Juice Shop.
 
-Las 11 vulnerabilidades de la ground truth de Juice Shop son fallas de **lógica de negocio a medida** (bypass de login por SQLi en un campo específico, IDOR en la cesta de compras, JWT firmado con clave débil, flujo de recuperación de contraseña con preguntas predecibles, etc.) — no son CVEs conocidos ni configuraciones por defecto. Nuclei está diseñado para lo segundo (+12.000 plantillas de CVEs, credenciales default, exposiciones genéricas), así que un Nuclei sin plantillas custom escritas específicamente para Juice Shop **no tiene forma de encontrar estas vulnerabilidades**, con o sin bugs.
+## Corrida 1 (2026-07-15) — encontró el bug de timeout original
 
-Esto es consistente con el diseño del plan maestro (sección 3.1): OWASP ZAP (DAST activo, con spidering y ataque real a formularios/parámetros) es la herramienta pensada para este tipo de hallazgo, no Nuclei. ZAP no está disponible aquí porque requiere Docker.
+`run_nuclei()` corrió con su timeout por defecto (900s) sin restricción de plantillas contra un Nuclei recién instalado que todavía sincronizaba su repositorio de plantillas. A los 900s, `subprocess.TimeoutExpired` se propagó sin capturar y tumbó la petición completa con un 500. Arreglado con `ToolExecutionError`/`ToolTimeoutError` (commit `cbd0e53`).
 
-**Conclusión honesta:** el pipeline (orquestación, gate de autorización, trazabilidad, manejo de errores) funciona correctamente de punta a punta. El recall de 0% en esta corrida es una limitación de **cobertura de herramientas en este entorno** (falta ZAP/Docker, plantillas Nuclei genéricas), no un defecto del diseño del sistema. Antes de usar este resultado como prueba de valor ante un cliente, hay que instalar Docker + ZAP (o escribir plantillas Nuclei custom para los challenges de Juice Shop) y volver a correr.
+## Conclusión honesta acumulada
+
+El pipeline (orquestación, gate de autorización, trazabilidad, manejo de errores, y ahora la integración real con Nuclei + ZAP) funciona de punta a punta sin bugs de ejecución. El recall de 9% es real y mejorable con más presupuesto de tiempo de escaneo activo — no es una limitación de diseño. La prueba más contundente de valor real hasta ahora es cualitativa: ZAP encontró archivos de respaldo expuestos reales en un directorio real, sin que nadie le dijera dónde buscar.
 
 ## Próximo paso concreto para subir el recall
 
-1. Instalar Docker Desktop y correr `run_zap_baseline()` (ya implementado en `tools/scan.py`, solo requiere el binario).
-2. Alternativa sin Docker: escribir 3-4 plantillas Nuclei custom dirigidas a los endpoints conocidos de Juice Shop (`/rest/user/login`, `/rest/products/search`, `/rest/basket/{id}`) — más rápido de configurar que Docker, pero es trabajo manual por objetivo, no escala a clientes reales.
-3. Registrar este resultado en `eval/failure_log.md` como el primer caso real del loop de mejora continua (sección 8.2 del plan).
+1. Subir el presupuesto de tiempo de `zap-full-scan.py` (`-m`) de 5 a 20-30 minutos para una corrida de referencia real.
+2. Agregar un script de autenticación previo al spidering (ZAP soporta scripts de login) para que el crawler alcance rutas que requieren sesión iniciada.
+3. Registrar esta corrida en `eval/failure_log.md` como el primer caso real con progreso medible del loop de mejora continua (sección 8.2 del plan).

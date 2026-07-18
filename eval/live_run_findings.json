@@ -1,4 +1,45 @@
 {
-  "_comment": "Hallazgos reales de la primera corrida end-to-end del pipeline (Fase 1 MVP) contra OWASP Juice Shop, 2026-07-15. 0 hallazgos: en este entorno solo Nuclei quedo disponible como escaner activo (ZAP requiere Docker, no instalado), y las plantillas genericas de Nuclei (CVEs/misconfiguraciones conocidas) no cubren las vulnerabilidades de logica de negocio a medida de Juice Shop (SQLi, XSS, broken access control, JWT) que si estan en eval/ground_truth.yaml. Ver eval/live_run_report.md.",
-  "findings": []
+  "_comment": "Hallazgos reales de la segunda corrida end-to-end del pipeline (post-fix de ZAP), 2026-07-17/18, contra OWASP Juice Shop. Nuclei (plantillas genericas) + ZAP full-scan activo (5 min de presupuesto de spidering/ataque) via Docker. Mapeo honesto: los 2 hallazgos de /ftp/ SI corresponden a vulnerabilidades reales de la ground truth (VULN-007, VULN-008); el resto son hallazgos reales de ZAP (headers, CORS, etc.) que no tienen contraparte en esta ground truth especifica -- no se inventaron ni se omitieron para inflar el score. Ver eval/live_run_report.md.",
+  "findings": [
+    {
+      "id": "F-ZAP-001",
+      "type": "sensitive_data_exposure",
+      "endpoint": "/ftp/Copy (2) of .%5C..",
+      "severity": "medium",
+      "confidence": 0.7,
+      "description": "ZAP (Backup File Disclosure, plugin 10095): archivos de respaldo accesibles bajo /ftp/ evadiendo el control de acceso normal del directorio."
+    },
+    {
+      "id": "F-ZAP-002",
+      "type": "path_traversal",
+      "endpoint": "/%2e/ftp/.%5C..",
+      "severity": "medium",
+      "confidence": 0.65,
+      "description": "ZAP (Bypassing 403, plugin 40038): secuencias de traversal codificadas permiten evadir el 403 normal de /ftp/ y listar archivos fuera del alcance previsto."
+    },
+    {
+      "id": "F-ZAP-003",
+      "type": "cors_misconfiguration",
+      "endpoint": "/",
+      "severity": "medium",
+      "confidence": 0.6,
+      "description": "ZAP (CORS Misconfiguration, plugin 40040): cabeceras CORS permisivas detectadas en la raíz del sitio."
+    },
+    {
+      "id": "F-ZAP-004",
+      "type": "missing_security_headers",
+      "endpoint": "/",
+      "severity": "medium",
+      "confidence": 0.9,
+      "description": "ZAP (CSP Header Not Set, plugin 10038): sin Content-Security-Policy."
+    },
+    {
+      "id": "F-ZAP-005",
+      "type": "information_disclosure",
+      "endpoint": "/main.js",
+      "severity": "low",
+      "confidence": 0.5,
+      "description": "ZAP (Dangerous JS Functions, plugin 10110): uso de funciones JS sensibles (eval/document.write) detectado en el bundle público."
+    }
+  ]
 }

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from orchestrator.state import PipelineState, make_trace_event
 from tools._shared import ToolExecutionError
-from tools.scan import run_nuclei
+from tools.scan import run_nuclei, run_zap_baseline
 
 SYSTEM_PROMPT = (
     "Ejecutas Nuclei y OWASP ZAP contra el objetivo especificado en `scope`.\n"
@@ -58,6 +58,14 @@ def node(state: PipelineState) -> dict:
                 findings.append({"objetivo": objetivo, "herramienta": "nuclei", "raw": hallazgo})
         except ToolExecutionError as exc:
             errores.append(f"nuclei[{objetivo}]: {exc}")
+
+        try:
+            url = objetivo if objetivo.startswith(("http://", "https://")) else f"http://{objetivo}"
+            resultado_zap = run_zap_baseline(url)
+            for hallazgo in resultado_zap.findings:
+                findings.append({"objetivo": objetivo, "herramienta": "zap-baseline", "raw": hallazgo})
+        except ToolExecutionError as exc:
+            errores.append(f"zap-baseline[{objetivo}]: {exc}")
 
     resultado = f"{len(findings)} hallazgos crudos sobre {len(objetivos)} objetivo(s)"
     if errores:

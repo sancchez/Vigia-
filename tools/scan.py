@@ -12,7 +12,9 @@ del grafo (sección 8.1 del plan).
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ._shared import ToolNotInstalledError, ToolResult, parse_jsonl, require_binary, run_command
 
@@ -76,34 +78,60 @@ def run_zap_baseline(target_url: str, timeout: int = 900) -> ScanResult:
     Requiere Docker (imagen oficial `ghcr.io/zaproxy/zaproxy:stable`) — no se
     instala aquí automáticamente porque implica bajar una imagen pesada.
 
-    Instalación/uso si Docker está disponible:
-        docker run --rm -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable \\
-            zap-baseline.py -t <target_url> -J zap-report.json
+    Monta un directorio temporal del host en `/zap/wrk/` dentro del
+    contenedor (sin eso el reporte JSON se queda encerrado en el
+    contenedor descartable y nunca llega a `findings`) y parsea
+    `zap-report.json` al volver. `zap-baseline.py` devuelve código 2
+    cuando SÍ encuentra alertas (no es un error de ejecución) — por eso
+    no se valida `returncode == 0` acá, se confía en que el JSON exista.
 
     Raises:
         ToolNotInstalledError: si `docker` no está en PATH. En ese caso,
-            usa el comando documentado arriba manualmente.
+            usa el comando documentado en `tools/README.md` manualmente.
     """
     binary = require_binary(
         "docker",
         "instalar Docker Desktop (https://docs.docker.com/desktop/) y luego: "
         "docker pull ghcr.io/zaproxy/zaproxy:stable",
     )
-    cmd = [
-        binary,
-        "run",
-        "--rm",
-        "-t",
-        "ghcr.io/zaproxy/zaproxy:stable",
-        "zap-baseline.py",
-        "-t",
-        target_url,
-        "-J",
-        "/zap/wrk/zap-report.json",
-    ]
-    result = run_command("zap-baseline", cmd, timeout=timeout)
-    result.parsed = result.stdout
-    return ScanResult(target=target_url, tool="zap-baseline", findings=[], raw=result)
+    # "localhost"/"127.0.0.1" dentro del contenedor de ZAP se refiere al
+    # propio contenedor, no al host — por eso un target de laboratorio
+    # corriendo en la máquina del usuario (Juice Shop, DVWA) necesita
+    # host.docker.internal en vez de localhost. Un dominio real de
+    # internet no pasa por esta rama y sigue igual.
+    zap_target = target_url.replace("localhost", "host.docker.internal").replace(
+        "127.0.0.1", "host.docker.internal"
+    )
+    with tempfile.TemporaryDirectory(prefix="vigia-zap-") as workdir:
+        cmd = [
+            binary,
+            "run",
+            "--rm",
+            "--add-host",
+            "host.docker.internal:host-gateway",
+            "-v",
+            f"{workdir}:/zap/wrk/:rw",
+            "ghcr.io/zaproxy/zaproxy:stable",
+            "zap-baseline.py",
+            "-t",
+            zap_target,
+            "-J",
+            "zap-report.json",
+        ]
+        result = run_command("zap-baseline", cmd, timeout=timeout)
+
+        report_path = Path(workdir) / "zap-report.json"
+        findings: list[dict] = []
+        if report_path.exists():
+            try:
+                data = json.loads(report_path.read_text(encoding="utf-8"))
+                for site in data.get("site", []):
+                    findings.extend(site.get("alerts", []) or [])
+            except json.JSONDecodeError:
+                pass
+        result.parsed = findings
+
+    return ScanResult(target=target_url, tool="zap-baseline", findings=findings, raw=result)
 
 
 def run_trivy_image(image: str, timeout: int = 600) -> ScanResult:
