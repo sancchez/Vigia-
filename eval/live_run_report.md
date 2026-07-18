@@ -1,4 +1,15 @@
-# Corridas en vivo del pipeline — 2026-07-15 y 2026-07-17/18
+# Corridas en vivo del pipeline — 2026-07-15 a 2026-07-18
+
+## Corrida 4 (2026-07-18) — login real + AJAX Spider, límite real encontrado
+
+Con Docker ya funcionando de una sesión anterior, se probaron dos mejoras reales sobre la corrida 3:
+
+1. **Login real antes del escaneo activo.** Se registró un usuario de prueba en Juice Shop (`POST /api/Users`), se inició sesión (`POST /rest/user/login`) para obtener un JWT real, y se agregó `run_zap_active_scan(bearer_token=...)` (`tools/scan.py`) que inyecta `Authorization: Bearer <token>` en cada petición de ZAP vía `-config replacer.*` — sin necesidad de un script de login dentro de ZAP. **Resultado:** exactamente los mismos 15 hallazgos que sin login. El token no cambió nada porque el problema no era la autenticación — era que el crawler nunca llegaba a las rutas donde importaba estar autenticado.
+2. **AJAX Spider (`-j`, navegador headless real) para cubrir la SPA.** Juice Shop es una Single Page Application en Angular: casi toda su navegación pasa por JavaScript/llamadas a API, no por `<a href>` en HTML estático, que es todo lo que el spider clásico de ZAP sabe seguir. Se intentó dos veces, subiendo el margen de timeout cada vez (25 min, luego 35 min) — **ambas veces el proceso excedió el presupuesto sin terminar**. El contenedor seguía vivo y trabajando cuando se cortó (confirmado con `docker ps`), no es que se colgara — el navegador headless dentro del contenedor simplemente necesita más tiempo del que se le dio.
+
+**Conclusión honesta:** cubrir de verdad las rutas de una SPA con ZAP es un problema real de infraestructura/tiempo, no algo que se resuelva con una llamada más. El camino correcto no es seguir subiendo el timeout a ciegas — es correr el AJAX Spider como un job de fondo de larga duración (no bloqueante, con su propio ciclo de vida) y/o investigar por qué el navegador headless tarda tanto en este host específico (Docker Desktop + WSL2 en Windows puede tener overhead adicional de virtualización de GPU/renderizado que no tendría un host Linux nativo). Las métricas de la corrida 3 (9.09% recall) siguen siendo el número real vigente — no se infla ni se repite un "casi funcionó" como si fuera un resultado.
+
+**Efecto secundario útil de esta corrida:** al intentar usar IA real por primera vez en la sesión, se encontró que `ANTHROPIC_API_KEY` nunca estuvo configurada en todo el proyecto — todos los agentes de razonamiento (priorización, remediación, reportería) corrieron siempre en modo de emergencia determinista. Se agregó un fallback en `agents/_llm.py::call_claude()`: si no hay API key pero el binario `claude` (Claude Code CLI) está instalado y con sesión iniciada, se invoca `claude -p` en su lugar — mismo contrato, cero costo adicional, probado funcionando de verdad. Sigue pendiente configurar una API key real para el servicio en producción (el fallback de CLI es para desarrollo/demo, no para multi-tenant real).
 
 ## Corrida 3 (2026-07-17/18) — ZAP arreglado y corriendo de verdad
 
