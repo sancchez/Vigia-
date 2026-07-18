@@ -1,4 +1,33 @@
-# Proyecto Ciberseguridad IA — Plan Maestro
+# Vigia — Plan Maestro
+
+## Estado real de implementación (actualizado 2026-07-18)
+
+Este documento nació como el plan de diseño *antes* de escribir código. Hoy ya hay un producto funcionando de verdad, probado en vivo — esta sección dice honestamente qué está construido y probado, qué está construido pero sin probar a fondo, y qué falta. El resto del documento (secciones 1-9) es el plan original y sigue siendo la referencia de visión/arquitectura; donde el estado real difiere de lo planeado, esta sección manda.
+
+**Funciona y está probado en vivo (no solo escrito):**
+- Pipeline LangGraph completo: orquestador → recon → gate de autorización (determinista) → escaneo → verificación → priorización → remediación → gate anti-suplantación → reportería (`orchestrator/`, `agents/`).
+- Recon pasivo real con Subfinder + Amass (encontraron subdominios reales en pruebas).
+- Escaneo activo real con Nuclei (CVEs/misconfiguraciones) **y OWASP ZAP** (DAST real vía Docker, tanto pasivo/`zap-baseline` como activo/`zap-full-scan` con inyección de token de sesión para cubrir rutas autenticadas — ver `tools/scan.py::run_zap_active_scan`).
+- Manejo de errores real: timeouts de herramientas degradan con gracia (`ToolExecutionError`/`ToolTimeoutError`) en vez de tumbar el pipeline.
+- Harness de evaluación real (`eval/run_eval.py` + `eval/ground_truth.yaml`, 11 vulnerabilidades documentadas de Juice Shop) — mide precisión/recall real, no estimado. Ver `eval/live_run_report.md` para el historial de corridas y números reales (recall subiendo con cada arreglo: 0% → 9% al conectar ZAP de verdad, en progreso hacia más con escaneo activo autenticado y más tiempo).
+- **Backend multi-tenant real**: JWT + bcrypt propio, tablas `tenants`/`users`/`assets`/`scans`/`findings`/`subscriptions` (SQLite hoy, dialecto compatible con Postgres/Supabase). Endpoints reales: registro, login, gestión de dominios, historial de escaneos, hallazgos.
+- **Frontend real** (`frontend/`, React+Vite+TS): login/registro + dashboard con nivel de riesgo, inventario de dominios, actividad de escaneos, estado de bienvenida para cuentas nuevas.
+- Módulo anti-suplantación (`tools/antisuplantacion.py`, dnstwist + Sherlock) validado contra un caso real (anonimizado en este repo, ver sección 1).
+
+**Construido pero sin probar a fondo o sin conectar todavía:**
+- Trivy, Grype, Semgrep, OSV.dev (`tools/scan.py`) — wrappers escritos, nunca corridos contra un objetivo real en esta sesión. Relevantes sobre todo para el frente de dependencias/código fuente, no para escaneo web puro.
+- Exploit-DB / `tools/exploit_intel.py` — usado por el Agente de Verificación, pero su índice offline no se ha auditado por cobertura real.
+- Metasploit, Faraday — mencionados en el inventario (sección 3), cero código escrito todavía.
+- Google Safe Browsing (`tools/antisuplantacion.py::check_safe_browsing`) — requiere API key que no está configurada.
+
+**Falta para ser "un proyecto completo de ciberseguridad" (brechas reales, no aspiracionales):**
+1. **Cumplimiento normativo (Ley 2573/ISO 27001) como producto** — mencionado en el plan (sección 4) y validado como el gancho de venta más fuerte por el research de mercado (`docs/market-research.md`, sección 3), pero no existe ni una línea de código todavía.
+2. **Escaneo recurrente/programado** — hoy cada escaneo es manual (botón "Escanear ahora"). Sin esto no hay "vigilancia continua" real, que es la propuesta de valor central.
+3. **Alertas por WhatsApp/email** cuando aparece un hallazgo crítico o un dominio clon nuevo — cero implementado.
+4. **Pasarela de pagos** (Wompi recomendado) — en pausa a pedido explícito, pendiente de retomar.
+5. **Repo público** con contenido ya anonimizado, pero el historial de git previo a la anonimización sigue expuesto — pendiente que el dueño lo haga privado.
+6. **DVWA/WebGoat como targets de evaluación adicionales** — hoy el harness solo mide contra Juice Shop; un solo target de referencia puede sobreajustar el sistema a sus particularidades.
+7. **Portal de cliente más allá del dashboard actual**: reportes descargables (PDF/DOCX), comparación entre escaneos en el tiempo, invitar más usuarios al tenant (hoy solo hay rol `owner` funcional).
 
 ## 0. Regla no negociable (léela antes que todo lo demás)
 
@@ -114,17 +143,17 @@ Con esta lista, tu trabajo real es: conectar estas piezas con LangGraph, decidir
 
 ## 5. Fases de construcción
 
-**Fase 0 — Base legal.** Redactar la plantilla de autorización de pruebas de seguridad que todo cliente firma antes de que los agentes toquen algo suyo. Sin esto no hay fase 1.
+**Fase 0 — Base legal. ✅ Completa.** Plantilla de autorización de pruebas de seguridad (`legal/`).
 
-**Fase 1 — MVP (2-3 semanas).** Envolver Nuclei + ZAP baseline en un servicio FastAPI simple. Un solo agente dispara el escaneo, Claude arma un reporte básico. Se prueba únicamente contra apps de laboratorio (OWASP Juice Shop, DVWA) — nunca contra terceros todavía.
+**Fase 1 — MVP. ✅ Completa,** y más allá de lo planeado: no quedó en "Nuclei + ZAP baseline envuelto simple" — el pipeline completo de 7 agentes corre de punta a punta, con ZAP activo (no solo baseline) y probado en vivo contra Juice Shop varias veces, con bugs reales encontrados y arreglados en el camino (ver `eval/live_run_report.md`).
 
-**Fase 2 — Multi-agente real (4-6 semanas).** Se arma el flujo completo en LangGraph: recon → escaneo → verificación → priorización → remediación → reporte.
+**Fase 2 — Multi-agente real. ✅ Completa.** Flujo completo en LangGraph: recon → gate autorización → escaneo → verificación → priorización → remediación → gate anti-suplantación → reportería.
 
-**Fase 3 — Módulo anti-suplantación.** Se integra dnstwist + CertStream + Sherlock como agente opcional, usando el caso semilla (anonimizado) como validación real.
+**Fase 3 — Módulo anti-suplantación. ✅ Completa.** dnstwist + Sherlock integrados y validados contra el caso semilla (anonimizado). CertStream/phishing_catcher (monitoreo continuo) sigue pendiente — es una pieza de "Fase 5" en la práctica, no de validación puntual.
 
-**Fase 4 — Productización.** Dashboard web simple, programación de escaneos recurrentes, portal de cliente, niveles de precio.
+**Fase 4 — Productización. 🟡 En progreso, adelantada.** Ya existe backend multi-tenant real (auth, tenants, dominios, historial) y un dashboard funcional (React) — más que el "dashboard web simple" original. Falta: niveles de precio conectados a cobro real (pasarela de pagos, en pausa), reportes descargables, y programación de escaneos recurrentes.
 
-**Fase 5 — Monitoreo continuo / suscripción.** Escaneo periódico automático, alertas por WhatsApp/Slack, informes de cumplimiento normativo recurrentes.
+**Fase 5 — Monitoreo continuo / suscripción. ⬜ No empezada.** Escaneo periódico automático, alertas por WhatsApp/Slack, cumplimiento normativo recurrente, CertStream para detección de dominios clon en tiempo real (no solo bajo demanda como hoy).
 
 ## 6. ¿Debería ser open source, si mi intención es ganar dinero?
 
@@ -250,12 +279,16 @@ Esto es lo que hace que el proyecto tenga bases sólidas para ir mejorando en ve
 
 Este ciclo (evaluar → medir → versionar → probar regresión → desplegar → registrar fallos → volver a evaluar) es lo que separa un prototipo que impresiona una vez de un producto que un cliente puede pagar con confianza mes a mes.
 
-## 9. Próximo paso concreto
+## 9. Próximo paso concreto (actualizado 2026-07-18 — ver también la sección de estado real arriba)
 
-1. Redactar la plantilla de autorización de pruebas (Fase 0).
-2. Montar el MVP (Fase 1) contra OWASP Juice Shop como demo, con el set de evaluación de la sección 8.2 desde el primer día.
-3. Subir el motor base a GitHub como proyecto open source — esto ya es currículum aunque no tengas ni un cliente todavía.
-4. Usar la demo funcionando para ofrecerle un diagnóstico gratuito a un negocio real (el caso semilla es candidato natural, con su consentimiento explícito) y de ahí escalar a clientes de pago.
+Los primeros 3 puntos originales ya están hechos (autorización, MVP contra Juice Shop, repo en GitHub). Lo que sigue, en orden de impacto:
+
+1. Subir el presupuesto de tiempo del escaneo activo de ZAP (`run_zap_active_scan`) y agregar login previo real, para medir cuánto sube el recall sobre las vulnerabilidades que requieren sesión iniciada (SQLi de login, IDOR de cesta, JWT) — en curso.
+2. Mapeo de cumplimiento (Ley 2573/ISO 27001) como producto — es el gancho de venta validado por el research de mercado, y hoy no tiene ni una línea de código.
+3. Escaneo recurrente/programado + alertas — sin esto, "vigilancia continua" es solo un botón manual, no la propuesta de valor real.
+4. Hacer privado el repositorio (pendiente del dueño) y decidir si además se reescribe el historial de git.
+5. Retomar la pasarela de pagos (Wompi) cuando se pida — está en pausa, no bloqueante para lo anterior.
+6. Usar la demo funcionando para ofrecerle un diagnóstico gratuito a un negocio real (el caso semilla es candidato natural, con su consentimiento explícito) y de ahí escalar a clientes de pago.
 
 ---
 

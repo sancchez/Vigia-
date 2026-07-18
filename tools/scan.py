@@ -71,37 +71,41 @@ def run_nuclei(
     return ScanResult(target=target, tool="nuclei", findings=findings, raw=result)
 
 
-def run_zap_baseline(target_url: str, timeout: int = 900) -> ScanResult:
-    """Corre el escaneo dinámico (DAST) OWASP ZAP en modo baseline vía Docker.
+def _rewrite_for_docker(target_url: str) -> str:
+    """"localhost"/"127.0.0.1" dentro de un contenedor Docker se refiere al
+    propio contenedor, no al host — un target de laboratorio corriendo en
+    la máquina del usuario (Juice Shop, DVWA) necesita host.docker.internal.
+    Un dominio real de internet no pasa por esta rama y sigue igual."""
+    return target_url.replace("localhost", "host.docker.internal").replace(
+        "127.0.0.1", "host.docker.internal"
+    )
 
-    Repo: zaproxy/zaproxy. Capa: Agente de Escaneo (sección 3.1). Apache 2.0.
-    Requiere Docker (imagen oficial `ghcr.io/zaproxy/zaproxy:stable`) — no se
-    instala aquí automáticamente porque implica bajar una imagen pesada.
+
+def _run_zap_script(
+    script: str,
+    target_url: str,
+    extra_args: list[str],
+    tool_name: str,
+    timeout: int,
+) -> ScanResult:
+    """Corre un script de ZAP (`zap-baseline.py`, `zap-full-scan.py`, ...) vía Docker.
 
     Monta un directorio temporal del host en `/zap/wrk/` dentro del
     contenedor (sin eso el reporte JSON se queda encerrado en el
-    contenedor descartable y nunca llega a `findings`) y parsea
-    `zap-report.json` al volver. `zap-baseline.py` devuelve código 2
-    cuando SÍ encuentra alertas (no es un error de ejecución) — por eso
-    no se valida `returncode == 0` acá, se confía en que el JSON exista.
+    contenedor descartable y nunca llega a `findings`) y parsea el JSON
+    al volver. Estos scripts devuelven código != 0 cuando SÍ encuentran
+    alertas (no es un error de ejecución) — por eso no se valida
+    `returncode == 0`, se confía en que el JSON exista.
 
     Raises:
-        ToolNotInstalledError: si `docker` no está en PATH. En ese caso,
-            usa el comando documentado en `tools/README.md` manualmente.
+        ToolNotInstalledError: si `docker` no está en PATH.
     """
     binary = require_binary(
         "docker",
         "instalar Docker Desktop (https://docs.docker.com/desktop/) y luego: "
         "docker pull ghcr.io/zaproxy/zaproxy:stable",
     )
-    # "localhost"/"127.0.0.1" dentro del contenedor de ZAP se refiere al
-    # propio contenedor, no al host — por eso un target de laboratorio
-    # corriendo en la máquina del usuario (Juice Shop, DVWA) necesita
-    # host.docker.internal en vez de localhost. Un dominio real de
-    # internet no pasa por esta rama y sigue igual.
-    zap_target = target_url.replace("localhost", "host.docker.internal").replace(
-        "127.0.0.1", "host.docker.internal"
-    )
+    zap_target = _rewrite_for_docker(target_url)
     with tempfile.TemporaryDirectory(prefix="vigia-zap-") as workdir:
         cmd = [
             binary,
@@ -112,13 +116,14 @@ def run_zap_baseline(target_url: str, timeout: int = 900) -> ScanResult:
             "-v",
             f"{workdir}:/zap/wrk/:rw",
             "ghcr.io/zaproxy/zaproxy:stable",
-            "zap-baseline.py",
+            script,
             "-t",
             zap_target,
             "-J",
             "zap-report.json",
+            *extra_args,
         ]
-        result = run_command("zap-baseline", cmd, timeout=timeout)
+        result = run_command(tool_name, cmd, timeout=timeout)
 
         report_path = Path(workdir) / "zap-report.json"
         findings: list[dict] = []
@@ -131,7 +136,68 @@ def run_zap_baseline(target_url: str, timeout: int = 900) -> ScanResult:
                 pass
         result.parsed = findings
 
-    return ScanResult(target=target_url, tool="zap-baseline", findings=findings, raw=result)
+    return ScanResult(target=target_url, tool=tool_name, findings=findings, raw=result)
+
+
+def run_zap_baseline(target_url: str, timeout: int = 900) -> ScanResult:
+    """Corre el escaneo dinámico (DAST) OWASP ZAP en modo baseline (pasivo) vía Docker.
+
+    Repo: zaproxy/zaproxy. Capa: Agente de Escaneo (sección 3.1). Apache 2.0.
+    Solo hace spidering + reglas pasivas — no ataca parámetros, así que es
+    seguro correrlo de forma recurrente/automática contra un cliente real.
+    No encuentra SQLi/XSS/IDOR (para eso ver `run_zap_active_scan`).
+
+    Raises:
+        ToolNotInstalledError: si `docker` no está en PATH.
+    """
+    return _run_zap_script("zap-baseline.py", target_url, [], "zap-baseline", timeout)
+
+
+def run_zap_active_scan(
+    target_url: str,
+    minutes: int = 20,
+    bearer_token: str | None = None,
+    timeout: int | None = None,
+) -> ScanResult:
+    """Escaneo ACTIVO de ZAP (`zap-full-scan.py`) — sí ataca parámetros (SQLi, XSS, etc.).
+
+    A diferencia de `run_zap_baseline`, esto envía payloads de ataque
+    reales contra el objetivo. Solo debe correrse contra targets de
+    laboratorio o con autorización explícita de pruebas activas — nunca
+    como escaneo recurrente por defecto contra un cliente en producción.
+
+    Args:
+        minutes: presupuesto de tiempo para el spider + escaneo activo
+            (flag `-m` de zap-full-scan.py). Rutas que requieren sesión
+            iniciada (login, panel de admin, checkout) solo son
+            alcanzables si el crawler llega a ellas dentro de este tiempo.
+        bearer_token: si se pasa, se inyecta como header
+            `Authorization: Bearer <token>` en TODAS las peticiones de ZAP
+            vía `-config replacer.*` — así el escaneo activo cubre rutas
+            autenticadas sin necesitar un script de login dentro de ZAP.
+            Conseguir el token es responsabilidad del llamador (ej. un
+            login previo contra el mismo target).
+        timeout: límite del subprocess en segundos. Por defecto,
+            `minutes * 60` más 5 minutos de margen para spidering/arranque.
+
+    Raises:
+        ToolNotInstalledError: si `docker` no está en PATH.
+    """
+    extra_args = ["-m", str(minutes)]
+    if bearer_token:
+        replacer = (
+            "-config replacer.full_list(0).description=vigia-auth "
+            "-config replacer.full_list(0).enabled=true "
+            "-config replacer.full_list(0).matchtype=REQ_HEADER "
+            "-config replacer.full_list(0).matchstr=Authorization "
+            "-config replacer.full_list(0).regex=false "
+            f"-config replacer.full_list(0).replacement=Bearer%20{bearer_token}"
+        )
+        extra_args += ["-z", replacer]
+    effective_timeout = timeout if timeout is not None else (minutes * 60 + 300)
+    return _run_zap_script(
+        "zap-full-scan.py", target_url, extra_args, "zap-full-scan", effective_timeout
+    )
 
 
 def run_trivy_image(image: str, timeout: int = 600) -> ScanResult:
