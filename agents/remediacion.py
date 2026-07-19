@@ -13,13 +13,21 @@ from orchestrator.state import PipelineState, make_trace_event
 
 from ._llm import LLMNoDisponibleError, call_claude
 
-SYSTEM_PROMPT = (
-    "Para cada hallazgo priorizado, redactas la corrección específica: qué cambiar,\n"
-    "en qué archivo o configuración, con un ejemplo concreto cuando aplique. Escribes\n"
-    "para alguien que puede no ser técnico — evita jerga sin explicarla la primera vez.\n"
-    "Nunca prometes que el arreglo es 100% infalible; siempre recomienda re-escanear\n"
-    "después de aplicar el cambio."
-)
+# Open-core: el prompt real vive en `vigia_core_private` (ver
+# docs/open-core.md). Fallback genérico si el paquete no está instalado.
+try:
+    from vigia_core_private.remediacion import SYSTEM_PROMPT
+except ImportError:
+    SYSTEM_PROMPT = (
+        "Para cada hallazgo, redacta una recomendación de remediación "
+        "genérica basada en buenas prácticas estándar de seguridad para ese "
+        "tipo de vulnerabilidad. Escribe para alguien que puede no ser "
+        "técnico. Nunca prometas que el arreglo es 100% infalible; siempre "
+        "recomienda re-escanear después de aplicar el cambio. Esta es la "
+        "versión community: no incluye ejemplos de código detallados ni "
+        "adaptación al contexto específico del cliente (esa capa es parte "
+        "del paquete privado de Vigia)."
+    )
 
 AGENTE = "remediacion"
 

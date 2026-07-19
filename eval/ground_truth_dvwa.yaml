@@ -1,0 +1,143 @@
+# Ground truth de vulnerabilidades conocidas — DVWA (Damn Vulnerable Web Application)
+#
+# Segundo target de evaluación independiente de Juice Shop (ver HANDOFF.md,
+# Item 4). El objetivo es medir precisión/recall del pipeline de Vigia contra
+# una aplicación de laboratorio distinta, con una superficie de vulnerabilidad
+# diferente (PHP/MySQL clásico, sin SPA/JWT), para detectar sobreajuste a las
+# particularidades de Juice Shop.
+#
+# Instancia usada para esta corrida: imagen Docker `vulnerables/web-dvwa`
+# (DVWA v1.10 *Development*, PHP7 + MariaDB), levantada localmente en
+# http://localhost:8078 con `docker run --rm -d -p 8078:80 vulnerables/web-dvwa`.
+# Nivel de seguridad por defecto de esta imagen: "low" (cookie `security=low`
+# ya viene seteada en el login), que es el nivel donde todas las vulnerabilidades
+# listadas abajo son explotables sin mitigación adicional.
+#
+# Fuente: módulos oficiales y públicamente documentados de DVWA
+# (https://github.com/digininja/DVWA, README del proyecto y su wiki de
+# "Vulnerabilities"). Solo se listan clases de vulnerabilidad que DVWA
+# realmente contiene como parte de su diseño (es una app *intencionalmente*
+# vulnerable con fines educativos) — no se inventa ninguna.
+#
+# Convención de campos (idéntica a eval/ground_truth.yaml):
+#   id:        identificador único, estable (no reusar ni reordenar tras publicar)
+#   type:      categoría de vulnerabilidad (snake_case). Para DVWA el catálogo
+#              de tipos es más amplio que el de Juice Shop porque cubre clases
+#              distintas (inyección de comandos de SO, CSRF, inclusión de
+#              archivos, subida de archivos maliciosa, sesiones débiles):
+#              sql_injection, xss_reflected, xss_stored, xss_dom,
+#              command_injection, csrf, file_inclusion, file_upload,
+#              broken_authentication, sensitive_data_exposure
+#   location:  endpoint o ruta aproximada donde vive la vulnerabilidad
+#   severity:  critical | high | medium | low
+#   description: descripción corta (1-2 líneas)
+#
+# Nota de alcance: DVWA organiza cada módulo bajo /vulnerabilities/<modulo>/,
+# y requiere login (admin/password por defecto en esta imagen) para llegar a
+# la mayoría de ellos — un escáner de caja negra sin credenciales wireadas
+# (como Nuclei corriendo sin sesión autenticada) razonablemente no alcanzará
+# estas rutas. Eso es una limitación real del corredor, no de esta ground
+# truth, y se documenta así en eval/live_run_report.md.
+
+vulnerabilities:
+  - id: DVWA-001
+    type: sql_injection
+    location: "/vulnerabilities/sqli/"
+    severity: critical
+    description: >
+      El parámetro `id` del módulo "SQL Injection" concatena la entrada del
+      usuario directamente en la consulta SQL sin parametrizar ni escapar,
+      permitiendo extraer toda la base de datos (ej. `1' OR '1'='1`).
+
+  - id: DVWA-002
+    type: sql_injection
+    location: "/vulnerabilities/sqli_blind/"
+    severity: high
+    description: >
+      Variante ciega (blind) del mismo módulo: no hay salida directa del
+      resultado de la consulta, pero se puede exfiltrar la base de datos
+      carácter a carácter vía inyecciones booleanas o basadas en tiempo.
+
+  - id: DVWA-003
+    type: command_injection
+    location: "/vulnerabilities/exec/"
+    severity: critical
+    description: >
+      El módulo "Command Injection" (ping a una IP) concatena la entrada del
+      usuario directamente en una llamada de shell del sistema operativo sin
+      sanitizar, permitiendo ejecutar comandos arbitrarios del SO (ej.
+      `127.0.0.1 && cat /etc/passwd`).
+
+  - id: DVWA-004
+    type: csrf
+    location: "/vulnerabilities/csrf/"
+    severity: medium
+    description: >
+      El formulario de cambio de contraseña no valida un token anti-CSRF (en
+      nivel de seguridad "low"), permitiendo que un sitio malicioso fuerce a
+      una víctima autenticada a cambiar su propia contraseña sin saberlo.
+
+  - id: DVWA-005
+    type: file_inclusion
+    location: "/vulnerabilities/fi/"
+    severity: high
+    description: >
+      El parámetro `page` del módulo "File Inclusion" no valida la ruta
+      solicitada, permitiendo Local File Inclusion (LFI, ej.
+      `?page=../../../../etc/passwd`) y, según configuración de PHP, Remote
+      File Inclusion (RFI) vía URL externa.
+
+  - id: DVWA-006
+    type: file_upload
+    location: "/vulnerabilities/upload/"
+    severity: critical
+    description: >
+      El módulo "File Upload" no valida el tipo/contenido real del archivo
+      subido, permitiendo subir un webshell PHP disfrazado de imagen y
+      ejecutar código arbitrario en el servidor accediendo al archivo subido
+      directamente.
+
+  - id: DVWA-007
+    type: xss_reflected
+    location: "/vulnerabilities/xss_r/"
+    severity: medium
+    description: >
+      El parámetro `name` del módulo "XSS (Reflected)" se refleja en la
+      respuesta sin sanitizar, permitiendo ejecutar JavaScript arbitrario vía
+      un enlace manipulado.
+
+  - id: DVWA-008
+    type: xss_stored
+    location: "/vulnerabilities/xss_s/"
+    severity: high
+    description: >
+      El libro de visitas ("Guestbook") del módulo "XSS (Stored)" no
+      sanitiza el campo de mensaje al guardarlo ni al mostrarlo, permitiendo
+      XSS persistente contra cualquier usuario que visite la página.
+
+  - id: DVWA-009
+    type: xss_dom
+    location: "/vulnerabilities/xss_d/"
+    severity: medium
+    description: >
+      El módulo "XSS (DOM)" construye HTML en el cliente a partir del
+      parámetro `default` sin sanitizar, permitiendo inyectar JavaScript que
+      se ejecuta puramente del lado del navegador sin pasar por el servidor.
+
+  - id: DVWA-010
+    type: broken_authentication
+    location: "/vulnerabilities/brute/"
+    severity: high
+    description: >
+      El módulo "Brute Force" (login) no implementa límite de intentos ni
+      bloqueo de cuenta, permitiendo probar credenciales por fuerza bruta o
+      diccionario sin restricción.
+
+  - id: DVWA-011
+    type: sensitive_data_exposure
+    location: "/vulnerabilities/weak_id/"
+    severity: medium
+    description: >
+      El módulo "Weak Session IDs" genera identificadores de sesión
+      predecibles (secuenciales o hasheados de forma trivial), permitiendo
+      adivinar/forjar sesiones de otros usuarios.

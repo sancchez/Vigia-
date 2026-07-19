@@ -46,3 +46,13 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Open-core: paquete privado con la IP real (prompts, taxonomia de
+# cumplimiento, mapeos ISO 27001 / Ley 2573). Tiene su PROPIO repositorio
+# git local, separado de este -- ver docs/open-core.md. Nunca debe
+# commitearse ni publicarse dentro de este repo publico.
+/vigia_core_private/
+
+# Research de mercado / pricing -- inteligencia competitiva, no para
+# publicar en un repo publico. Vive como copia en vigia_core_private/docs/.
+/docs/market-research.md

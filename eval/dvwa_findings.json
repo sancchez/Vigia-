@@ -1,0 +1,53 @@
+{
+  "_comment": "Hallazgos REALES de una corrida de Nuclei (v3.11.0, ~10.5k plantillas) contra DVWA (imagen vulnerables/web-dvwa, http://127.0.0.1:8078) sin sesion autenticada wireada. Ver eval/live_run_report.md Corrida 7 para el detalle completo. Los 6 findings de abajo son una curacion honesta de las 22 detecciones brutas de Nuclei: se colapsaron 10 hits repetidos de 'http-missing-security-headers' (una cabecera distinta por hit) en un solo finding (F-DVWA-006), y se excluyeron 6 detecciones puramente de reconocimiento sin ninguna categoria de vulnerabilidad asociada (waf-detect, tech-detect, fingerprinthub-web-fingerprints, robots-txt, robots-txt-endpoint) por no representar una afirmacion de vulnerabilidad evaluable contra la ground truth. Nada se inventa: cada finding de aqui corresponde a un template-id real que matcheo en la corrida.",
+  "findings": [
+    {
+      "id": "F-DVWA-001",
+      "type": "broken_authentication",
+      "endpoint": "/login.php",
+      "severity": "critical",
+      "confidence": 0.9,
+      "description": "Nuclei confirmo credenciales por defecto validas (admin/password) contra /login.php (template dvwa-default-login, cwe-798)."
+    },
+    {
+      "id": "F-DVWA-002",
+      "type": "sensitive_data_exposure",
+      "endpoint": "/config/",
+      "severity": "medium",
+      "confidence": 0.55,
+      "description": "Listado de directorio de configuracion accesible publicamente (template configuration-listing)."
+    },
+    {
+      "id": "F-DVWA-003",
+      "type": "sensitive_data_exposure",
+      "endpoint": "/.gitignore",
+      "severity": "low",
+      "confidence": 0.3,
+      "description": "Archivo .gitignore expuesto publicamente, revela estructura interna del repo (template exposed-gitignore)."
+    },
+    {
+      "id": "F-DVWA-004",
+      "type": "sensitive_data_exposure",
+      "endpoint": "/README.md",
+      "severity": "low",
+      "confidence": 0.25,
+      "description": "README.md expuesto publicamente, revela version/stack de la app (template readme-md)."
+    },
+    {
+      "id": "F-DVWA-005",
+      "type": "broken_authentication",
+      "endpoint": "/",
+      "severity": "low",
+      "confidence": 0.3,
+      "description": "Cookies de sesion sin flags Secure/HttpOnly/SameSite=Strict (templates cookies-without-secure, cookies-without-httponly, missing-cookie-samesite-strict), debilita la proteccion de la sesion."
+    },
+    {
+      "id": "F-DVWA-006",
+      "type": "sensitive_data_exposure",
+      "endpoint": "/login.php",
+      "severity": "low",
+      "confidence": 0.2,
+      "description": "Cabeceras de seguridad HTTP ausentes (CSP, X-Frame-Options, X-Content-Type-Options, etc. -- template http-missing-security-headers, 10 cabeceras distintas detectadas en la respuesta de /login.php)."
+    }
+  ]
+}

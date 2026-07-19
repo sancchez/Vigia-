@@ -1,0 +1,36 @@
+# Mismo espiritu que .gitignore, pero para el contexto de build de Docker --
+# el Dockerfile solo COPY-ea los directorios que el backend necesita
+# (orchestrator/agents/tools/eval/api/db/auth + pyproject.toml/README.md), asi
+# que la mayoria de esto ya no se copiaria de todas formas, pero excluirlo
+# aqui evita que Docker pierda tiempo indexando/hasheando el contexto entero
+# en cada build (el repo tiene frontend/node_modules/, que es grande).
+
+.git/
+.github/
+.claude/
+
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+tests/
+scripts/
+docs/
+legal/
+
+*.db
+*.sqlite3
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+Dockerfile
+.dockerignore

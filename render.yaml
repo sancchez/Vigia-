@@ -1,0 +1,78 @@
+# Blueprint de Render para Vigia (https://render.com/docs/blueprint-spec,
+# verificado contra la doc real antes de escribir esto, no adivinado).
+#
+# Define dos servicios: el backend FastAPI (Docker, este mismo repo) y el
+# frontend (sitio estático, build de Vite). Deploy real: subir este archivo
+# a la raíz del repo y usar "New +" -> "Blueprint" en el dashboard de Render,
+# apuntando al repo de GitHub -- Render detecta este archivo solo. Ver
+# docs/despliegue.md para el paso a paso completo (cuenta, repo, env vars).
+#
+# OJO -- limitación real de la capa gratuita de Render (confirmado en su
+# documentación, no supuesto): un "Web Service" free tier tiene filesystem
+# efímero, así que un SQLite local (DATABASE_URL=sqlite:///...) se PIERDE en
+# cada redeploy/restart/spin-down. Para persistencia real hay dos caminos:
+# (a) agregar el bloque `databases:` de abajo (Postgres administrado, gratis
+# los primeros 30 días, luego expira si no se pasa a un plan pago), o
+# (b) subir el backend a un plan pago y agregar un Persistent Disk. Ver
+# docs/despliegue.md sección de Render para el detalle y el porqué de cada
+# opción.
+
+services:
+  - type: web
+    name: vigia-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: JWT_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        # Default: SQLite efímero en este plan (ver aviso arriba). Cambiar a
+        # la connection string del bloque `databases` de abajo (o a la de un
+        # Postgres externo) para persistencia real.
+        value: sqlite:///./ciberseguridad.db
+      - key: CORS_ORIGINS
+        # Actualizar con la URL real que Render asigna al servicio de abajo
+        # (vigia-frontend) una vez creado por primera vez.
+        value: https://vigia-frontend.onrender.com
+      - key: VIGIA_CLAUDE_CLI_TIMEOUT
+        value: "300"
+      - key: VIGIA_SCAN_INTERVAL_HOURS
+        value: "6"
+      - key: VIGIA_CERTSTREAM_ENABLED
+        value: "false"
+      - key: VIGIA_CERTSTREAM_URL
+        sync: false
+      - key: VIGIA_CERTSTREAM_REFRESH_MINUTES
+        value: "30"
+
+  - type: web
+    name: vigia-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        # Actualizar con la URL real que Render asigna al servicio de arriba
+        # (vigia-backend) una vez creado por primera vez -- hay una
+        # dependencia circular de URLs entre ambos servicios la primera vez
+        # que se crean (ver docs/despliegue.md).
+        value: https://vigia-backend.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+# Postgres administrado, opcional -- descomentar si se quiere persistencia
+# real sin pasar a un plan pago del web service. Gratis por 30 días (ver
+# docs/despliegue.md), luego hay que pasarlo a un plan pago o perder los
+# datos tras el período de gracia de Render.
+#
+# databases:
+#   - name: vigia-db
+#     plan: free
+#     postgresMajorVersion: "16"

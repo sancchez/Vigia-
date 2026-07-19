@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import operator
 from datetime import datetime, timezone
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Optional, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -52,6 +52,19 @@ class Scope(TypedDict, total=False):
     apps: list[str]
     ips: list[str]
     notas: str
+
+    codigo_paths: list[str]
+    """Rutas locales de código fuente autorizadas para SAST (Semgrep).
+    A diferencia de `dominios`, no son URLs — son rutas de filesystem al
+    repo/deploy del cliente (o el propio repo de Vigia en modo interno).
+    Sección 3.1 del plan, capa "código y dependencias" del Agente de
+    Escaneo (ver `tools/scan.py::run_semgrep`)."""
+
+    imagenes: list[str]
+    """Referencias de imagen de contenedor autorizadas para SCA/CVE scan
+    (Trivy + Grype), ej. 'miempresa/api:1.4.2'. Igual que `codigo_paths`,
+    no son URLs — Trivy/Grype requieren un nombre de imagen o ruta local,
+    no un target HTTP (ver `tools/scan.py::run_trivy_image`/`run_grype`)."""
 
 
 class PipelineState(TypedDict, total=False):
@@ -122,7 +135,8 @@ def new_state(
     return PipelineState(
         target=target,
         autorizacion_firmada=autorizacion_firmada,
-        scope=scope or Scope(dominios=[], apps=[], ips=[], notas=""),
+        scope=scope
+        or Scope(dominios=[], apps=[], ips=[], notas="", codigo_paths=[], imagenes=[]),
         contexto_negocio=contexto_negocio,
         antisuplantacion_habilitado=antisuplantacion_habilitado,
         recon_findings=[],

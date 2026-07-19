@@ -78,6 +78,64 @@ def run_dnstwist(domain: str, registered_only: bool = True, timeout: int = 300) 
     return AntiSuplantacionResult(target=domain, tool="dnstwist", findings=variants, raw=result)
 
 
+def generate_domain_variants(domain: str) -> set[str]:
+    """Genera el conjunto de permutaciones typosquatting/homográficas de `domain`.
+
+    Motor: `dnstwist.Fuzzer`, la MISMA librería que usa `run_dnstwist()` de
+    arriba — pero llamada directamente en proceso (import de la librería,
+    no `subprocess`) y SIN resolución DNS. `run_dnstwist()` dispara el
+    binario `dnstwist` vía `run_command` porque, dentro del pipeline bajo
+    demanda, sí queremos que resuelva DNS y confirme qué variantes están
+    realmente registradas (`registered_only=True`) — eso tarda segundos
+    por dominio.
+
+    Este helper existe para el caso de uso opuesto: el listener de
+    CertStream (`api/certstream_listener.py`, Item 5 del backlog) necesita
+    comparar decenas de dominios por segundo contra el conjunto de
+    variantes de cada activo de cada tenant, y no puede permitirse ni un
+    subprocess ni una resolución DNS por comparación — CertStream ya nos
+    dice que el dominio existe (se le acaba de emitir un certificado), así
+    que la única pregunta es "¿es una permutación plausible de alguno de
+    mis dominios vigilados?", que es pura comparación de cadenas en
+    memoria. Reutiliza el mismo motor de fuzzing que ya usa el resto del
+    módulo en vez de reimplementar reglas de typosquatting.
+
+    Excluye el propio `domain` (dnstwist lo incluye con `fuzzer='*original'`).
+
+    Raises:
+        Nada relacionado con herramientas externas — `dnstwist` es una
+        librería Python normal (`import dnstwist`), no un binario aparte.
+        Si el paquete no está instalado, esto lanza `ImportError` igual
+        que cualquier import faltante; el llamador decide si eso es fatal.
+    """
+    import dnstwist
+
+    fuzzer = dnstwist.Fuzzer(domain)
+    fuzzer.generate()
+    return {
+        variante["domain"]
+        for variante in fuzzer.domains
+        if variante.get("fuzzer") != "*original"
+    }
+
+
+def registrable_domain(hostname: str) -> str:
+    """Devuelve el dominio registrable (apex) de `hostname`, ej. 'www.foo.co.uk' -> 'foo.co.uk'.
+
+    Envuelve `dnstwist.domain_tld`, que usa una lista de sufijos públicos
+    real (maneja 'co.uk', 'com.co', etc.) en vez de un `split('.')` ingenuo
+    — importante para Colombia (`.com.co`) y para no confundir subdominios
+    con el dominio base al hacer matching contra dominios de CertStream,
+    que casi siempre incluyen subdominios (`www.`, `mail.`, wildcards).
+    """
+    import dnstwist
+
+    _sub, dominio, tld = dnstwist.domain_tld(hostname)
+    if not dominio:
+        return hostname
+    return f"{dominio}.{tld}" if tld else dominio
+
+
 def run_sherlock(username: str, timeout: int = 180) -> AntiSuplantacionResult:
     """Busca un nombre de usuario/marca en +400 redes sociales con Sherlock.
 

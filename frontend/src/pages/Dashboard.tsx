@@ -2,6 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
 import { api, ApiError, type Asset, type Finding, type ScanHistoryItem } from "../api";
+import ScanHistoryChart from "../components/ScanHistoryChart";
+import Equipo from "../components/Equipo";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -40,6 +42,7 @@ export default function Dashboard() {
   const [autorizado, setAutorizado] = useState(false);
   const [escaneando, setEscaneando] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
+  const [descargando, setDescargando] = useState<string | null>(null);
 
   const cargarTodo = async () => {
     setCargando(true);
@@ -92,6 +95,32 @@ export default function Dashboard() {
       setMensaje(err instanceof ApiError ? err.message : "El escaneo no se pudo completar.");
     } finally {
       setEscaneando(null);
+    }
+  };
+
+  const descargarCumplimiento = async (formato: "pdf" | "docx") => {
+    const clave = `cumplimiento-${formato}`;
+    setDescargando(clave);
+    setMensaje(null);
+    try {
+      await api.downloadCumplimiento(formato);
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo descargar el reporte.");
+    } finally {
+      setDescargando(null);
+    }
+  };
+
+  const descargarScan = async (scanId: string, formato: "pdf" | "docx") => {
+    const clave = `${scanId}-${formato}`;
+    setDescargando(clave);
+    setMensaje(null);
+    try {
+      await api.downloadScanReport(scanId, formato);
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo descargar el reporte.");
+    } finally {
+      setDescargando(null);
     }
   };
 
@@ -233,10 +262,56 @@ export default function Dashboard() {
                     <span className="chip ok">{s.estado}</span>
                     <span style={{ color: "var(--text-secondary)" }}>{s.total_hallazgos} hallazgo(s)</span>
                     <span style={{ color: "var(--text-muted)" }}>{new Date(s.created_at).toLocaleString("es-CO")}</span>
+                    {s.estado === "completado" && (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          onClick={() => descargarScan(s.id, "pdf")}
+                          disabled={descargando === `${s.id}-pdf`}
+                          style={{ fontSize: 12, padding: "0.3rem 0.6rem" }}
+                        >
+                          {descargando === `${s.id}-pdf` ? "…" : "PDF"}
+                        </button>
+                        <button
+                          onClick={() => descargarScan(s.id, "docx")}
+                          disabled={descargando === `${s.id}-docx`}
+                          style={{ fontSize: 12, padding: "0.3rem 0.6rem" }}
+                        >
+                          {descargando === `${s.id}-docx` ? "…" : "DOCX"}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
             )}
+          </div>
+
+          <div className="card" style={{ marginTop: "1.25rem" }}>
+            <h2 style={{ fontSize: 17, marginBottom: 4 }}>Comparar escaneos en el tiempo</h2>
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 16 }}>
+              Hallazgos por escaneo completado, agrupados por severidad.
+            </p>
+            <ScanHistoryChart scans={scans} findings={findings} />
+          </div>
+
+          <div className="card" style={{ marginTop: "1.25rem" }}>
+            <h2 style={{ fontSize: 17, marginBottom: 4 }}>Reporte de cumplimiento</h2>
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12 }}>
+              Evidencia acumulada de todo tu historial de escaneos, mapeada a ISO 27001 y Ley 2573.
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => descargarCumplimiento("pdf")} disabled={descargando === "cumplimiento-pdf"}>
+                {descargando === "cumplimiento-pdf" ? "Generando…" : "Descargar PDF"}
+              </button>
+              <button onClick={() => descargarCumplimiento("docx")} disabled={descargando === "cumplimiento-docx"}>
+                {descargando === "cumplimiento-docx" ? "Generando…" : "Descargar DOCX"}
+              </button>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: "1.25rem" }}>
+            <h2 style={{ fontSize: 17, marginBottom: 12 }}>Equipo</h2>
+            <Equipo />
           </div>
         </>
       )}

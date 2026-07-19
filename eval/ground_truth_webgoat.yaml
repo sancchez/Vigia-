@@ -1,0 +1,148 @@
+# Ground truth de vulnerabilidades conocidas — WebGoat
+#
+# Tercer target de evaluación (junto a Juice Shop y DVWA, ver HANDOFF.md
+# Item 4) para seguir midiendo si el sistema/prompts de Vigia se sobreajustan
+# a las particularidades de un solo laboratorio. WebGoat aporta una superficie
+# distinta a las otras dos: aplicación Java/Spring Boot organizada en
+# "lecciones" interactivas bajo un único path base `/WebGoat/`, cada una con
+# su propio conjunto de endpoints de la lección (no rutas REST fijas y
+# memorables como Juice Shop, ni módulos con URL estable como DVWA) — un reto
+# de matching por ubicación distinto y realista.
+#
+# Instancia usada para esta corrida: imagen Docker oficial `webgoat/webgoat`,
+# levantada localmente con
+# `docker run --rm -d -p 8080:8080 -p 9090:9090 webgoat/webgoat`.
+# WebGoat sirve en http://localhost:8080/WebGoat (requiere registro de un
+# usuario propio vía la UI, no hay credenciales por defecto) y WebWolf (su
+# servidor auxiliar para exfiltración/phishing controlado) en
+# http://localhost:9090/WebWolf.
+#
+# Fuente: catálogo oficial de lecciones de WebGoat
+# (https://github.com/WebGoat/WebGoat, `webgoat-lessons/` del repo y el menú
+# de lecciones de la propia aplicación). Solo se listan clases de
+# vulnerabilidad que WebGoat efectivamente enseña como lección dedicada — no
+# se inventa ninguna.
+#
+# Convención de campos (idéntica a eval/ground_truth.yaml):
+#   id:        identificador único, estable (no reusar ni reordenar tras publicar)
+#   type:      categoría de vulnerabilidad (snake_case). Catálogo de tipos
+#              propio de WebGoat (además de los ya vistos en Juice Shop/DVWA):
+#              sql_injection, xss_reflected, xss_stored, broken_access_control,
+#              broken_authentication, sensitive_data_exposure,
+#              insecure_deserialization, ssrf, xxe, path_traversal
+#   location:  ruta aproximada de la lección bajo /WebGoat/ (WebGoat monta
+#              cada lección como un módulo SPA con sub-rutas de API propias,
+#              ej. /WebGoat/SqlInjection/...; se documenta el prefijo estable)
+#   severity:  critical | high | medium | low
+#   description: descripción corta (1-2 líneas)
+#
+# Nota de alcance: igual que DVWA, casi todas las lecciones de WebGoat viven
+# detrás de autenticación (registro propio + login) y de una lección
+# "iniciada" desde el menú de la SPA — un escáner de caja negra sin sesión
+# autenticada wireada razonablemente no alcanzará estos endpoints. Se
+# documenta como limitación real del corredor en eval/live_run_report.md,
+# no como defecto de esta ground truth.
+
+vulnerabilities:
+  - id: WEBGOAT-001
+    type: sql_injection
+    location: "/WebGoat/SqlInjection"
+    severity: critical
+    description: >
+      Serie de lecciones "SQL Injection (intro)" y "SQL Injection (advanced)":
+      múltiples endpoints de la lección concatenan entrada de usuario sin
+      parametrizar en consultas SQL, permitiendo desde bypass de autenticación
+      hasta extracción completa de tablas.
+
+  - id: WEBGOAT-002
+    type: xss_reflected
+    location: "/WebGoat/CrossSiteScripting"
+    severity: medium
+    description: >
+      Lección "Cross-Site Scripting (XSS)", ejercicios de XSS reflejado:
+      parámetros de búsqueda/formulario de la lección se reflejan en el HTML
+      de respuesta sin sanitizar, permitiendo ejecutar JavaScript arbitrario.
+
+  - id: WEBGOAT-003
+    type: xss_stored
+    location: "/WebGoat/CrossSiteScripting"
+    severity: high
+    description: >
+      Dentro de la misma lección de XSS, el ejercicio de mensajería/perfil de
+      usuario almacena contenido sin sanitizar y lo renderiza de vuelta a
+      otros usuarios, permitiendo XSS persistente.
+
+  - id: WEBGOAT-004
+    type: broken_access_control
+    location: "/WebGoat/IDOR"
+    severity: high
+    description: >
+      Lección "Insecure Direct Object References (IDOR)": varios ejercicios
+      permiten acceder o modificar datos de otro usuario (perfil, balance de
+      cuenta, historial) cambiando un identificador en la petición sin
+      verificación de propiedad del recurso.
+
+  - id: WEBGOAT-005
+    type: broken_access_control
+    location: "/WebGoat/AccessControlMatrix"
+    severity: high
+    description: >
+      Lección "Missing Function Level Access Control": funciones
+      administrativas (ej. gestión de usuarios) son alcanzables por un
+      usuario normal porque el control de acceso solo se aplica en el
+      cliente/menú, no en el servidor.
+
+  - id: WEBGOAT-006
+    type: broken_authentication
+    location: "/WebGoat/authentication"
+    severity: high
+    description: >
+      Serie de lecciones "Authentication Flaws" (incluye "Password reset" y
+      fuerza bruta de login): flujos de autenticación y recuperación de
+      contraseña con validaciones débiles/adivinables que permiten tomar el
+      control de una cuenta ajena.
+
+  - id: WEBGOAT-007
+    type: insecure_deserialization
+    location: "/WebGoat/InsecureDeserialization"
+    severity: critical
+    description: >
+      Lección "Insecure Deserialization": el endpoint acepta un objeto Java
+      serializado controlado por el usuario y lo deserializa sin validar,
+      permitiendo potencialmente ejecución remota de código vía gadget chains.
+
+  - id: WEBGOAT-008
+    type: xxe
+    location: "/WebGoat/XXE"
+    severity: critical
+    description: >
+      Lección "XXE (XML External Entities)": el parser XML del endpoint de la
+      lección procesa entidades externas definidas por el usuario, permitiendo
+      leer archivos locales del servidor o realizar SSRF vía DTD externo.
+
+  - id: WEBGOAT-009
+    type: ssrf
+    location: "/WebGoat/SSRF"
+    severity: high
+    description: >
+      Lección "Server-Side Request Forgery (SSRF)": el endpoint que valida el
+      estado de una imagen/URL suministrada por el usuario realiza la petición
+      HTTP directamente desde el servidor sin restringir destinos internos.
+
+  - id: WEBGOAT-010
+    type: path_traversal
+    location: "/WebGoat/PathTraversal"
+    severity: high
+    description: >
+      Lección "Path Traversal": el endpoint de descarga/visualización de
+      archivos de perfil no valida secuencias `../` en el nombre de archivo
+      suministrado, permitiendo leer archivos fuera del directorio previsto.
+
+  - id: WEBGOAT-011
+    type: sensitive_data_exposure
+    location: "/WebGoat/crypto"
+    severity: medium
+    description: >
+      Serie de lecciones de criptografía ("Insecure Login", "Crypto Basics"):
+      transmisión y almacenamiento de credenciales/datos sensibles con
+      cifrado débil o inexistente (ej. login por HTTP plano, hashing sin sal).

@@ -68,7 +68,21 @@ def _call_via_cli(system_prompt: str, user_message: str, model: str) -> str:
     cmd = [
         claude_bin,
         "-p",
-        user_message,
+        # user_message NO va aquí como argumento posicional — ver el
+        # `input=user_message` en subprocess.run() más abajo. Encontrado real
+        # probando `agents/revision_ia.py` con archivos reales de este mismo
+        # repo (`api/main.py`, ~32KB): pasarlo como argv revienta con
+        # `WinError 206: El nombre del archivo o la extensión es demasiado
+        # largo` en Windows en cuanto el mensaje pasa de unos ~30-35KB
+        # combinados con el resto del comando — es el límite real de
+        # `CreateProcess` (~32.767 caracteres para la línea de comando
+        # completa), no un timeout ni un límite de este proyecto. Los demás
+        # agentes (priorizacion/remediacion/reporteria/cumplimiento) nunca lo
+        # habían disparado porque envían resúmenes/JSON de hallazgos, no el
+        # contenido crudo de archivos de código. `claude -p` SÍ lee el prompt
+        # de stdin cuando no se le da como argumento posicional (confirmado
+        # en esta sesión con un payload de 40.000 caracteres) — stdin no
+        # tiene ese límite de longitud de línea de comando.
         "--system-prompt",
         system_prompt,
         "--output-format",
@@ -85,7 +99,25 @@ def _call_via_cli(system_prompt: str, user_message: str, model: str) -> str:
     # constante. Configurable en vez de subir un número a ciegas otra vez.
     cli_timeout = int(os.environ.get("VIGIA_CLAUDE_CLI_TIMEOUT", "300"))
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout)
+        # encoding="utf-8" explícito es OBLIGATORIO aquí, no cosmético: sin
+        # esto, `text=True` decodifica con `locale.getpreferredencoding()`,
+        # que en Windows suele ser cp1252, no utf-8. La CLI de Claude
+        # siempre escribe stdout en UTF-8 — con cp1252 cada tilde/ñ del
+        # español se corrompe en mojibake ("canciÃ³n" en vez de "canción").
+        # Encontrado real en esta sesión: reventaba el texto de
+        # agents/cumplimiento.py (y de reporteria.py/remediacion.py, que
+        # comparten este mismo helper) cada vez que el fallback de CLI
+        # generaba español con acentos. `input=user_message` (stdin) necesita
+        # el mismo encoding="utf-8" explícito por la misma razón, en la
+        # dirección contraria (Python codificando hacia el proceso hijo).
+        result = subprocess.run(
+            cmd,
+            input=user_message,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=cli_timeout,
+        )
     except FileNotFoundError as exc:
         raise LLMNoDisponibleError(f"No se pudo ejecutar 'claude': {exc}") from exc
     except subprocess.TimeoutExpired as exc:

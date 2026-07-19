@@ -5,7 +5,7 @@ type AuthState = {
   me: Me | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (nombreNegocio: string, email: string, password: string) => Promise<void>;
+  register: (nombreNegocio: string, email: string, password: string, inviteToken?: string) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
 };
@@ -42,8 +42,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await refresh();
   };
 
-  const register = async (nombreNegocio: string, email: string, password: string) => {
-    const { access_token } = await api.register(nombreNegocio, email, password);
+  const register = async (nombreNegocio: string, email: string, password: string, inviteToken?: string) => {
+    const { access_token } = await api.register(nombreNegocio, email, password, inviteToken);
     setToken(access_token);
     await refresh();
   };

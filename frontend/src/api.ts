@@ -46,6 +46,31 @@ export type Finding = {
   created_at: string;
 };
 
+export type Invitation = {
+  id: string;
+  email: string;
+  role: string;
+  estado: string;
+  token: string;
+  created_at: string;
+  expires_at: string | null;
+};
+
+export type Member = {
+  id: string;
+  email: string;
+  role: string;
+  created_at: string;
+};
+
+export type InvitationPreview = {
+  valido: boolean;
+  email?: string | null;
+  tenant_nombre?: string | null;
+  role?: string | null;
+  motivo?: string | null;
+};
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -86,11 +111,38 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function downloadFile(path: string, filename: string): Promise<void> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${API_URL}${path}`, { headers });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? detail;
+    } catch {
+      /* respuesta sin cuerpo JSON */
+    }
+    throw new ApiError(res.status, typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
-  register: (nombre_negocio: string, email: string, password: string) =>
+  register: (nombre_negocio: string, email: string, password: string, invite_token?: string) =>
     request<{ access_token: string }>("/auth/register", {
       method: "POST",
-      body: JSON.stringify({ nombre_negocio, email, password }),
+      body: JSON.stringify({ nombre_negocio, email, password, invite_token }),
     }),
   login: (email: string, password: string) =>
     request<{ access_token: string }>("/auth/login", {
@@ -108,6 +160,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ target, autorizacion_firmada }),
     }),
+  downloadCumplimiento: (formato: "pdf" | "docx") =>
+    downloadFile(`/reports/cumplimiento/download?formato=${formato}`, `reporte-cumplimiento.${formato}`),
+  downloadScanReport: (scanId: string, formato: "pdf" | "docx") =>
+    downloadFile(`/scans/${scanId}/report/download?formato=${formato}`, `reporte-scan-${scanId.slice(0, 8)}.${formato}`),
+  listMembers: () => request<Member[]>("/tenant/members"),
+  listInvitations: () => request<Invitation[]>("/tenant/invitations"),
+  createInvitation: (email: string, role: string) =>
+    request<Invitation>("/tenant/invitations", { method: "POST", body: JSON.stringify({ email, role }) }),
+  revokeInvitation: (id: string) => request<void>(`/tenant/invitations/${id}`, { method: "DELETE" }),
+  previewInvitation: (token: string) => request<InvitationPreview>(`/tenant/invitations/preview/${token}`),
 };
 
 export { ApiError };

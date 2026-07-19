@@ -15,13 +15,24 @@ from orchestrator.state import PipelineState, make_trace_event
 
 from ._llm import LLMNoDisponibleError, call_claude
 
-SYSTEM_PROMPT = (
-    "Recibes hallazgos ya verificados más contexto de negocio del cliente (qué hace\n"
-    "la empresa, qué sistemas son críticos para sus ventas). Traduces severidad\n"
-    "técnica (CVSS) a impacto real: \"esto afecta tu página de pagos\" pesa más que\n"
-    "\"esto afecta una página informativa poco visitada\", aunque el CVSS técnico sea\n"
-    "igual. Ordena los hallazgos de mayor a menor urgencia real para ESTE cliente."
-)
+# Open-core: el prompt real (que pondera impacto de negocio, no solo CVSS)
+# vive en el paquete privado `vigia_core_private` (ver docs/open-core.md).
+# Si no está instalado, se usa un prompt genérico que solo reordena por
+# severidad técnica reportada — sigue siendo útil y funcional, solo menos
+# sofisticado que la capa de priorización real de Vigia.
+try:
+    from vigia_core_private.priorizacion import SYSTEM_PROMPT
+
+    _MODO_PRIORIZACION = "privado"
+except ImportError:
+    SYSTEM_PROMPT = (
+        "Recibes hallazgos de seguridad ya verificados. Ordena los hallazgos "
+        "de mayor a menor urgencia usando ÚNICAMENTE la severidad técnica "
+        "reportada (CVSS/severity). Esta es la versión community: no "
+        "incorpora contexto de negocio del cliente para ponderar impacto "
+        "real (esa capa es parte del paquete privado de Vigia)."
+    )
+    _MODO_PRIORIZACION = "fallback_publico"
 
 AGENTE = "priorizacion"
 

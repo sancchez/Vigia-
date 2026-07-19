@@ -130,6 +130,8 @@ def run_command(
             list(cmd),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             cwd=str(cwd) if cwd else None,
         )
@@ -144,6 +146,46 @@ def run_command(
         stdout=proc.stdout,
         stderr=proc.stderr,
     )
+
+
+def docker_container_running(binary: str, name: str) -> bool:
+    """True si el contenedor `name` sigue vivo del lado del daemon de Docker.
+
+    Usado para el diagnóstico de timeout de `tools/scan.py::_run_zap_script`:
+    cuando `subprocess.run(..., timeout=...)` expira, el proceso cliente
+    `docker run` muere pero el contenedor puede seguir corriendo del lado
+    del daemon (`--rm` solo limpia si el contenedor termina por sí mismo).
+    Si `docker inspect` no encuentra el contenedor (código != 0), ya se
+    removió (terminó por su cuenta y `--rm` lo limpió) -- se interpreta
+    como "no está corriendo", no como error.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "inspect", "-f", "{{.State.Running}}", name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return proc.stdout.strip() == "true"
+
+
+def docker_force_remove_container(binary: str, name: str) -> None:
+    """Detiene y elimina `name` sin propagar errores.
+
+    Best-effort a propósito: el contenedor puede ya no existir (terminó
+    solo y `--rm` ya lo limpió), y este helper se llama justo en el
+    manejo de una excepción de timeout -- no debe enmascarar esa
+    excepción original con un fallo secundario de limpieza.
+    """
+    for args in ([binary, "stop", "-t", "5", name], [binary, "rm", "-f", name]):
+        try:
+            subprocess.run(args, capture_output=True, text=True, timeout=20)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
 
 
 def parse_jsonl(text: str) -> list[dict]:

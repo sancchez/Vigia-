@@ -12,11 +12,32 @@ del grafo (sección 8.1 del plan).
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._shared import ToolNotInstalledError, ToolResult, parse_jsonl, require_binary, run_command
+from ._shared import (
+    ToolNotInstalledError,
+    ToolResult,
+    ToolTimeoutError,
+    docker_container_running,
+    docker_force_remove_container,
+    parse_jsonl,
+    require_binary,
+    run_command,
+)
+
+# Ventana de gracia tras un timeout del lado de Python antes de decidir que
+# el contenedor "sigue corriendo de verdad" y forzar su limpieza. Existe
+# por la carrera real documentada en eval/live_run_report.md Corrida 12:
+# el contenedor puede terminar (y escribir su reporte) en el último
+# segundo, justo cuando `subprocess.run(..., timeout=...)` ya lanzó
+# `TimeoutExpired` del lado de Python. No es un intento de "esperar un
+# poco más" al escaneo -- es solo para no tirar un resultado recuperable.
+_TIMEOUT_GRACE_SECONDS = 3
 
 
 @dataclass
@@ -87,6 +108,7 @@ def _run_zap_script(
     extra_args: list[str],
     tool_name: str,
     timeout: int,
+    scan_id: str | None = None,
 ) -> ScanResult:
     """Corre un script de ZAP (`zap-baseline.py`, `zap-full-scan.py`, ...) vía Docker.
 
@@ -97,8 +119,30 @@ def _run_zap_script(
     alertas (no es un error de ejecución) — por eso no se valida
     `returncode == 0`, se confía en que el JSON exista.
 
+    **Manejo real de timeout (ver eval/live_run_report.md Corrida 12):**
+    el contenedor se lanza con `--name` explícito (no solo `--rm`) para
+    poder referenciarlo después. Si `run_command` expira, el proceso
+    cliente `docker run` muere pero el contenedor puede seguir vivo del
+    lado del daemon (`--rm` únicamente limpia cuando el contenedor
+    termina por su cuenta). En ese caso: se espera una ventana breve de
+    gracia por si el contenedor está terminando justo en ese momento
+    (carrera real observada), y solo entonces se decide -- si ya no está
+    corriendo, se intenta recuperar el reporte que alcanzó a escribir
+    antes de limpiar cualquier cosa; si sigue corriendo de verdad, se
+    fuerza `docker stop`/`docker rm` (en vez de dejarlo huérfano) y se
+    relanza el timeout original. El directorio temporal se gestiona a
+    mano (no `tempfile.TemporaryDirectory()`) para que NO se borre hasta
+    después de haber tomado esa decisión -- el bug real que esto
+    reemplaza era que el context manager borraba el bind-mount en cuanto
+    la excepción de timeout se propagaba, así que un reporte que el
+    contenedor huérfano terminara escribiendo después ya no tenía dónde
+    aterrizar.
+
     Raises:
         ToolNotInstalledError: si `docker` no está en PATH.
+        ToolTimeoutError: si expira y no hay nada recuperable (el
+            contenedor seguía corriendo de verdad tras la ventana de
+            gracia, o ya terminó pero sin reporte usable).
     """
     binary = require_binary(
         "docker",
@@ -106,11 +150,15 @@ def _run_zap_script(
         "docker pull ghcr.io/zaproxy/zaproxy:stable",
     )
     zap_target = _rewrite_for_docker(target_url)
-    with tempfile.TemporaryDirectory(prefix="vigia-zap-") as workdir:
+    container_name = f"vigia-zap-{scan_id or uuid.uuid4().hex[:12]}"
+    workdir = Path(tempfile.mkdtemp(prefix="vigia-zap-"))
+    try:
         cmd = [
             binary,
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--add-host",
             "host.docker.internal:host-gateway",
             "-v",
@@ -123,9 +171,35 @@ def _run_zap_script(
             "zap-report.json",
             *extra_args,
         ]
-        result = run_command(tool_name, cmd, timeout=timeout)
+        try:
+            result: ToolResult | None = run_command(tool_name, cmd, timeout=timeout)
+        except ToolTimeoutError:
+            still_running = docker_container_running(binary, container_name)
+            if still_running:
+                # Carrera real: puede estar terminando justo ahora. Una
+                # ventana corta de gracia antes de decidir "sí está
+                # corriendo de verdad, hay que matarlo".
+                time.sleep(_TIMEOUT_GRACE_SECONDS)
+                still_running = docker_container_running(binary, container_name)
 
-        report_path = Path(workdir) / "zap-report.json"
+            # Se limpia el contenedor en ambos casos: si sigue corriendo,
+            # forzar su fin (no dejarlo huérfano); si ya terminó por su
+            # cuenta, `--rm` normalmente ya lo removió y esto es un no-op.
+            docker_force_remove_container(binary, container_name)
+
+            if still_running:
+                # Genuinamente seguía trabajando tras la gracia -- no hay
+                # nada que recuperar, es un timeout real.
+                raise
+            # Terminó (o ya había desaparecido) dentro de la ventana de
+            # gracia -- puede haber alcanzado a escribir su reporte antes
+            # de que Python se enterara del timeout. El parseo de abajo
+            # revisa el workdir de todas formas; si no hay reporte usable
+            # ahí, se levanta ToolTimeoutError igual (no es un éxito
+            # silencioso).
+            result = None
+
+        report_path = workdir / "zap-report.json"
         findings: list[dict] = []
         if report_path.exists():
             try:
@@ -134,12 +208,34 @@ def _run_zap_script(
                     findings.extend(site.get("alerts", []) or [])
             except json.JSONDecodeError:
                 pass
+
+        if result is None:
+            if not report_path.exists():
+                # Confirmó que no hay nada recuperable -- propagar el
+                # timeout real en vez de fingir un resultado vacío.
+                raise ToolTimeoutError(tool_name, timeout, cmd)
+            result = ToolResult(
+                tool=tool_name,
+                command=cmd,
+                returncode=0,
+                stdout="",
+                stderr=(
+                    "Timeout del lado de Python, pero el contenedor "
+                    f"'{container_name}' había terminado y sí alcanzó a "
+                    "escribir su reporte -- recuperado del bind-mount "
+                    "antes de limpiar."
+                ),
+            )
         result.parsed = findings
+    finally:
+        # Recién ahora es seguro borrar -- ya se decidió (arriba) si había
+        # algo que recuperar del workdir o no.
+        shutil.rmtree(str(workdir), ignore_errors=True)
 
     return ScanResult(target=target_url, tool=tool_name, findings=findings, raw=result)
 
 
-def run_zap_baseline(target_url: str, timeout: int = 900) -> ScanResult:
+def run_zap_baseline(target_url: str, timeout: int = 900, scan_id: str | None = None) -> ScanResult:
     """Corre el escaneo dinámico (DAST) OWASP ZAP en modo baseline (pasivo) vía Docker.
 
     Repo: zaproxy/zaproxy. Capa: Agente de Escaneo (sección 3.1). Apache 2.0.
@@ -147,10 +243,17 @@ def run_zap_baseline(target_url: str, timeout: int = 900) -> ScanResult:
     seguro correrlo de forma recurrente/automática contra un cliente real.
     No encuentra SQLi/XSS/IDOR (para eso ver `run_zap_active_scan`).
 
+    Args:
+        scan_id: si se pasa (ej. el id de la fila `scans`), se usa para
+            nombrar el contenedor Docker de forma predecible
+            (`vigia-zap-<scan_id>`) en vez de un UUID aleatorio -- útil
+            para poder referenciarlo/limpiarlo desde otro proceso si hace
+            falta.
+
     Raises:
         ToolNotInstalledError: si `docker` no está en PATH.
     """
-    return _run_zap_script("zap-baseline.py", target_url, [], "zap-baseline", timeout)
+    return _run_zap_script("zap-baseline.py", target_url, [], "zap-baseline", timeout, scan_id=scan_id)
 
 
 def run_zap_active_scan(
@@ -159,6 +262,7 @@ def run_zap_active_scan(
     bearer_token: str | None = None,
     ajax_spider: bool = True,
     timeout: int | None = None,
+    scan_id: str | None = None,
 ) -> ScanResult:
     """Escaneo ACTIVO de ZAP (`zap-full-scan.py`) — sí ataca parámetros (SQLi, XSS, etc.).
 
@@ -187,6 +291,8 @@ def run_zap_active_scan(
             navegador headless dentro del contenedor).
         timeout: límite del subprocess en segundos. Por defecto,
             `minutes * 60` más 5 minutos de margen para spidering/arranque.
+        scan_id: ver `run_zap_baseline` -- nombra el contenedor Docker de
+            forma predecible en vez de un UUID aleatorio.
 
     Raises:
         ToolNotInstalledError: si `docker` no está en PATH.
@@ -211,7 +317,7 @@ def run_zap_active_scan(
     margen = 900 if ajax_spider else 300
     effective_timeout = timeout if timeout is not None else (minutes * 60 + margen)
     return _run_zap_script(
-        "zap-full-scan.py", target_url, extra_args, "zap-full-scan", effective_timeout
+        "zap-full-scan.py", target_url, extra_args, "zap-full-scan", effective_timeout, scan_id=scan_id
     )
 
 

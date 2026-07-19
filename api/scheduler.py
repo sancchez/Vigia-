@@ -27,6 +27,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from db.connection import get_conn
 from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
+from tools.asset_verification import asset_autorizado_para_escanear
 
 logger = logging.getLogger("vigia.scheduler")
 
@@ -52,13 +53,28 @@ def run_scan_cycle_once() -> int:
     conn = get_conn()
     try:
         activos = conn.execute(
-            "SELECT id, tenant_id, tipo, valor FROM assets WHERE is_active = 1"
+            "SELECT id, tenant_id, tipo, valor, verificado FROM assets WHERE is_active = 1"
         ).fetchall()
     finally:
         conn.close()
 
     grafo = _get_graph()
+    procesados = 0
     for activo in activos:
+        # Mismo gate que POST /scan/POST /scan/activo/CertStream (ver
+        # tools/asset_verification.py): un activo registrado pero no
+        # verificado (y no exento por ser localhost/IP privada) no debe
+        # recibir ni siquiera recon PASIVO automático recurrente -- antes de
+        # este chequeo, registrar el dominio de un tercero real bastaba para
+        # que este ciclo lo re-escaneara pasivamente cada N horas sin que el
+        # tenant hubiera probado ningún vínculo real con ese dominio.
+        if not asset_autorizado_para_escanear(activo["tipo"], activo["valor"], bool(activo["verificado"])):
+            logger.info(
+                "Activo %s omitido del ciclo recurrente -- no verificado ni exento",
+                activo["valor"],
+            )
+            continue
+        procesados += 1
         estado_inicial = new_state(
             target=activo["valor"],
             autorizacion_firmada=False,  # recurrente = siempre pasivo, ver docstring del módulo
@@ -97,8 +113,12 @@ def run_scan_cycle_once() -> int:
         finally:
             conn.close()
 
-    logger.info("Ciclo de escaneo recurrente completado: %d activo(s) procesados", len(activos))
-    return len(activos)
+    logger.info(
+        "Ciclo de escaneo recurrente completado: %d/%d activo(s) procesados (resto omitido por verificación)",
+        procesados,
+        len(activos),
+    )
+    return procesados
 
 
 def start_scheduler() -> BackgroundScheduler:

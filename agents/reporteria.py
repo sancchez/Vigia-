@@ -19,12 +19,20 @@ from orchestrator.state import PipelineState, make_trace_event
 
 from ._llm import LLMNoDisponibleError, call_claude
 
-SYSTEM_PROMPT = (
-    "Compilas todo el flujo (recon, hallazgos verificados, prioridad, remediación) en\n"
-    "un reporte único, claro, sin tecnicismos innecesarios, usando la plantilla de\n"
-    "la empresa. Estructura: resumen ejecutivo (3-4 líneas), qué se encontró y por\n"
-    "qué importa, qué hacer primero, y anexo técnico para quien sí quiera el detalle."
-)
+# Open-core: el prompt real (plantilla editorial de Vigia) vive en
+# `vigia_core_private` (ver docs/open-core.md). Fallback genérico si el
+# paquete no está instalado.
+try:
+    from vigia_core_private.reporteria import SYSTEM_PROMPT
+except ImportError:
+    SYSTEM_PROMPT = (
+        "Compilas todo el flujo (recon, hallazgos verificados, prioridad, "
+        "remediación) en un reporte único, claro, sin tecnicismos "
+        "innecesarios. Estructura básica: resumen de lo encontrado, qué "
+        "hacer primero, y detalle técnico. Esta es la versión community: "
+        "no usa la plantilla editorial pulida de reportes ejecutivos de "
+        "Vigia (esa capa es parte del paquete privado)."
+    )
 
 AGENTE = "reporteria"
 
