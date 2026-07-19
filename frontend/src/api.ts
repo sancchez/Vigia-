@@ -1,5 +1,10 @@
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8010";
 
+export type VerificationInstructions = {
+  dns_txt: { registro: string; tipo: string; valor: string };
+  http_file: { url: string; contenido: string };
+};
+
 export type Asset = {
   id: string;
   tipo: "dominio" | "app" | "ip";
@@ -7,6 +12,18 @@ export type Asset = {
   notas: string;
   is_active: boolean;
   created_at: string;
+  verificado: boolean;
+  verification_method: string | null;
+  verified_at: string | null;
+  exento_de_verificacion: boolean;
+  instrucciones_verificacion: VerificationInstructions | null;
+};
+
+export type VerifyAssetResult = {
+  verificado: boolean;
+  detalle: string;
+  verification_method: string | null;
+  verified_at: string | null;
 };
 
 export type ScanHistoryItem = {
@@ -153,6 +170,11 @@ export const api = {
   listAssets: () => request<Asset[]>("/assets"),
   createAsset: (tipo: string, valor: string, notas: string) =>
     request<Asset>("/assets", { method: "POST", body: JSON.stringify({ tipo, valor, notas }) }),
+  verifyAsset: (assetId: string, metodo: "dns_txt" | "http_file") =>
+    request<VerifyAssetResult>(`/assets/${assetId}/verify`, {
+      method: "POST",
+      body: JSON.stringify({ metodo }),
+    }),
   listScans: () => request<ScanHistoryItem[]>("/scans"),
   listFindings: () => request<Finding[]>("/findings"),
   runScan: (target: string, autorizacion_firmada: boolean) =>

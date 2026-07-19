@@ -67,17 +67,20 @@ hallazgo.get("tipo") or hallazgo.get("type") or "desconocido"
 pero el hallazgo verificado (`verified_findings`, ver `agents/verificacion.py`)
 nunca tiene esas claves en el nivel superior — solo dentro de `raw`. Mapear
 directo por `tipo` habría dejado casi todo en un cajón genérico sin valor de
-venta, así que `_categorizar_hallazgo()` en `agents/cumplimiento.py` mira
-dentro de `raw_json` (nombre de alerta de ZAP, `cweid`, tags/severity de
-Nuclei, regla de Semgrep) para inferir 13 categorías útiles
-(`cabeceras_seguridad_faltantes`, `cors_mal_configurado`,
-`control_acceso_evadible`, `exposicion_datos_sensibles`, `inyeccion`,
-`credenciales_debiles_o_default`, `cifrado_transporte_insuficiente`,
-`gestion_sesion_insegura`, `vulnerabilidad_dependencia_conocida`,
-`codigo_fuente_vulnerable`, `suplantacion_dominio`,
-`suplantacion_redes_sociales`, `sin_clasificar`), cada una con su propio
-mapeo a ISO 27001 y Ley 2573. `sin_clasificar` nunca descarta un hallazgo —
-lo deja documentado igual, porque la trazabilidad exige registrar todo lo
+venta, así que la función de categorización mira dentro de `raw_json`
+(nombre de alerta de ZAP, `cweid`, tags/severity de Nuclei, regla de
+Semgrep) para inferir una categoría útil, cada una con su propio mapeo a
+ISO 27001 y Ley 2573.
+
+**Nota (migración open-core):** la taxonomía real (13 categorías afinadas
+contra datos reales, con su mapeo específico a controles ISO/IEC 27001
+Anexo A y obligaciones de la Ley 2573) es la pieza de IP más diferenciada
+del proyecto (ver `docs/market-research.md` original, ahora solo en el
+paquete privado) y vive en `vigia_core_private/vigia_core_private/cumplimiento.py`
+(fuera de este repo público, ver `docs/open-core.md`). `agents/cumplimiento.py`
+en este repo cae a una taxonomía genérica de 3 categorías si ese paquete no
+está instalado. `sin_clasificar` nunca descarta un hallazgo — lo deja
+documentado igual, porque la trazabilidad exige registrar todo lo
 detectado.
 
 **Bug real encontrado y corregido durante la construcción de la

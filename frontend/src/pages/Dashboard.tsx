@@ -43,6 +43,9 @@ export default function Dashboard() {
   const [escaneando, setEscaneando] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
   const [descargando, setDescargando] = useState<string | null>(null);
+  const [assetVerificando, setAssetVerificando] = useState<string | null>(null);
+  const [assetExpandido, setAssetExpandido] = useState<string | null>(null);
+  const [metodoElegido, setMetodoElegido] = useState<Record<string, "dns_txt" | "http_file">>({});
 
   const cargarTodo = async () => {
     setCargando(true);
@@ -75,6 +78,21 @@ export default function Dashboard() {
       await cargarTodo();
     } catch (err) {
       setMensaje(err instanceof ApiError ? err.message : "No se pudo registrar el dominio.");
+    }
+  };
+
+  const comprobarVerificacion = async (assetId: string) => {
+    const metodo = metodoElegido[assetId] ?? "dns_txt";
+    setAssetVerificando(assetId);
+    setMensaje(null);
+    try {
+      const resultado = await api.verifyAsset(assetId, metodo);
+      setMensaje(resultado.detalle);
+      await cargarTodo();
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo comprobar la verificación.");
+    } finally {
+      setAssetVerificando(null);
     }
   };
 
@@ -203,28 +221,97 @@ export default function Dashboard() {
           <div className="card" style={{ marginBottom: "1.25rem" }}>
             <h2 style={{ fontSize: 17, marginBottom: 12 }}>Dominios protegidos</h2>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
-              {assets.map((a) => (
-                <div
-                  key={a.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    padding: "0.6rem 0",
-                    borderBottom: "0.5px solid var(--border)",
-                  }}
-                >
-                  <div>
-                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 13.5 }}>{a.valor}</span>
-                    <span className="chip ok" style={{ marginLeft: 8 }}>
-                      {a.is_active ? "activo" : "inactivo"}
-                    </span>
+              {assets.map((a) => {
+                const puedeEscanear = a.verificado || a.exento_de_verificacion;
+                return (
+                  <div key={a.id} style={{ borderBottom: "0.5px solid var(--border)", padding: "0.6rem 0" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <div>
+                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 13.5 }}>{a.valor}</span>
+                        <span className="chip ok" style={{ marginLeft: 8 }}>
+                          {a.is_active ? "activo" : "inactivo"}
+                        </span>
+                        {a.exento_de_verificacion ? (
+                          <span className="chip verificado" style={{ marginLeft: 8 }}>
+                            exento (local)
+                          </span>
+                        ) : a.verificado ? (
+                          <span className="chip verificado" style={{ marginLeft: 8 }}>
+                            verificado ({a.verification_method})
+                          </span>
+                        ) : (
+                          <span className="chip medium" style={{ marginLeft: 8 }}>
+                            sin verificar
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        {!puedeEscanear && (
+                          <button
+                            onClick={() => setAssetExpandido(assetExpandido === a.id ? null : a.id)}
+                          >
+                            {assetExpandido === a.id ? "Ocultar" : "Verificar propiedad"}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => correrScan(a.valor)}
+                          disabled={escaneando === a.valor || !puedeEscanear}
+                          title={puedeEscanear ? undefined : "Verifica la propiedad del dominio antes de escanear"}
+                        >
+                          {escaneando === a.valor ? "Escaneando…" : "Escanear ahora"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {assetExpandido === a.id && a.instrucciones_verificacion && (
+                      <div
+                        style={{
+                          marginTop: 10,
+                          padding: "0.75rem 0.9rem",
+                          background: "var(--bg-sunken)",
+                          borderRadius: 8,
+                          fontSize: 13,
+                        }}
+                      >
+                        <p style={{ marginBottom: 8, color: "var(--text-secondary)" }}>
+                          Demuestra que controlas <strong>{a.valor}</strong> con uno de estos dos métodos, luego
+                          confirma abajo.
+                        </p>
+                        <p style={{ marginBottom: 4 }}>
+                          <strong>Opción 1 — registro DNS TXT:</strong>
+                        </p>
+                        <p style={{ fontFamily: "var(--font-mono)", fontSize: 12, marginBottom: 8, wordBreak: "break-all" }}>
+                          Nombre: {a.instrucciones_verificacion.dns_txt.registro}
+                          <br />
+                          Valor: {a.instrucciones_verificacion.dns_txt.valor}
+                        </p>
+                        <p style={{ marginBottom: 4 }}>
+                          <strong>Opción 2 — archivo bien-conocido:</strong>
+                        </p>
+                        <p style={{ fontFamily: "var(--font-mono)", fontSize: 12, marginBottom: 10, wordBreak: "break-all" }}>
+                          URL: {a.instrucciones_verificacion.http_file.url}
+                          <br />
+                          Contenido: {a.instrucciones_verificacion.http_file.contenido}
+                        </p>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <select
+                            value={metodoElegido[a.id] ?? "dns_txt"}
+                            onChange={(e) =>
+                              setMetodoElegido((prev) => ({ ...prev, [a.id]: e.target.value as "dns_txt" | "http_file" }))
+                            }
+                          >
+                            <option value="dns_txt">Ya publiqué el TXT</option>
+                            <option value="http_file">Ya publiqué el archivo</option>
+                          </select>
+                          <button onClick={() => comprobarVerificacion(a.id)} disabled={assetVerificando === a.id}>
+                            {assetVerificando === a.id ? "Comprobando…" : "Comprobar ahora"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <button onClick={() => correrScan(a.valor)} disabled={escaneando === a.valor}>
-                    {escaneando === a.valor ? "Escaneando…" : "Escanear ahora"}
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
             <form onSubmit={agregarDominio} style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input

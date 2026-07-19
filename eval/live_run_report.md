@@ -1,5 +1,441 @@
 # Corridas en vivo del pipeline — 2026-07-15 a 2026-07-19
 
+## Corrida 17 (2026-07-19) — Contenedor huérfano de ZAP en timeout (Bug 1) + escaneo activo checkpointed vía la API real de ZAP (Bug 2)
+
+Objetivo: HANDOFF.md Item 2 dejaba dos problemas reales sin resolver,
+diagnosticados en Corrida 12: (1) un timeout de Python en
+`run_zap_active_scan`/`run_zap_baseline` deja el contenedor Docker
+huérfano corriendo indefinidamente (`--rm` no lo limpia porque el cliente
+`docker run` murió, no el contenedor) y además el `tempfile.TemporaryDirectory()`
+del bind-mount se borra en cuanto la excepción de timeout se propaga, así
+que un reporte que el contenedor huérfano alcanzara a escribir después es
+irrecuperable por diseño; (2) el escaneo activo (`POST /scan/activo`)
+bloqueaba el hilo de fondo con un único `subprocess.run(..., timeout=hasta 1800s)`
+sin visibilidad intermedia -- Corrida 12 documentó 4 intentos reales que
+expiraron sin producir ningún hallazgo.
+
+### Bug 1 — contenedor huérfano + reporte irrecuperable en timeout
+
+**Fix real en `tools/scan.py::_run_zap_script`:**
+- El contenedor ahora arranca con `--name vigia-zap-<scan_id o uuid>`
+  explícito (antes solo `--rm`, sin forma de referenciarlo después).
+- El directorio temporal ya NO usa `tempfile.TemporaryDirectory()` (que
+  borra el bind-mount en cuanto la excepción de timeout se propaga) --
+  ahora es `tempfile.mkdtemp()` manual, borrado explícitamente en un
+  `finally` que corre DESPUÉS de haber decidido si había algo que
+  recuperar.
+- En `ToolTimeoutError`: se consulta el estado real del contenedor
+  (`tools._shared.docker_container_running`, nuevo). Si sigue corriendo,
+  se espera una ventana de gracia corta (3s, `_TIMEOUT_GRACE_SECONDS`) por
+  si está terminando justo en ese momento (la carrera real que Corrida 12
+  planteaba como hipótesis) y se vuelve a chequear. Si de verdad sigue
+  corriendo, se fuerza `docker stop`/`docker rm`
+  (`tools._shared.docker_force_remove_container`, nuevo) -- nunca queda
+  huérfano -- y se relanza el `ToolTimeoutError` real. Si ya terminó
+  (dentro o fuera de la gracia), el workdir sigue intacto en ese momento y
+  se intenta parsear `zap-report.json` antes de borrar nada; si hay
+  reporte usable, se recupera como éxito parcial (con `stderr` explicando
+  que fue recuperado tras un timeout del cliente); si no, se propaga
+  `ToolTimeoutError` igual -- no es un éxito silencioso con hallazgos
+  vacíos.
+
+**Tests nuevos:** `tests/test_zap_timeout_cleanup.py` (7 tests) --
+deterministas, sin Docker real (mockean `run_command`,
+`docker_container_running`, `docker_force_remove_container`, y colapsan
+la ventana de gracia a 0s). Cubren: nombrado del contenedor con/sin
+`scan_id`; timeout con contenedor genuinamente corriendo (limpia y
+relanza); timeout con contenedor ya terminado pero sin reporte (sigue
+siendo timeout real, no éxito falso); la carrera real -- reporte
+recuperado del workdir antes de que se borre; el workdir sí se borra
+después de recuperar (no queda basura); `docker_force_remove_container`
+siempre se invoca en timeout.
+
+**No se pudo verificar en vivo el camino "contenedor genuinamente huérfano
+tras timeout real de 15-30 min"** dentro del presupuesto de esta sesión
+(hubiera requerido repetir un ZAP real de esa duración) -- la lógica se
+verificó con los mocks deterministas de arriba, que ejercitan exactamente
+las mismas ramas de código (`docker_container_running`,
+`docker_force_remove_container`, orden de limpieza del workdir) que un
+timeout real activaría, sustituyendo solo el tiempo de espera real por uno
+simulado.
+
+### Bug 2 — escaneo activo checkpointed vía la API real de ZAP
+
+**Investigación real, no solo lectura de docs:** se confirmó en vivo,
+contra un daemon de ZAP real (`zap.sh -daemon`, misma imagen Docker, sin
+el script de conveniencia `zap-full-scan.py`) y Juice Shop real, que la
+API HTTP de ZAP soporta exactamente el patrón que pedía HANDOFF.md:
+arrancar spider/AJAX spider/escaneo activo de forma asíncrona
+(`.../action/scan/` devuelve un id de inmediato) y consultar progreso con
+llamadas cortas y repetidas (`.../view/status/`). Se implementó
+`tools/zap_api.py` (nuevo) con ese driver completo, y se cableó en
+`api/main.py::_correr_escaneo_activo_en_background` (reemplaza la llamada
+a `tools.scan.run_zap_active_scan`) con un callback `on_progress` que
+persiste cada checkpoint en `scans.reporte_final` de inmediato -- `GET
+/scans/{id}` ahora refleja progreso real ("[spider] Spider clásico: 56%",
+"[ascan] Escaneo activo: 12%") en vez de solo `corriendo` durante 20-35
+minutos seguidos.
+
+**Hallazgo real no documentado en ningún lado obvio, costó tiempo
+diagnosticar:** ZAP decide si una request HTTP entrante es "para su propia
+API" comparando el header `Host` contra el puerto con el que arrancó
+(`-port 8080` dentro del contenedor) -- si se llega por el puerto mapeado
+del host Docker (ej. `localhost:48290`), el `Host` real no matchea y ZAP
+trata la petición como un proxy a reenviar, fallando con un 502
+"Connection refused" contra sí mismo. Fix: forzar `Host: localhost:8080`
+en cada request a la API sin importar el puerto mapeado
+(`tools/zap_api.py::_HOST_HEADER`).
+
+**Segundo hallazgo real:** el namespace correcto de la API del AJAX Spider
+es `ajaxSpider` (camelCase), NO `spiderAjax` -- ese segundo nombre, más
+intuitivo dada la convención de otros endpoints, devuelve
+`{"code":"no_implementor"}` y cuesta tiempo real de diagnóstico si no se
+sabe de antemano.
+
+**Verificado en vivo, de punta a punta, contra Juice Shop real y a través
+del endpoint HTTP real (no solo llamando al módulo Python aislado):**
+`uvicorn` real corriendo, tenant real registrado, asset `localhost`
+registrado (exento de verificación de propiedad -- Corrida 16), `POST
+/scan/activo` real con `ajax_spider: true, minutes: 2`, y `GET
+/scans/{id}` sondeado en llamadas HTTP cortas y separadas (no una espera
+continua) mostrando progreso real e incremental:
+
+```
+[iniciando] Daemon de ZAP listo.
+[spider] Spider clásico: 56%
+[spider] Spider clásico: 85%
+[ajax_spider] AJAX Spider: running, 0 resultado(s)
+[ascan] Escaneo activo: 0%
+[ascan] Presupuesto de tiempo agotado -- escaneo activo detenido a mitad.
+completado — Fases completadas: spider, ajax_spider, ascan. 631 hallazgo(s).
+```
+
+631 hallazgos reales confirmados persistidos en la tabla `findings` vía
+`GET /scans/{id}` (antes: 0, en los 4 intentos de Corrida 12, porque el
+timeout siempre llegaba primero). El contenedor daemon (`vigia-zap-<scan_id>`)
+se confirmó limpiado (`docker ps -a` vacío) tanto en el camino feliz como
+en un camino de error forzado.
+
+Por separado, con llamadas directas a la API (sin pasar por Vigia) se
+confirmó AJAX Spider real con evidencia de proceso (mismo patrón que
+diagnosticó Corrida 12: `geckodriver` + `firefox-esr --headless` reales
+dentro del contenedor, `com.crawljax` en los logs) -- crawling real
+incremental de 0 a 220 resultados observado en polls sucesivos de 5s.
+
+**Dos bugs reales encontrados y arreglados durante la propia verificación
+en vivo** (no solo en el camino feliz mockeado):
+
+1. **El reloj del presupuesto de `minutes` arrancaba antes de que el
+   daemon estuviera listo.** El arranque en frío del contenedor (reinstala
+   add-ons cada vez -- ver más abajo) tardó ~47-57s en un host tranquilo,
+   pero **más de 120s en una corrida real bajo contención genuina de
+   Docker** (varios contenedores de otros procesos concurrentes en esta
+   misma sesión, el mismo tipo de contención que ya había diagnosticado
+   Corrida 12) -- confirmado con `docker logs` mostrando instalación de
+   add-ons todavía en curso pasados los 120s, contenedor sano, no colgado.
+   Contar ese tiempo contra el presupuesto del usuario significaba que un
+   `minutes=1` podía terminar con 0% de escaneo real hecho y aun así
+   reportar `completado` con 0 hallazgos, engañosamente. Fix: el reloj
+   (`inicio`) se captura DESPUÉS de `wait_ready()`, no antes. Cubierto por
+   `tests/test_zap_checkpointed_scan.py::test_presupuesto_no_cuenta_el_tiempo_de_arranque_del_daemon`.
+2. **Un único `ReadTimeout` transitorio tumbaba el escaneo activo
+   completo.** Ocurrió de verdad durante el AJAX Spider (la fase más
+   pesada -- levanta Firefox headless) en la primera corrida E2E real de
+   esta sesión, bajo la misma contención de recursos de arriba. Antes del
+   fix, un solo poll HTTP lento marcaba `estado='error'` aunque el daemon
+   siguiera perfectamente vivo -- justo el tipo de fragilidad que un
+   diseño "checkpointed" debería evitar. Fix: `tools/zap_api.py::_zap_get`
+   reintenta hasta 2 veces con backoff corto ante
+   `requests.exceptions.RequestException` antes de propagar. Cubierto por
+   `tests/test_zap_checkpointed_scan.py::test_zap_get_reintenta_y_se_recupera_de_un_timeout_transitorio`
+   y `test_zap_get_propaga_si_todos_los_reintentos_fallan`.
+
+**Tests nuevos:** `tests/test_zap_checkpointed_scan.py` (9 tests) --
+mockean toda la red/Docker, cubren el camino feliz (fases reportadas,
+contenedor limpiado), AJAX spider opcional, limpieza del contenedor ante
+cualquier excepción a mitad de camino (mismo principio que Bug 1), daemon
+que nunca queda listo, los dos bugs de arriba, y los reintentos de
+`_zap_get`.
+
+**Limitación real, no resuelta esta sesión (documentada, no oculta):**
+cada contenedor daemon arranca "en frío" -- el filesystem del contenedor
+no trae los add-ons de ZAP (spiderAjax, selenium, webdriverlinux, retire,
+...) preinstalados, así que se reinstalan en cada escaneo nuevo (mismo
+costo que ya pagaba el enfoque anterior con `zap-full-scan.py`, no es un
+costo nuevo de este módulo, pero tampoco se mejoró). Un volumen Docker
+persistente montado en `/home/zap/.ZAP` eliminaría casi todo ese costo a
+partir del segundo escaneo -- se dejó fuera de esta sesión porque
+compartir ese volumen entre escaneos concurrentes de tenants distintos sin
+diseñarlo con cuidado podría filtrar contexto/sesión de un escaneo a otro,
+y el tiempo de esta sesión se priorizó en verificar el flujo checkpointed
+de punta a punta contra un daemon real.
+
+**Limitación real de arquitectura, también documentada sin resolver:**
+esto es "checkpointed" en el sentido de que el progreso se consulta con
+llamadas HTTP cortas y se persiste en la DB después de cada una -- pero si
+el proceso de la API de Vigia se cae a mitad de un escaneo, el escaneo en
+sí no se puede "retomar" desde cero tras un reinicio (el contenedor
+quedaría huérfano, aunque las mismas utilidades de limpieza de Bug 1 lo
+cubrirían en el próximo timeout que lo detecte). Resumibilidad real
+across-restart necesitaría persistir `container_name`/`api_base_url`/id de
+scan de ZAP en la fila `scans` y un job de reconciliación al arrancar --
+extensión razonable, fuera de alcance de esta sesión.
+
+**Cleanup:** todos los contenedores Docker de esta corrida (Juice Shop,
+varios daemons ZAP de prueba, el daemon de la corrida E2E real) se
+detuvieron y removieron (`docker rm -f`) al terminar -- `docker ps -a`
+solo muestra el contenedor `buildx_buildkit_desktop-linux` de Docker
+Desktop, no de esta corrida. Docker Desktop se cerró solo una vez a mitad
+de esta sesión (mismo problema ya documentado en HANDOFF.md) y se
+relanzó manualmente sin pérdida de progreso.
+
+**Suite de tests:** 74/74 pasan (58 preexistentes al empezar esta corrida
++ 16 nuevos de esta sesión: 7 de Bug 1, 9 de Bug 2), `ruff check .` limpio.
+
+## Corrida 16 (2026-07-19) — Verificación real de propiedad de dominio, cierra un gap de abuso real en `POST /assets`
+
+Objetivo: `POST /assets` dejaba que cualquier tenant autenticado registrara
+CUALQUIER dominio como propio -- incluido el de un tercero real, ej.
+`microsoft.com` -- sin ninguna prueba de control, y ese registro por sí
+solo bastaba para que `_tenant_tiene_asset_para_target()` (Corrida 12) lo
+tratara como "autorizado" para `POST /scan/activo`. `POST /scan` no tenía
+NI SIQUIERA ese chequeo de propiedad. Es tanto un gap de abuso real de
+producción como la causa raíz de un near-miss real de esta sesión (un
+agente casi confundió "el activo está registrado" con "está autorizado").
+
+### Diseño elegido
+
+Patrón estándar de la industria (Google Search Console, Detectify, etc.):
+token único por asset + prueba de control real vía **DNS TXT**
+(`_vigia-challenge.<dominio>`) o **archivo bien-conocido**
+(`https://<dominio>/.well-known/vigia-verification.txt`). Se implementaron
+**los dos métodos de verdad** (no solo uno -- había margen de tiempo), en
+`tools/asset_verification.py` (nuevo, ~230 líneas con el razonamiento
+completo en el docstring del módulo):
+
+- DNS vía `dnspython` (`dns.resolver`) -- ya era una dependencia transitiva
+  real de este proyecto (`dnstwist` la usa internamente), ahora declarada
+  explícita en `pyproject.toml` porque este módulo la importa directo.
+- HTTP vía `urllib.request` de la librería estándar -- cero dependencias
+  nuevas para ese camino.
+
+**Excepción de localhost/IP privada** (punto 5 de la asignación de esta
+sesión, pensado explícitamente, no un hardcode): un asset cuyo host/IP
+literal declarado es `localhost` o cae en un rango privado/loopback/
+link-local (RFC 1918/4193/3927, vía `ipaddress.ip_address(...).is_private/
+is_loopback/is_link_local` de la librería estándar, no una lista hecha a
+mano) queda exento de verificación. Razón: escanear "localhost" desde un
+proceso dado siempre apunta al proceso de quien ejecuta el escaneo, nunca
+al de un tercero -- no hay víctima posible. La exención se decide sobre el
+string LITERAL de `assets.valor`, nunca sobre una resolución DNS en vivo
+del nombre -- si se resolviera en el momento de decidir, un atacante podría
+usar DNS rebinding (apuntar temporalmente un dominio público a una IP
+privada) para colarse por la excepción. Un dominio sintético "que suena a
+prueba" (`miempresatest.com`, usado en corridas anteriores de este mismo
+proyecto) NO se exime -- sigue necesitando verificación real, que es
+justo el caso que esta corrida NO pudo demostrar en modo "éxito real" (ver
+"Qué quedó mockeado" más abajo).
+
+### Cambios de DB
+
+`db/schema.sql`: 4 columnas nuevas en `assets` (`verificado INTEGER NOT
+NULL DEFAULT 0`, `verification_token TEXT`, `verification_method TEXT
+CHECK(... IN ('dns_txt','http_file') OR IS NULL)`, `verified_at
+TIMESTAMP`). Primera vez que este proyecto necesita agregar columnas a una
+tabla YA EXISTENTE de una sesión anterior (a diferencia de
+`invitations`/`subscriptions`, que se sumaron como tablas nuevas completas)
+-- esto expuso un hallazgo real de portabilidad: `ALTER TABLE ... ADD
+COLUMN IF NOT EXISTS` es sintaxis válida en Postgres (>= 9.6) pero
+**rechazada por el parser de SQLite** (confirmado empíricamente contra la
+versión real empaquetada con este Python, 3.50.4 -- `sqlite3.OperationalError:
+near "EXISTS": syntax error`, no una falla silenciosa). Se resolvió
+poniendo las columnas nuevas directo en el `CREATE TABLE IF NOT EXISTS
+assets` (cubre bases de datos nuevas) y agregando una reconciliación
+explícita en `db/connection.py` para bases de datos ya existentes:
+`_ensure_sqlite_asset_verification_columns()` (chequea `PRAGMA
+table_info(assets)` antes de cada `ALTER TABLE ADD COLUMN`, sin `IF NOT
+EXISTS`) para SQLite, y el mismo `ADD COLUMN IF NOT EXISTS` nativo de
+Postgres reutilizado dentro de `_get_pg_conn()` (que sí lo soporta). Ambos
+caminos probados de verdad: una DB SQLite nueva, y una DB SQLite sintética
+creada a mano SIN estas columnas (simulando una `ciberseguridad.db` real de
+sesión anterior) -- ambas terminan con las 4 columnas, sin error en
+conexiones repetidas (idempotencia confirmada con dos `get_conn()`
+consecutivos).
+
+### Endpoints nuevos/cambiados en `api/main.py`
+
+- `POST /assets` ahora genera un `verification_token` real al crear
+  cualquier asset (incluso uno exento -- barato, y deja la puerta abierta a
+  que un asset hoy exento se reapunte a un dominio público real después).
+  `AssetOut` incluye `verificado`, `verification_method`, `verified_at`,
+  `exento_de_verificacion` (calculado), e `instrucciones_verificacion`
+  (nombre de TXT + valor, URL + contenido del archivo -- para que el
+  frontend no tenga que reconstruir nada).
+- `POST /assets/{id}/verify` (nuevo) -- ejecuta de verdad la comprobación
+  DNS o HTTP pedida (`{"metodo": "dns_txt"|"http_file"}`) y marca
+  `verificado=1` si pasa. Idempotente/reintentable. 404 si el asset no es
+  de ese tenant, 422 si es tipo `ip` o método inválido, 400 si el asset ya
+  está exento (no hace falta verificarlo).
+- `_tenant_tiene_asset_para_target()` (Corrida 12) se refactorizó: la
+  búsqueda del asset que hace match se extrajo a
+  `_buscar_asset_para_target()` (devuelve la fila completa, no solo
+  `bool`), y `_tenant_tiene_asset_para_target()` sigue siendo, a propósito,
+  SOLO la pregunta de propiedad (sin tocar verificación) para no romper su
+  contrato ni los tests que ya la ejercitaban como tal
+  (`tests/test_scan_activo_asset_gate.py`, sin cambios en esa parte). La
+  pregunta completa nueva vive en `_asset_verificado_para_target()`
+  (propiedad Y (verificado O exento)), con un mensaje de error que le dice
+  al tenant exactamente qué hacer (nombre del TXT, URL del archivo,
+  endpoint a llamar).
+- `POST /scan/activo` cambia su chequeo viejo (solo-ownership) por
+  `_asset_verificado_para_target()`.
+- `POST /scan` **gana el chequeo por primera vez** -- antes de esta sesión
+  no verificaba NADA sobre el `target` más allá de la forma del payload; el
+  bloqueo de Escaneo Activo (`gate_autorizacion`) seguía intacto, pero
+  recon pasivo y anti-suplantación corrían contra cualquier string. Ahora
+  rechaza con 403 antes de invocar el grafo si `target` no es un asset
+  verificado (o exento) del tenant -- evita también el costo real de
+  llamadas a Claude/subfinder/amass contra un target no autorizado.
+
+### Antisuplantación / monitoreo continuo también gateados
+
+- `api/certstream_listener.py::_build_variant_map()` ahora solo construye
+  variantes dnstwist para activos `verificado=True` o exentos -- antes, un
+  tenant podía registrar el dominio de un tercero real y CertStream
+  vigilaría activamente variantes de ese dominio ajeno en su nombre.
+- `api/scheduler.py::run_scan_cycle_once()` (el ciclo recurrente de recon
+  PASIVO, cada `VIGIA_SCAN_INTERVAL_HOURS`) también se gateó -- no estaba
+  en la lista explícita de la asignación de esta sesión, pero es el mismo
+  root cause exacto (activo no verificado recibiendo tratamiento como si lo
+  estuviera) y el cambio fue de bajo riesgo, así que se cerró igual.
+  `run_scan_cycle_once()` ahora devuelve solo el conteo de activos
+  PROCESADOS (antes devolvía el total sin filtrar).
+
+### Frontend (`frontend/src/pages/Dashboard.tsx`, `frontend/src/api.ts`)
+
+Funcional, no pulido (a propósito, según la asignación): cada activo
+muestra un chip -- "exento (local)" / "verificado (método)" / "sin
+verificar" -- y el botón "Escanear ahora" se deshabilita cuando ninguno de
+los dos aplica. Un botón "Verificar propiedad" expande un panel con las
+instrucciones exactas (nombre+valor del TXT, URL+contenido del archivo) y
+un selector + botón "Comprobar ahora" que llama a `POST
+/assets/{id}/verify` de verdad. `npx tsc -b` corrido y limpio (exit 0) --
+no se levantó el dev server real esta sesión por tiempo, pero el
+type-check cubre errores de forma/props que romperían el build.
+
+### Tests (`tests/test_asset_verification.py`, nuevo -- 26 casos + 1 test
+existente actualizado en `tests/test_scan_activo_asset_gate.py`)
+
+Cuatro niveles: (1) unidad pura sobre `tools/asset_verification.py`
+(exención localhost/IP privada, IP pública NO exenta, dominio sintético NO
+exento, generación de token, instrucciones); (2) integración sobre `POST
+/assets`/`POST /assets/{id}/verify` reales vía `TestClient` con la
+comprobación DNS/HTTP MOCKEADA (documentado explícitamente -- no
+controlamos ningún dominio real para escribirle un TXT válido); (3)
+integración sobre el gate nuevo de `POST /scan`/`POST /scan/activo`
+(bloquea sin verificar, permite verificado, permite exento, aislamiento
+multi-tenant); (4) **DNS real, sin mock**, contra `google.com` (dominio
+público real que no controlamos) -- confirma que `verificar_dns_txt` hace
+una resolución DNS de verdad contra la red real (no simulada) y decodifica
+una respuesta real, aunque solo puede demostrar el camino "no encontrado"
+(no tenemos forma de escribirle un TXT real a un dominio que no
+controlamos); el camino de éxito se cubre aparte con
+`dns.resolver.Resolver` mockeado explícitamente, documentado como tal en
+el docstring del test. Mismo patrón para `verificar_http_well_known`
+(GET real sin mock contra `google.com`, 404 esperado).
+
+**Hallazgo real durante los tests, no cosmético:** un test nuevo usó
+`203.0.113.7` como "ejemplo de IP pública" (copiando el mismo valor que ya
+usaba `test_scan_activo_asset_gate.py` para un caso no relacionado con
+exención) y falló -- `ipaddress.ip_address("203.0.113.7").is_private` es
+`True` en Python, porque ese rango es TEST-NET-3 (RFC 5737, reservado para
+documentación, no globalmente enrutable). Corregido usando `8.8.8.8` y
+`1.1.1.1` (resolutores DNS públicos reales) para ese caso -- documentado en
+el test para que no se repita la confusión.
+
+Suite completa: **67 tests pasan** (41 ya existentes sin cambios de
+comportamiento + 1 actualizado para reflejar el nuevo gate + 26 nuevos),
+`py -m pytest -q` verde contra SQLite (default).
+
+**Verificado también contra Postgres 16 real** (no quedó como pendiente):
+se levantó un contenedor `postgres:16-alpine` descartable
+(`docker run --name vigia-verif-pgtest ...`, puerto 48293 para no chocar
+con el contenedor ZAP que otra tarea en paralelo tenía corriendo en esta
+misma sesión), y con `VIGIA_PG_TEST_URL` apuntando a él se corrió primero
+`tests/test_asset_verification.py` + `tests/test_scan_activo_asset_gate.py`
+(35 tests, verde) y luego la suite COMPLETA (67 tests, verde,
+`145.18s`) -- confirma en vivo que `_ensure_sqlite_asset_verification_columns()`
+no rompe nada del lado Postgres (esa función ni se ejecuta ahí, ver
+`db/connection.py`) y que el `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+nativo agregado a `_get_pg_conn()` para reconciliar una tabla `assets`
+Postgres preexistente corre sin error real, no solo "debería funcionar
+porque es sintaxis estándar de Postgres >= 9.6". Contenedor de prueba
+detenido y eliminado (`docker rm -f`) al terminar, sin tocar
+`.env.example` ni ninguna instancia real de producción.
+
+### Qué quedó mockeado vs. qué es real -- resumen honesto
+
+- **Real:** resolución DNS TXT contra la red real (`dns.resolver`, probado
+  contra `google.com` en vivo); petición HTTP GET real (`urllib.request`,
+  también contra `google.com`); toda la lógica de exención
+  (`ipaddress` de la librería estándar, sin mocks en ningún test); el
+  endpoint `POST /assets/{id}/verify` completo (lookup, update SQL,
+  respuesta) corre real en los tests de integración; el gate en `POST
+  /scan`/`POST /scan/activo`/CertStream/scheduler corre real, sin mockear
+  la lógica de autorización en sí.
+- **Mockeado (documentado explícitamente en cada test):** el RESULTADO de
+  `verificar_asset()` en los tests de integración que necesitan un asset
+  "ya verificado" para probar el resto del flujo -- porque los dominios de
+  prueba (`dominiopublico.test`, `midominiolegitimo.test`, etc.) no pueden
+  resolver de verdad a un TXT/archivo que no controlamos. El camino de
+  éxito de `verificar_dns_txt` en sí (parseo de una respuesta TXT real que
+  SÍ contiene el token) también se mockea aparte, por la misma razón.
+- **No probado en esta sesión:** una verificación end-to-end contra un
+  dominio real que el operador de Vigia controle de verdad (comprar/usar un
+  dominio propio, escribirle el TXT real, y verificarlo por HTTP contra la
+  API real) -- requeriría acceso a un registrador de dominios o un dominio
+  ya existente del usuario, fuera de lo que un agente puede hacer sin ese
+  acceso. Próximo paso concreto si se quiere cerrar el último tramo de
+  "probado en vivo, no solo en tests": pedirle al usuario un dominio de
+  prueba real (puede ser un subdominio barato) y correr el flujo completo
+  una vez con él.
+
+### Hallazgo real de infraestructura de tests, encontrado y arreglado en el camino
+
+Correr la suite completa varias veces seguidas (necesario para confirmar
+que los tests nuevos no rompían nada, y que no chocaban con el trabajo
+concurrente de otra tarea sobre `POST /scan/activo` en esta misma sesión,
+ver más abajo) expuso una intermitencia real: un lote de 5 tests falló de
+forma NO determinista (repartidos entre `test_scan_activo_asset_gate.py` y
+`test_asset_verification.py`, sin relación temática aparente entre sí) en
+una corrida completa, y pasaron limpio al re-correr la suite completa o
+cada archivo por separado -- la firma clásica de una condición de carrera
+entre tests, no un bug de lógica de producto.
+
+Diagnóstico: `POST /scan/activo` arranca un `threading.Thread` real
+(`daemon=True`) que sigue vivo después de que el response HTTP 202 ya
+volvió. Los tests que ejercitan el camino "sí se llama al escaneo" solo
+esperaban a que el MOCK del escaneo se hubiera invocado (`llamado["zap"] is
+True`), no a que el thread completo terminara -- pero ese thread, tras
+llamar al mock, todavía tiene que hacer su propio `get_conn()` + `UPDATE
+scans` + insertar findings. Si el test retorna en ese punto, `pytest`
+empieza a desmontar sus fixtures (`monkeypatch` revierte `DATABASE_URL`) y
+arranca el siguiente test (que setea su propio `DATABASE_URL` a un archivo
+SQLite temporal distinto) casi de inmediato -- si el thread zombie hace su
+`get_conn()` en esa ventana, termina operando contra la base de datos
+equivocada (la del test siguiente, o el `DATABASE_URL` sin setear que cae
+al default `./ciberseguridad.db`).
+
+Arreglo real, no un `sleep` más largo: se agregó `_esperar_scan_terminado()`
+en ambos archivos de test afectados que sondea `GET /scans/{id}` hasta que
+`estado` deja de ser `'corriendo'` -- esa transición de estado es
+precisamente la última escritura que hace el thread, así que esperarla
+garantiza que el thread ya terminó del todo antes de que el test retorne.
+Aplicado a los tests de la suite que arrancan el thread real con un mock
+que sí "tiene éxito" (los que esperan un mock que falla/nunca se llama no
+lo necesitaban, ya cortan en 403 antes de que exista un thread). Confirmado
+con 3 corridas limpias consecutivas de la suite completa después del fix.
+
 ## Corrida 15 (2026-07-19) — Empaquetado y config de hosting: Dockerfile, Railway/Render, demo de un comando, seed de datos reales
 
 Objetivo: cerrar el bloqueador #1 de `docs/produccion-readiness.md`
@@ -814,10 +1250,11 @@ independientes:
    con `tipo`/`severidad`/`endpoint` correctos.
 3. `GET /reports/cumplimiento` con el mismo JWT: `total_hallazgos: 6`,
    categorizados correctamente sin tocar `agents/cumplimiento.py` —
-   `suplantacion_redes_sociales` (4, `A.5.7 Inteligencia de amenazas`) y
-   `suplantacion_dominio` (2, `A.5.7 Inteligencia de amenazas` + `A.8.23
-   Filtrado web`) — confirma que la categorización ya estaba lista desde
-   que se escribió ese módulo, tal como documentaba la brecha original.
+   las 6 filas cayeron en las categorías de suplantación esperadas, cada
+   una con su mapeo a ISO 27001 correspondiente (detalle del mapeo exacto
+   en el paquete privado, ver `docs/open-core.md`) — confirma que la
+   categorización ya estaba lista desde que se escribió ese módulo, tal
+   como documentaba la brecha original.
 
 **Limpieza:** servidor de prueba (puerto 48181) detenido al terminar. El
 tenant/scan/findings de la prueba con `microsoft.com` se eliminaron por

@@ -186,18 +186,45 @@ def _registrar_tenant(client, nombre: str, email: str, password: str = "claveSeg
     return resp.json()["access_token"]
 
 
+def _esperar_scan_terminado(client, token: str, scan_id: str, intentos: int = 100, espera: float = 0.05) -> str:
+    """Espera a que el thread de `_correr_escaneo_activo_en_background` termine de verdad.
+
+    Hallazgo real de esta sesión (Corrida 16): esperar solo a que se haya
+    LLAMADO al mock de `run_zap_active_scan` (el patrón viejo de este
+    archivo) no es suficiente -- el thread real sigue vivo después de eso
+    (todavía tiene que hacer `get_conn()` + `UPDATE scans` + insertar
+    findings), y si el test termina y `monkeypatch`/`test_db` revierten
+    `DATABASE_URL` ANTES de que ese `get_conn()` interno se ejecute, el
+    thread zombie escribe en la base de datos temporal del SIGUIENTE test
+    que ya arrancó -- corrupción de estado cruzada entre tests, intermitente
+    según el scheduling exacto del SO (confirmado en vivo: la suite completa
+    falló de forma no determinista en tests SIN relación aparente hasta
+    diagnosticar esto). Sondear `GET /scans/{id}` hasta que `estado` deje de
+    ser 'corriendo' SÍ garantiza que el thread ya hizo su última escritura
+    a la DB, porque esa escritura es precisamente la que cambia `estado`.
+    """
+    import time
+
+    for _ in range(intentos):
+        resp = client.get(f"/scans/{scan_id}", headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code == 200 and resp.json()["estado"] != "corriendo":
+            return resp.json()["estado"]
+        time.sleep(espera)
+    raise AssertionError(f"scan {scan_id} no terminó dentro del tiempo esperado (sigue 'corriendo')")
+
+
 def test_scan_activo_rechaza_target_sin_asset_registrado(client, monkeypatch):
     llamado = {"zap": False}
 
     def _zap_espia(*_args, **_kwargs):
         llamado["zap"] = True
         raise AssertionError(
-            "run_zap_active_scan se invocó contra un target que el tenant "
-            "nunca registró como asset -- exactamente el gap real que "
+            "run_checkpointed_active_scan se invocó contra un target que el "
+            "tenant nunca registró como asset -- exactamente el gap real que "
             "agents/revision_ia.py encontró en esta sesión."
         )
 
-    monkeypatch.setattr(main_module, "run_zap_active_scan", _zap_espia)
+    monkeypatch.setattr(main_module, "run_checkpointed_active_scan", _zap_espia)
 
     token = _registrar_tenant(client, "Pyme Sin Assets", "sinassets@scanactivo.test")
 
@@ -218,17 +245,32 @@ def test_scan_activo_rechaza_target_sin_asset_registrado(client, monkeypatch):
 def test_scan_activo_permite_target_con_asset_registrado(client, monkeypatch):
     """Contraprueba necesaria (mismo principio que
     test_gate_autorizacion.py::test_grafo_real_permite_escaneo_con_autorizacion_true):
-    el nuevo check no debe bloquear de más un target legítimo."""
+    el nuevo check no debe bloquear de más un target legítimo.
+
+    Actualizado esta sesión (verificación de propiedad de dominio, ver
+    `tools/asset_verification.py`): 'midominiolegitimo.test' es un dominio
+    público (no localhost/IP privada), así que además de estar registrado
+    como asset ahora también necesita estar VERIFICADO -- registrar un
+    dominio ya no es suficiente por sí solo para autorizar un escaneo, que es
+    exactamente el gap que esta sesión cierra. Se mockea la comprobación
+    DNS/HTTP real (`main_module.verificar_asset`) para simular un TXT válido
+    sin depender de que 'midominiolegitimo.test' resuelva de verdad -- el
+    endpoint `POST /assets/{id}/verify` en sí (parseo de respuesta, updates
+    de DB) sí corre real."""
     llamado = {"zap": False}
 
     class _ResultadoFalso:
         findings: list = []
+        detalle_final: str = "mock: sin fases reales"
 
     def _zap_espia(*_args, **_kwargs):
         llamado["zap"] = True
         return _ResultadoFalso()
 
-    monkeypatch.setattr(main_module, "run_zap_active_scan", _zap_espia)
+    monkeypatch.setattr(main_module, "run_checkpointed_active_scan", _zap_espia)
+    monkeypatch.setattr(
+        main_module, "verificar_asset", lambda *_a, **_k: (True, "mock: token encontrado")
+    )
 
     token = _registrar_tenant(client, "Pyme Con Asset", "conasset@scanactivo.test")
     asset = client.post(
@@ -237,6 +279,15 @@ def test_scan_activo_permite_target_con_asset_registrado(client, monkeypatch):
         json={"tipo": "dominio", "valor": "midominiolegitimo.test"},
     )
     assert asset.status_code == 200
+    asset_id = asset.json()["id"]
+
+    verificacion = client.post(
+        f"/assets/{asset_id}/verify",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"metodo": "dns_txt"},
+    )
+    assert verificacion.status_code == 200
+    assert verificacion.json()["verificado"] is True
 
     resp = client.post(
         "/scan/activo",
@@ -251,15 +302,11 @@ def test_scan_activo_permite_target_con_asset_registrado(client, monkeypatch):
     scan_id = resp.json()["scan_id"]
     assert scan_id
 
-    # El thread de fondo corre async -- puede no haber terminado todavía,
-    # pero para este test lo único que importa es que SÍ se haya llamado
-    # (a diferencia del caso rechazado, donde jamás se llama).
-    import time
-
-    for _ in range(50):
-        if llamado["zap"]:
-            break
-        time.sleep(0.05)
+    # Espera a que el thread real termine del todo (no solo a que se haya
+    # llamado al mock) -- ver docstring de _esperar_scan_terminado, evita
+    # que el thread zombie escriba en la DB temporal del siguiente test.
+    estado_final = _esperar_scan_terminado(client, token, scan_id)
+    assert estado_final == "completado"
     assert llamado["zap"] is True
 
 
@@ -270,7 +317,7 @@ def test_scan_activo_rechaza_target_de_otro_tenant(client, monkeypatch):
     def _zap_espia(*_args, **_kwargs):
         raise AssertionError("no debía llegar a invocar el escaneo real")
 
-    monkeypatch.setattr(main_module, "run_zap_active_scan", _zap_espia)
+    monkeypatch.setattr(main_module, "run_checkpointed_active_scan", _zap_espia)
 
     token_dueno = _registrar_tenant(client, "Dueno Real", "dueno@scanactivo.test")
     client.post(

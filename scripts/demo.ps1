@@ -121,7 +121,14 @@ Write-Host "`n[3/5] Preparando frontend..." -ForegroundColor Yellow
 
 $frontendDir = Join-Path $RepoRoot "frontend"
 $envLocalPath = Join-Path $frontendDir ".env.local"
-"VITE_API_URL=http://localhost:$BackendPort" | Set-Content -Path $envLocalPath -Encoding utf8
+# NO usar `Set-Content -Encoding utf8` aqui: en Windows PowerShell 5.1 ese
+# encoding SIEMPRE antepone un BOM UTF-8 (EF BB BF), y el parser de env de
+# Vite/dotenv no reconoce `VITE_API_URL` con un BOM pegado adelante -- la
+# app cae en silencio al default hardcodeado de frontend/src/api.ts
+# (localhost:8010) sin ningun error visible, y el login falla con
+# "No se pudo conectar con el servicio". Encontrado en vivo probando la demo.
+$envContent = "VITE_API_URL=http://localhost:$BackendPort`n"
+[System.IO.File]::WriteAllText($envLocalPath, $envContent, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "Escrito $envLocalPath -> VITE_API_URL=http://localhost:$BackendPort"
 
 $nodeModulesPath = Join-Path $frontendDir "node_modules"

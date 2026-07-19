@@ -40,14 +40,80 @@ Abrir `http://localhost:48174`. Cuenta de demo ya creada en la corrida anterior:
 
 **Hallazgo real, no resuelto del todo:** la latencia de `claude -p` varía — una llamada tardó más de 180s y expiró. Se subió el timeout default a 300s y se hizo configurable (`VIGIA_CLAUDE_CLI_TIMEOUT`), pero no hay garantía de que 300s alcance siempre. Si esto se vuelve un problema real en producción, la solución correcta es la API key real (`ANTHROPIC_API_KEY`), no seguir subiendo el timeout de la CLI — la CLI es para desarrollo/demo, nunca para el servicio multi-tenant real con carga concurrente.
 
-### Item 2 — Escaneo activo como job de fondo ✅ HECHO, 🟡 probado en vivo con un bloqueador real de infraestructura sin resolver
-Nuevo `POST /scan/activo` (requiere `autorizacion_firmada: true` explícito en el mismo request, a propósito más estricto que `POST /scan`) que arranca `run_zap_active_scan` en un `threading.Thread` y responde 202 de inmediato con `scan_id`. `GET /scans/{id}` consulta el estado (`corriendo`/`completado`/`error`) y los hallazgos cuando ya terminó. **Corrida 12 (`eval/live_run_report.md`) además cerró un gap de seguridad real que un agente de revisión de IA (`agents/revision_ia.py`) había encontrado en este mismo endpoint**: no validaba que `target_url` fuera un asset del tenant — ver Item transversal de IA más abajo y `tests/test_scan_activo_asset_gate.py`.
+### Item 2 — Escaneo activo como job de fondo ✅ HECHO, ✅ el bloqueador de infraestructura de Corrida 12 se cerró de verdad en Corrida 17
+Nuevo `POST /scan/activo` (requiere `autorizacion_firmada: true` explícito en el mismo request, a propósito más estricto que `POST /scan`) que arranca el escaneo activo en un `threading.Thread` y responde 202 de inmediato con `scan_id`. `GET /scans/{id}` consulta el estado (`corriendo`/`completado`/`error`) y los hallazgos cuando ya terminó. **Corrida 12 cerró un gap de seguridad real que un agente de revisión de IA (`agents/revision_ia.py`) había encontrado en este mismo endpoint**: no validaba que `target_url` fuera un asset del tenant. **Corrida 16 fue más allá**: registrar el asset ya no basta, ahora hace falta verificación real de propiedad (DNS TXT / archivo HTTP) salvo para localhost/IP privada — ver `tools/asset_verification.py` y `tests/test_asset_verification.py`.
 
-**Probado en vivo esta sesión (Corrida 12), con un resultado honesto, no el que se esperaba:** se montó el flujo completo real — tenant real, `POST /assets` real, Juice Shop real (dos instancias Docker), usuario y login reales en Juice Shop para un JWT real, `POST /scan/activo` real con ese bearer token y `autorizacion_firmada: true`. El gate nuevo de autorización de asset funcionó correctamente (dejó pasar el target legítimo). **Pero el escaneo ZAP en sí (con AJAX Spider, 20 min + margen = 30 min efectivos) volvió a exceder el presupuesto sin terminar — tercera vez que pasa en este proyecto (antes 25min y 35min, ahora 30min)** — esta vez SÍ se diagnosticó en vez de solo subir el timeout: `docker logs` no imprime nada en este modo de ZAP (dato nuevo), pero `docker top`/`docker exec ps aux` confirmó un Firefox headless real activamente renderizando pestañas y el propio Juice Shop al 85-92% CPU durante el ataque activo — es lento de verdad en este host, no está colgado. Un segundo intento más acotado (spider clásico, 5 min, la misma config que sí funcionó en Corrida 3) **también expiró** — no se descarta contención de recursos acumulada tras ~45 min de Docker bajo carga continua en la misma sesión.
+**Corrida 12 (2026-07-19) — diagnóstico honesto de un bloqueador real, no resuelto en el momento:** el escaneo ZAP en sí (con AJAX Spider) excedió el presupuesto de tiempo repetidamente (3 corridas: 25min, 35min, 30min) contra Juice Shop real, incluso con el gate de autorización nuevo funcionando bien. Diagnóstico real (no una suposición): `docker top`/`docker exec ps aux` confirmó un Firefox headless real activamente renderizando pestañas — lento de verdad en ese host, no colgado. Se encontró además un bug real: al expirar el timeout de Python, el contenedor Docker queda huérfano (`--rm` no lo limpia porque solo actúa si el contenedor termina por sí mismo), y el directorio temporal del reporte ya estaba borrado para ese momento — un timeout era irrecuperable por diseño.
 
-**Bug real nuevo encontrado en el camino:** al expirar el timeout de Python, el contenedor Docker del lado del daemon queda huérfano corriendo indefinidamente (`--rm` no lo limpia porque solo actúa si el contenedor termina por sí mismo) — y peor, el directorio temporal donde ZAP escribiría su reporte ya fue borrado por Python para ese momento, así que un timeout es irrecuperable por diseño actual incluso si el contenedor eventualmente termina. Ver Corrida 12 para el diagnóstico completo y el siguiente paso concreto (usar `--name` explícito + limpieza real en el `except ToolTimeoutError`).
+**Corrida 17 (2026-07-19) — ambos problemas de Corrida 12 cerrados de verdad, con Docker/ZAP real, no solo en el papel:**
 
-**No resuelto, próximo paso concreto:** repetir el intento en un host/sesión sin la contención de recursos acumulada de esta corrida, y/o implementar el AJAX Spider como job desacoplado del timeout del subprocess (ya se sugería esto en la sesión anterior). Mientras tanto, los únicos números reales de recall/precisión autenticado-vs-no-autenticado siguen siendo los de Corrida 4 (9.09%/20% en ambos casos, sin diferencia — el token solo no hizo nada porque el crawler nunca llegaba a las rutas protegidas con spider clásico).
+1. **Contenedor huérfano + reporte irrecuperable (Bug 1): arreglado.**
+   `tools/scan.py::_run_zap_script` ahora nombra el contenedor explícitamente
+   (`--name vigia-zap-<scan_id>`), y en timeout consulta el estado real del
+   contenedor (`tools._shared.docker_container_running`) antes de decidir:
+   si sigue corriendo, lo detiene de verdad (`docker_force_remove_container`,
+   nunca queda huérfano) y relanza el timeout real; si ya terminó (incluso
+   dentro de una ventana de gracia corta para la carrera real que Corrida 12
+   planteaba), recupera el reporte del workdir ANTES de borrarlo (ya no se
+   usa `tempfile.TemporaryDirectory()`, que borraba el bind-mount en cuanto
+   la excepción se propagaba). Cubierto por 7 tests deterministas
+   (`tests/test_zap_timeout_cleanup.py`), sin depender de un ZAP real lento
+   en cada corrida de CI.
+
+2. **El giant blocking call (Bug 2): reemplazado por un daemon de ZAP + polling HTTP real, verificado en vivo.**
+   Nuevo `tools/zap_api.py` conduce la API HTTP real de ZAP (`zap.sh -daemon`,
+   sin el script de conveniencia `zap-full-scan.py`) en vez de un único
+   `subprocess.run` con timeout fijo — arrancar cada fase (spider/AJAX
+   spider/escaneo activo) es una llamada HTTP que responde de inmediato con
+   un id, y el progreso se consulta con polls cortos y repetidos.
+   `api/main.py::_correr_escaneo_activo_en_background` persiste cada
+   checkpoint en `scans.reporte_final` de inmediato -- `GET /scans/{id}`
+   ahora refleja progreso real ("[spider] Spider clásico: 56%") en vez de
+   solo `corriendo` durante 20-35 minutos. **Verificado de punta a punta
+   contra Juice Shop real, a través del endpoint HTTP real**: `POST
+   /scan/activo` con `ajax_spider: true`, sondeado con `GET /scans/{id}` en
+   llamadas HTTP separadas, mostró progreso real e incremental (spider
+   56%→85%, AJAX Spider corriendo, escaneo activo iniciado) y terminó en
+   `completado` con **631 hallazgos reales** persistidos — antes: 0, en los
+   4 intentos de Corrida 12, porque el timeout siempre llegaba primero.
+   Contenedor confirmado limpiado (`docker ps -a` vacío) tanto en éxito como
+   en un camino de error forzado. Cubierto por 9 tests deterministas
+   (`tests/test_zap_checkpointed_scan.py`).
+
+**Dos bugs reales adicionales encontrados y arreglados durante la propia
+verificación en vivo de Corrida 17** (no en el camino feliz mockeado): el
+reloj del presupuesto de `minutes` arrancaba antes de que el daemon
+estuviera listo (un arranque lento bajo contención real de Docker en esta
+sesión, >120s confirmado, se comía todo el presupuesto sin escanear nada);
+y un único `ReadTimeout` transitorio durante el AJAX Spider tumbaba el
+escaneo completo aunque el daemon seguía vivo (ahora `tools/zap_api.py::_zap_get`
+reintenta 2 veces con backoff). Detalle completo, incluyendo el hallazgo no
+documentado en ningún lado obvio de que ZAP requiere el header `Host:
+localhost:<puerto interno>` en cada llamada a su API sin importar el puerto
+mapeado del host Docker, y que el namespace correcto del AJAX Spider es
+`ajaxSpider` (no `spiderAjax`, que devuelve `no_implementor`), en
+`eval/live_run_report.md` Corrida 17.
+
+**Limitación real, no resuelta, documentada sin ocultar:** cada contenedor
+daemon arranca "en frío" -- reinstala los add-ons de ZAP en cada escaneo
+(mismo costo que ya pagaba el enfoque anterior, no empeorado ni mejorado
+esta sesión). Un volumen persistente en `/home/zap/.ZAP` lo evitaría a
+partir del segundo escaneo, pero compartirlo entre escaneos concurrentes de
+tenants distintos sin diseñarlo con cuidado podría filtrar contexto entre
+escaneos -- se dejó fuera de esta sesión a propósito. Tampoco hay
+resumibilidad real across-restart del proceso de la API (si el proceso de
+Vigia se cae a mitad de un escaneo, ese escaneo específico no se retoma
+solo, aunque el contenedor sí se limpia en el próximo timeout que lo
+detecte) -- necesitaría persistir `container_name`/scan id de ZAP en la
+fila `scans` y un job de reconciliación al arrancar.
+
+Los únicos números reales de recall/precisión autenticado-vs-no-autenticado
+con AJAX Spider funcionando de punta a punta siguen pendientes de una
+corrida contra `eval/ground_truth.yaml` (Corrida 17 verificó que el
+mecanismo funciona y produce hallazgos reales, pero no corrió
+`eval/run_eval.py` contra ellos — próximo paso natural, ahora sí viable sin
+que el timeout llegue primero). Los números previos siguen siendo los de
+Corrida 4 (9.09%/20% en ambos casos, spider clásico sin AJAX Spider).
 
 ### Item 3 — Probar Trivy/Grype/Semgrep de verdad ⬜ NO HECHO
 Wrappers ya existen en `tools/scan.py` (`run_trivy_image`, `run_grype`, `run_semgrep`), nunca se corrieron contra nada real en ninguna sesión. Son el frente de "código y dependencias del cliente" — sin esto Vigia solo cubre la mitad de la superficie de ataque real de una pyme (la web pública, no su código fuente ni sus dependencias).

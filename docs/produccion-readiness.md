@@ -16,6 +16,17 @@ de esto está desplegado contra la infraestructura real de ningún hosting
 todavía — eso requiere que el usuario cree una cuenta y conecte el repo (ver
 `docs/despliegue.md`), un paso que ningún agente puede dar por él.
 
+**Actualizado 2026-07-19 (Corrida 16):** se cerró un gap de abuso real de
+producción, no solo un pulido — `POST /assets` dejaba registrar CUALQUIER
+dominio como propio (incluido el de un tercero real) sin ninguna prueba de
+control, y ese registro por sí solo bastaba para autorizar escaneo/monitoreo
+contra ese target. Ahora existe verificación real de propiedad (patrón
+Google Search Console: DNS TXT o archivo bien-conocido), con una excepción
+explícita y razonada para localhost/IP privada (los targets de laboratorio
+de los que depende el resto de este proyecto para probarse a sí mismo). Ver
+"7. Verificación real de propiedad de dominio" más abajo y
+`eval/live_run_report.md` Corrida 16 para el detalle completo.
+
 Todo lo construido hasta ahora (pipeline LangGraph, backend multi-tenant,
 frontend, Nuclei/ZAP/Semgrep/Trivy/Grype, CertStream, cumplimiento) fue
 **probado en vivo pero nunca desplegado** — cada sesión de trabajo levantaba
@@ -46,7 +57,9 @@ Se revisaron los tres endpoints agregados/modificados en esta sesión
 | Endpoint | Auth |
 |---|---|
 | `GET /reports/cumplimiento` | ✅ `Depends(get_current_user)` |
-| `POST /scan/activo` | ✅ `Depends(get_current_user)` (más el gate propio de `autorizacion_firmada=true` explícito en el body, 403 si falta) — **actualizado**: también valida vía `_tenant_tiene_asset_para_target()` que `target_url` corresponda a un asset del tenant (`POST /assets` primero), 403 si no. Antes de esto, `autorizacion_firmada=true` por sí solo bastaba para escanear cualquier URL — hallazgo real de `agents/revision_ia.py`, ver HANDOFF.md y `tests/test_scan_activo_asset_gate.py`. |
+| `POST /scan/activo` | ✅ `Depends(get_current_user)` (más el gate propio de `autorizacion_firmada=true` explícito en el body, 403 si falta) — valida vía `_asset_verificado_para_target()` (Corrida 16, antes `_tenant_tiene_asset_para_target()` de Corrida 12) que `target_url` corresponda a un asset del tenant **Y** que ese asset esté verificado o exento de verificación (localhost/IP privada), 403 si no. Antes de Corrida 12, `autorizacion_firmada=true` por sí solo bastaba para escanear cualquier URL; antes de Corrida 16, bastaba con que el tenant hubiera *registrado* el dominio (sin ninguna prueba de que fuera suyo de verdad) — hallazgos reales de `agents/revision_ia.py` y de esta sesión, ver HANDOFF.md, `tools/asset_verification.py` y `tests/test_scan_activo_asset_gate.py`/`tests/test_asset_verification.py`. |
+| `POST /scan` | ✅ `Depends(get_current_user)` — **nuevo en Corrida 16**: antes de esa sesión no tenía NINGÚN chequeo de propiedad/verificación sobre `target` (solo `gate_autorizacion` para el booleano de Escaneo Activo dentro del grafo). Ahora rechaza con 403 antes de invocar el grafo si `target` no es un asset verificado (o exento) del tenant. |
+| `POST /assets/{id}/verify` | ✅ `Depends(get_current_user)` (nuevo en Corrida 16) — 404 si el asset no pertenece al tenant autenticado (mismo aislamiento multi-tenant que el resto de endpoints de `assets`). |
 | `GET /scans/{scan_id}` | ✅ `Depends(get_current_user)` |
 
 Sin hallazgos — los tres requieren JWT válido igual que el resto de rutas no
@@ -348,6 +361,63 @@ levantar una instancia propia de `certstream-server-go`/`-rust`
 un mecanismo verificado pero no una funcionalidad activa — vale la pena
 resolverlo antes de vender "monitoreo continuo" como parte del pitch, o
 ajustar el pitch para no prometerlo hasta que lo esté.
+
+### 7. Verificación real de propiedad de dominio
+
+✅ **HECHO (2026-07-19, ver `eval/live_run_report.md` Corrida 16).** Hasta
+esta sesión, `POST /assets` era el gap de abuso más real de todo el
+producto que seguía abierto: registrar un dominio como "propio" no exigía
+ninguna prueba de control, y ese registro por sí solo bastaba para que
+`POST /scan`/`POST /scan/activo`/CertStream lo trataran como autorizado —
+un tenant (malicioso o simplemente descuidado) podía registrar el dominio
+de un tercero real y el sistema lo hubiera escaneado/vigilado igual que uno
+legítimamente propio.
+
+Ahora existe verificación real, patrón estándar de la industria (Google
+Search Console/Detectify): token único por asset + prueba de control vía
+**DNS TXT** (`_vigia-challenge.<dominio>`, `dnspython`) o **archivo
+bien-conocido** (`https://<dominio>/.well-known/vigia-verification.txt`,
+`urllib.request` de la librería estándar) — los dos métodos implementados
+de verdad, no solo uno, en `tools/asset_verification.py` (nuevo). `POST
+/assets/{id}/verify` ejecuta la comprobación real y marca el asset
+verificado si pasa. `POST /scan`, `POST /scan/activo`, el listener de
+CertStream y el ciclo recurrente de recon pasivo (`api/scheduler.py`)
+rechazan/omiten activos que no estén verificados.
+
+**Excepción explícita y razonada (no un hardcode) para localhost/IP
+privada** — necesaria porque este proyecto entero se prueba contra
+`localhost`, contenedores Docker locales (Juice Shop, DVWA) y dominios
+sintéticos que jamás pasarían una verificación pública real. Solo el
+host/IP LITERAL `localhost` o un rango privado/loopback/link-local
+(`ipaddress` de la librería estándar) queda exento — decidido sobre el
+string declarado, nunca sobre una resolución DNS en vivo, para cerrar la
+puerta a DNS rebinding. Un dominio sintético "que suena a prueba"
+(`miempresatest.com`, usado en corridas anteriores) NO se exime.
+
+**Migración de DB real, con un hallazgo de portabilidad genuino:**
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` es válido en Postgres (>= 9.6)
+pero el parser de SQLite lo rechaza (confirmado empíricamente, no
+adivinado) — resuelto con columnas nuevas en el `CREATE TABLE` para bases
+nuevas y una reconciliación explícita por motor en `db/connection.py` para
+bases ya existentes de sesiones anteriores. Verificado en vivo contra
+**ambos motores**: SQLite (nuevo y "legacy" simulado) y un Postgres 16 real
+en Docker, con la suite completa (67 tests) verde contra los dos.
+
+**Tests:** `tests/test_asset_verification.py` (nuevo, 26 casos) +
+`tests/test_scan_activo_asset_gate.py` (1 test actualizado para reflejar el
+gate nuevo). Incluye una prueba de red real (sin mock) de la resolución DNS
+TXT y la petición HTTP contra un dominio público que no controlamos
+(`google.com`, confirma "no encontrado" real) más el camino de éxito
+mockeado explícitamente (no hay forma de escribir un TXT real en un dominio
+que no controlamos) — ver Corrida 16 para el detalle honesto de qué es real
+y qué está mockeado.
+
+**Pendiente, no bloqueante:** una verificación end-to-end contra un dominio
+real que el propio operador de Vigia controle (requiere acceso a un
+registrador de dominios, fuera de lo que un agente puede hacer sin ese
+acceso) — el mecanismo está probado contra la red real en ambas
+direcciones (DNS y HTTP), pero nunca contra un TXT/archivo que nosotros
+mismos publicamos.
 
 ## Top 3 gaps de mayor prioridad (juicio propio, no solo el listado de arriba)
 
