@@ -102,14 +102,20 @@ de error.
   `vigia_core_private/`, completamente separado del historial de este
   repo público. Tiene su propio primer commit con todo el contenido
   descrito arriba.
-- **No se creó ningún remoto** (ni en GitHub ni en ningún otro host) --
-  eso es una acción de cuenta real que el usuario debe hacer manualmente
-  si quiere respaldo fuera de esta máquina. Pasos sugeridos (manuales,
-  fuera del alcance de este agente):
-  1. Crear un repositorio **privado** nuevo en GitHub (o el host que
-     prefieras) -- por ejemplo `vigia-core-private`.
-  2. `cd vigia_core_private && git remote add origin <url-del-repo-privado>`
-  3. `git push -u origin main`
+- **Tiene remoto y está respaldado**: `https://github.com/sancchez/vigIA-Privado`
+  (repositorio **privado** de GitHub, propiedad del usuario). Pusheado por
+  primera vez el 2026-07-19. Para cualquier agente que trabaje en este
+  paquete: `cd vigia_core_private && git push` funciona igual que en
+  cualquier repo normal, es un remoto real ya configurado, no uno de
+  ejemplo.
+- **Regla para agentes**: si el trabajo que se pide toca prompts reales de
+  razonamiento, el mapeo ISO 27001/Ley 2573, o `docs/market-research.md`,
+  ese trabajo va en `vigia_core_private/` y se commitea/pushea en SU PROPIO
+  repo (`vigIA-Privado`) -- nunca en el repo público `Vigia-`. Si el
+  trabajo es scanning genérico, infraestructura, auth, DB, tests del
+  fallback, frontend, o despliegue, va en el repo público como siempre.
+  Ante la duda, ver la tabla de arriba ("Qué se movió y por qué" / "Qué se
+  quedó y por qué") antes de decidir dónde comitear algo nuevo.
 - Estructura:
   ```
   vigia_core_private/
