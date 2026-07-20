@@ -109,6 +109,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // Header inofensivo fuera de un túnel (cualquier backend real lo ignora):
+    // localtunnel muestra una página de aviso ante el primer fetch() de un
+    // origen nuevo, y ese aviso solo se puede aceptar navegando -- un
+    // fetch() de JS nunca lo ve, simplemente falla. Este header es el
+    // mecanismo que localtunnel documenta para saltarlo desde código.
+    "bypass-tunnel-reminder": "vigia",
     ...(options.headers as Record<string, string> | undefined),
   };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -130,7 +136,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 async function downloadFile(path: string, filename: string): Promise<void> {
   const token = getToken();
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { "bypass-tunnel-reminder": "vigia" };
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(`${API_URL}${path}`, { headers });
