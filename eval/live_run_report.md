@@ -1,5 +1,130 @@
 # Corridas en vivo del pipeline — 2026-07-15 a 2026-07-19
 
+## Corrida 18 (2026-07-19/20) — `findings.severidad` valía "info" para ~99% de las filas reales: causa raíz, fix, backfill
+
+Objetivo: bug confirmado por el usuario antes de empezar (no una hipótesis a
+verificar): `findings.severidad` en `ciberseguridad.db` valía `"info"` para
+1290 de 1298 filas reales en toda la historia del proyecto (los otros 8
+casos son de `agents/antisuplantacion.py`/CertStream, que ya usan valores
+hardcodeados correctos y nunca fueron parte de este bug). Dos sitios reales
+en `api/main.py` leían una clave de nivel superior que ninguna herramienta
+real pone ahí -- exactamente el mismo patrón de bug ya cerrado para el
+campo `tipo` (ver `docs/cumplimiento.md`), ahora para `severidad`.
+
+### Causa raíz confirmada (dos bugs distintos, no uno)
+
+1. `api/main.py::_correr_escaneo_activo_en_background` (línea ~1186, el
+   escaneo activo checkpointed añadido en Corrida 17):
+   `str(hallazgo.get("riskdesc", "info")).split(" ")[0].lower()`. Estos
+   hallazgos vienen de `tools/zap_api.py::get_alerts()` (`core/view/alerts/`,
+   la API HTTP real de ZAP) -- **verificado contra 1280 filas reales ya en
+   la DB**: ninguna trae `riskdesc`. Ese endpoint devuelve `risk` directo
+   (Title Case: `"High"`/`"Medium"`/`"Low"`/`"Informational"`), un campo
+   completamente distinto. El `.get("riskdesc", "info")` caía al default
+   literal el 100% de las veces.
+2. `api/main.py::scan()` (POST /scan, línea ~890, insertando
+   `verified_findings`): `hallazgo.get("severidad") or
+   hallazgo.get("severity") or "info"`. Trazado el flujo real:
+   `agents/escaneo.py` arma `{"objetivo","herramienta","raw"}`,
+   `agents/verificacion.py::_verificar_un_hallazgo` hace `**hallazgo` y
+   agrega metadata de verificación -- nunca hay un `severidad`/`severity`
+   de nivel superior en ningún punto de esa cadena. La severidad real
+   siempre vivió dentro de `raw`, con nombre de campo y vocabulario propio
+   de cada herramienta.
+
+### Vocabulario real de cada herramienta, verificado contra salida real (no documentación)
+
+No se asumió ningún nombre de campo ni vocabulario -- se verificó cada uno
+corriendo la herramienta de verdad o inspeccionando `raw_json` real ya en
+`ciberseguridad.db` (ver `eval/severity_fixture_samples.json` para las
+muestras exactas usadas también en los tests nuevos):
+
+| Herramienta | Campo real | Vocabulario real verificado |
+|---|---|---|
+| ZAP (`core/view/alerts/`, checkpointed) | `risk` | `High`/`Medium`/`Low`/`Informational` (Title Case) -- confirmado contra 1280 filas reales ya en la DB (613 Medium, 456 Low, 210 Informational, 1 High: el hallazgo real de SQL Injection, ver abajo) |
+| ZAP (reporte JSON de `zap-baseline.py`/`zap-full-scan.py`, POST /scan) | `riskdesc` (`"Medium (High)"` = `"Risk (Confidence)"`), con `riskcode` numérico como respaldo | Confirmado contra las 10 filas reales de Juice Shop de `docs/cumplimiento.md`: `Medium (High)`, `Medium (Medium)`, `Low (Medium)`, `Low (Low)`, `Informational (Medium)` |
+| Nuclei | `info.severity`, minúsculas | Confirmado corriendo `nuclei -jsonl` real contra Juice Shop (localhost:3051) en esta sesión: `info`, `medium` observados con esos nombres exactos (`critical`/`high`/`low`/`unknown` son el mismo schema documentado de nuclei-templates) |
+| Semgrep | `extra.severity`, MAYÚSCULAS | Confirmado corriendo `semgrep --config auto --json` real contra este mismo repo: `ERROR`, `WARNING` observados (INFO es el tercer valor del enum oficial, no salió en esta corrida puntual) |
+| Trivy | `Vulnerabilities[].Severity`, MAYÚSCULAS | Confirmado corriendo `trivy image` real contra `node:14`: las 5 -- `UNKNOWN`(4) `LOW`(122) `MEDIUM`(730) `HIGH`(564) `CRITICAL`(22) |
+| Grype | `matches[].vulnerability.severity`, Title Case | Confirmado corriendo `grype` real contra la MISMA imagen `node:14`: las 6 -- `Unknown`(8) `Negligible`(945) `Low`(115) `Medium`(631) `High`(566) `Critical`(41) -- vocabulario DISTINTO de Trivy pese a ser dos escáneres de CVEs sobre el mismo target exacto (Grype distingue `Negligible` de `Unknown`, Trivy los colapsa en uno solo; casing distinto) |
+
+### El fix
+
+`tools/_shared.py::normalize_severity(raw, herramienta)` (nueva, junto a
+`ToolExecutionError` y el resto de helpers compartidos): un mapeo explícito
+por herramienta hacia las 5 severidades canónicas de Vigia
+(`critical`/`high`/`medium`/`low`/`info` -- confirmado como el vocabulario
+real esperado leyendo `db/schema.sql` CHECK constraint,
+`frontend/src/components/ScanHistoryChart.tsx::SEVERITY_ORDER` y
+`agents/cumplimiento.py`). Nunca devuelve `"info"` silenciosamente para un
+valor no reconocido -- cae a `"medium"` (default seguro) y siempre loguea
+vía `logging.getLogger("vigia.severity")`, para no repetir la clase exacta
+de bug que esta función cierra. Maneja las DOS formas reales de ZAP
+(`risk` directo vs. `riskdesc`/`riskcode`) en una sola función.
+
+`api/main.py` línea ~890 y ~1186 ahora llaman a `normalize_severity` en vez
+de leer una clave que nunca existe. De paso, en la línea ~1186 se encontró
+y arregló un bug hermano exacto en el campo `endpoint`: `(hallazgo.get(
+"instances") or [{}])[0].get("uri", "")` también asumía la forma de
+reporte JSON (`instances`) sobre hallazgos que en realidad vienen de
+`get_alerts()` (que trae `url` directo, sin `instances`) -- **100% de las
+1280 filas de escaneo activo checkpointed tenían `endpoint` vacío en la
+DB real**, confirmado antes de arreglarlo. Fix de una línea:
+`hallazgo.get("url") or (hallazgo.get("instances") or [{}])[0].get("uri", "")`.
+
+`agents/cumplimiento.py::_categorizar_hallazgo` (privado y fallback) se
+revisó explícitamente: no usa `severidad` para categorizar (solo `tipo`/
+`herramienta`/campos de `raw_json` vía `_texto_buscable()`), así que no
+compensaba de ninguna forma la severidad rota -- no hizo falta tocarlo.
+
+### Tests nuevos
+
+`tests/test_severity_normalization.py` (29 casos) + `eval/severity_fixture_samples.json`
+(muestras reales, no inventadas, con procedencia documentada por grupo):
+un caso parametrizado por cada muestra real de las 5 herramientas (incluida
+la fila real de SQL Injection de ZAP), más tests explícitos para: las dos
+formas de ZAP, el respaldo por `riskcode`, que un valor no reconocido NUNCA
+cae a `"info"` silencioso (cae a `"medium"` y loguea), que una herramienta
+reconocida sin el campo esperado tampoco cae a `"info"`, herramienta
+desconocida, y `raw=None` sin excepción.
+
+### Backfill real contra `ciberseguridad.db`
+
+`scripts/backfill_severidad.py` (con `--dry-run`, backup automático del
+`.db` antes de escribir, excluye a propósito filas de antisuplantación/
+CertStream): corrido dos veces (dry-run primero, luego real) contra el
+`ciberseguridad.db` real de esta sesión.
+
+**Antes:** `{'high': 4, 'info': 1290, 'medium': 4}` (1298 filas totales).
+**Después:** `{'high': 5, 'medium': 619, 'low': 461, 'info': 213}`.
+1077 filas actualizadas, 213 ya estaban correctas (severidad nativa
+realmente informativa), 8 omitidas a propósito (antisuplantación/
+CertStream, ya correctas por diseño). Backup real creado:
+`ciberseguridad.db.bak-20260720T022602Z`.
+
+Verificado directamente contra la fila real mencionada en el encargo: el
+hallazgo de SQL Injection real de ZAP (scan
+`d46c7342-5c2b-4007-92c7-1b96b58d5609`, `pluginId 40018`,
+`http://host.docker.internal:3050/rest/products/search?q=%27%28`) pasó de
+`severidad='info'` a `severidad='high'`, confirmado con una consulta SQL
+directa post-backfill (no solo confiando en el output del script).
+
+### Verificación final
+
+`py -m pytest -q`: 74 tests preexistentes + 29 nuevos = **103 passed**, sin
+warnings nuevos. Suite corrida antes y después del backfill (el backfill
+solo toca datos, no código, pero se confirmó que la suite sigue verde de
+todas formas).
+
+### Efecto colateral positivo no pedido, mencionado para que quede anotado
+
+Con `findings.severidad` ahora confiable, `ScanHistoryChart.tsx` (Corrida
+11) va a mostrar por primera vez una distribución real de severidades en
+vez de casi todo "Info" -- no se tocó ese componente (ya leía la columna
+correctamente, el bug estaba 100% del lado de la escritura), pero vale la
+pena que quien revise la demo sepa que el gráfico se va a ver distinto
+ahora, y que eso es correcto, no una regresión visual.
+
 ## Corrida 17 (2026-07-19) — Contenedor huérfano de ZAP en timeout (Bug 1) + escaneo activo checkpointed vía la API real de ZAP (Bug 2)
 
 Objetivo: HANDOFF.md Item 2 dejaba dos problemas reales sin resolver,

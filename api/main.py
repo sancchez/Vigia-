@@ -54,7 +54,7 @@ from api.scheduler import start_scheduler, stop_scheduler
 from db.connection import dict_from_row, get_conn
 from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
-from tools._shared import ToolExecutionError
+from tools._shared import ToolExecutionError, normalize_severity
 from tools.antisuplantacion import registrable_domain
 from tools.asset_verification import (
     METODOS_VALIDOS,
@@ -887,7 +887,15 @@ def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) ->
                     scan_id,
                     user.tenant_id,
                     hallazgo.get("tipo") or hallazgo.get("type") or "desconocido",
-                    hallazgo.get("severidad") or hallazgo.get("severity") or "info",
+                    # Bug real cerrado esta sesión (ver tools/_shared.py::normalize_severity):
+                    # `hallazgo.get("severidad")`/`("severity")` NUNCA existen a nivel
+                    # superior -- `agents/verificacion.py` solo agrega metadata de
+                    # verificación sobre `{"objetivo","herramienta","raw"}`
+                    # (`agents/escaneo.py`), la severidad real vive dentro de `raw`
+                    # con vocabulario propio de cada herramienta. Este `.get()` viejo
+                    # siempre caía en "info" -- causa raíz confirmada de que
+                    # findings.severidad valiera "info" para ~99% de las filas reales.
+                    normalize_severity(hallazgo.get("raw"), hallazgo.get("herramienta", "")),
                     hallazgo.get("endpoint") or hallazgo.get("objetivo") or "",
                     int(bool(hallazgo.get("confirmado"))),
                     json.dumps(hallazgo),
@@ -1183,8 +1191,23 @@ def _correr_escaneo_activo_en_background(
                     scan_id,
                     tenant_id,
                     hallazgo.get("name", "desconocido"),
-                    str(hallazgo.get("riskdesc", "info")).split(" ")[0].lower(),
-                    (hallazgo.get("instances") or [{}])[0].get("uri", ""),
+                    # Bug real cerrado esta sesión (ver tools/_shared.py::normalize_severity):
+                    # estos hallazgos vienen de tools/zap_api.py::get_alerts()
+                    # (`core/view/alerts/`, formato de la API real de ZAP), que
+                    # NUNCA trae `riskdesc` -- solo `run_zap_baseline`/
+                    # `run_zap_active_scan` (tools/scan.py, reporte JSON de
+                    # zap-baseline.py/zap-full-scan.py) traen esa clave. El
+                    # `.get("riskdesc", "info")` de antes caía siempre al default
+                    # literal para el 100% de estos hallazgos (1280/1280
+                    # verificado en ciberseguridad.db).
+                    normalize_severity(hallazgo, "zap"),
+                    # Mismo bug de forma, en el campo endpoint: get_alerts()
+                    # devuelve una fila POR INSTANCIA con su propio `url` de
+                    # nivel superior -- nunca trae `instances` (eso es del
+                    # formato de reporte JSON, no de la API). El `.get("instances")`
+                    # de antes también caía siempre a "" para estos hallazgos
+                    # (confirmado: 1280/1280 con endpoint vacío en la DB real).
+                    hallazgo.get("url") or (hallazgo.get("instances") or [{}])[0].get("uri", ""),
                     json.dumps(hallazgo),
                 ),
             )

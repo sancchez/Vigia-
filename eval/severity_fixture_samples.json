@@ -1,0 +1,145 @@
+{
+  "_comment": "Muestras REALES (no inventadas) del campo de severidad nativo de cada una de las 5 herramientas que envuelve tools/scan.py, capturadas en esta sesión al investigar el bug real de findings.severidad ('info' para ~99% de las filas). Cada entrada trae el hallazgo crudo REAL (recortado a las claves relevantes) tal como lo produjo la herramienta, y `esperado` es la severidad canónica de Vigia (critical/high/medium/low/info, ver db/schema.sql) a la que tools/_shared.py::normalize_severity debe mapearlo. Procedencia de cada grupo:",
+  "_procedencia": {
+    "zap_alertas_api": "tools/zap_api.py::get_alerts() (core/view/alerts/ real) contra Juice Shop real -- extraído de raw_json de ciberseguridad.db, incluyendo el hallazgo real 'SQL Injection' (risk=High) del scan d46c7342-5c2b-4007-92c7-1b96b58d5609 que estaba mal marcado 'info' antes de este fix.",
+    "zap_reporte_baseline": "tools/scan.py::run_zap_baseline() (reporte JSON de zap-baseline.py) contra Juice Shop real -- extraído de raw_json de ciberseguridad.db (verificación de docs/cumplimiento.md).",
+    "nuclei": "nuclei v3.11.0 -jsonl real contra Juice Shop real (localhost:3051) en esta sesión, tags tech/headers/misconfig/exposure.",
+    "semgrep": "semgrep 1.169.0 --config auto --json real contra este mismo repo (D:/freestyle/ciberseguridad) en esta sesión.",
+    "trivy": "trivy 0.72.0 image --format json real contra node:14 (imagen vieja con CVEs documentados, misma sugerida por HANDOFF.md Item 3) en esta sesión.",
+    "grype": "grype 0.116.0 -o json real contra la MISMA imagen node:14 en esta sesión (para comparar vocabulario contra Trivy sobre el mismo target)."
+  },
+  "casos": [
+    {
+      "herramienta": "zap",
+      "grupo": "zap_alertas_api",
+      "esperado": "high",
+      "raw": {"name": "SQL Injection", "risk": "High", "confidence": "Low", "url": "http://host.docker.internal:3050/rest/products/search?q=%27%28", "pluginId": "40018"}
+    },
+    {
+      "herramienta": "zap",
+      "grupo": "zap_alertas_api",
+      "esperado": "medium",
+      "raw": {"name": "Cross-Domain Misconfiguration", "risk": "Medium", "confidence": "Medium", "url": "http://host.docker.internal:3297/robots.txt"}
+    },
+    {
+      "herramienta": "zap",
+      "grupo": "zap_alertas_api",
+      "esperado": "low",
+      "raw": {"name": "Timestamp Disclosure - Unix", "risk": "Low", "confidence": "Low", "url": "http://host.docker.internal:3297/styles.css"}
+    },
+    {
+      "herramienta": "zap",
+      "grupo": "zap_alertas_api",
+      "esperado": "info",
+      "raw": {"name": "Modern Web Application", "risk": "Informational", "confidence": "Medium", "url": "http://host.docker.internal:3297/sitemap.xml"}
+    },
+    {
+      "herramienta": "zap-baseline",
+      "grupo": "zap_reporte_baseline",
+      "esperado": "medium",
+      "raw": {"name": "Content Security Policy (CSP) Header Not Set", "riskdesc": "Medium (High)", "riskcode": "2"}
+    },
+    {
+      "herramienta": "zap-baseline",
+      "grupo": "zap_reporte_baseline",
+      "esperado": "low",
+      "raw": {"name": "Cross-Origin-Embedder-Policy Header Missing or Invalid", "riskdesc": "Low (Medium)", "riskcode": "1"}
+    },
+    {
+      "herramienta": "zap-baseline",
+      "grupo": "zap_reporte_baseline",
+      "esperado": "info",
+      "raw": {"name": "Modern Web Application", "riskdesc": "Informational (Medium)", "riskcode": "0"}
+    },
+    {
+      "herramienta": "nuclei",
+      "grupo": "nuclei",
+      "esperado": "info",
+      "raw": {"template-id": "swagger-api", "info": {"name": "Public Swagger API - Detect", "severity": "info"}, "host": "127.0.0.1", "matched-at": "http://127.0.0.1:3051/api-docs/swagger.json"}
+    },
+    {
+      "herramienta": "nuclei",
+      "grupo": "nuclei",
+      "esperado": "medium",
+      "raw": {"template-id": "prometheus-metrics", "info": {"name": "Prometheus Metrics - Detect", "severity": "medium"}, "host": "127.0.0.1", "matched-at": "http://127.0.0.1:3051/metrics"}
+    },
+    {
+      "herramienta": "semgrep",
+      "grupo": "semgrep",
+      "esperado": "medium",
+      "raw": {"check_id": "yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag", "path": ".github/workflows/tests.yml", "extra": {"severity": "WARNING"}}
+    },
+    {
+      "herramienta": "semgrep",
+      "grupo": "semgrep",
+      "esperado": "high",
+      "raw": {"check_id": "dockerfile.security.missing-user.missing-user", "path": "Dockerfile", "extra": {"severity": "ERROR"}}
+    },
+    {
+      "herramienta": "trivy",
+      "grupo": "trivy",
+      "esperado": "medium",
+      "raw": {"VulnerabilityID": "CVE-2021-37600", "PkgName": "bsdutils", "Severity": "MEDIUM"}
+    },
+    {
+      "herramienta": "trivy",
+      "grupo": "trivy",
+      "esperado": "low",
+      "raw": {"VulnerabilityID": "CVE-2024-28085", "PkgName": "bsdutils", "Severity": "LOW"}
+    },
+    {
+      "herramienta": "trivy",
+      "grupo": "trivy",
+      "esperado": "high",
+      "raw": {"VulnerabilityID": "CVE-2022-1304", "PkgName": "comerr-dev", "Severity": "HIGH"}
+    },
+    {
+      "herramienta": "trivy",
+      "grupo": "trivy",
+      "esperado": "medium",
+      "raw": {"VulnerabilityID": "DLA-3482-1", "PkgName": "debian-archive-keyring", "Severity": "UNKNOWN"}
+    },
+    {
+      "herramienta": "trivy",
+      "grupo": "trivy",
+      "esperado": "critical",
+      "raw": {"VulnerabilityID": "CVE-2024-32002", "PkgName": "git", "Severity": "CRITICAL"}
+    },
+    {
+      "herramienta": "grype",
+      "grupo": "grype",
+      "esperado": "high",
+      "raw": {"vulnerability": {"id": "CVE-2023-4863", "severity": "High"}}
+    },
+    {
+      "herramienta": "grype",
+      "grupo": "grype",
+      "esperado": "critical",
+      "raw": {"vulnerability": {"id": "CVE-2023-38408", "severity": "Critical"}}
+    },
+    {
+      "herramienta": "grype",
+      "grupo": "grype",
+      "esperado": "medium",
+      "raw": {"vulnerability": {"id": "CVE-2024-28182", "severity": "Medium"}}
+    },
+    {
+      "herramienta": "grype",
+      "grupo": "grype",
+      "esperado": "info",
+      "raw": {"vulnerability": {"id": "CVE-2023-48795", "severity": "Negligible"}}
+    },
+    {
+      "herramienta": "grype",
+      "grupo": "grype",
+      "esperado": "low",
+      "raw": {"vulnerability": {"id": "CVE-2017-8871", "severity": "Low"}}
+    },
+    {
+      "herramienta": "grype",
+      "grupo": "grype",
+      "esperado": "medium",
+      "raw": {"vulnerability": {"id": "CVE-2023-45918", "severity": "Unknown"}}
+    }
+  ]
+}

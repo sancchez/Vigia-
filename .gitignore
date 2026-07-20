@@ -32,6 +32,7 @@ htmlcov/
 # Bases de datos locales
 *.sqlite3
 *.db
+*.db.bak-*
 
 # Logs
 *.log
