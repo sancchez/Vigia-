@@ -1,5 +1,316 @@
 # Corridas en vivo del pipeline — 2026-07-15 a 2026-07-19
 
+## Corrida 20 (2026-07-21) — Backend + frontend en un solo contenedor deployable
+
+Objetivo del usuario: hoy desplegar en Railway significaba correr backend y
+frontend como dos servicios separados — más setup, más superficie de
+config, más costo (dos servicios facturables). El usuario es explícitamente
+consciente del presupuesto y pidió que el deploy fuera "lo más fácil
+posible": un solo servicio/contenedor que sirva ambos.
+
+### 1. Diseño: FastAPI sirve el build de producción del frontend
+
+`api/main.py` ganó un bloque nuevo al final del archivo (después de cada
+ruta real de la API, a propósito — en Starlette/FastAPI la primera ruta
+registrada que matchea gana, y el catch-all de abajo matchea *cualquier*
+string, así que tiene que perder contra las rutas reales si se registra
+después de todas ellas):
+
+- `FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"`.
+  Si ese directorio no existe (dev local sin build, exactamente el flujo de
+  `HANDOFF.md` con `uvicorn` + `vite` como procesos separados), **no se
+  registra ninguna ruta nueva** — cero cambio de comportamiento para quien
+  no construyó el frontend.
+- Si existe: `app.mount("/static-assets", StaticFiles(...))` para los
+  JS/CSS con hash de Vite, más una ruta catch-all
+  `GET /{full_path:path}` que sirve `index.html` para cualquier GET que no
+  sea ni un archivo real del build ni un prefijo de ruta real de la API.
+
+**Colisión de nombres real encontrada al diseñar esto, no en el papel:** el
+default de Vite pone los JS/CSS con hash bajo `dist/assets/`. Pero `/assets`
+ya es una ruta real de la API (`GET/POST /assets`, CRUD de activos del
+tenant, existente desde antes de esta sesión). Montar `StaticFiles` en
+`/assets` habría creado una colisión real de raíz entre archivos del
+frontend y el endpoint de activos — no algo que dependiera de tener suerte
+con el orden de registro de rutas. Se resolvió en la raíz cambiando
+`frontend/vite.config.ts` (`build.assetsDir: 'static-assets'`) en vez de
+montar ahí y confiar en que Starlette desambiguara bien cada caso.
+
+**Los 404 reales de la API se preservan a propósito:** el catch-all revisa
+si el primer segmento del path (`auth`, `assets`, `scans`, `findings`,
+`reports`, `tenant`, `health`, `me`, `scan`, ...) corresponde a un prefijo
+real de la API. Si sí, pero llegó hasta el catch-all (osea, ninguna ruta
+real matcheó antes), se devuelve `404` JSON real en vez de servir
+`index.html` — un typo de ruta de API (`GET /auth/typo`) no debe disfrazarse
+de HTML válido.
+
+**Protección contra path traversal:** el candidato se resuelve con
+`Path.resolve()` y se confirma con `is_relative_to(FRONTEND_DIST)` antes de
+servirlo — sin esto, un `full_path` tipo `../../etc/passwd` podría escapar
+del directorio del build.
+
+### 2. Dockerfile multi-stage: build real de Node, verificado con `docker build`
+
+`Dockerfile` pasó de una sola etapa (`python:3.12-slim`) a dos: una etapa
+`node:22-slim` (`frontend-build`) que corre `npm ci && npm run build` sobre
+`frontend/`, y la etapa final de Python (sin cambios de fondo) que agrega
+`COPY --from=frontend-build /app/frontend/dist ./frontend/dist`. La etapa
+de Node nunca llega a la imagen final — solo su resultado.
+
+**Construido de verdad, no solo "el Dockerfile parece correcto":**
+`docker build -t vigia-combined:test .` desde la raíz del repo. Docker
+Desktop se había cerrado solo entre sesiones (mismo problema ya conocido de
+esta máquina, ver `HANDOFF.md`) — se relanzó manualmente
+(`Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe'`) y se
+esperó a que `docker version` respondiera antes de intentar el build. El
+build completó sin error, instaló las ~85 dependencias Python reales del
+proyecto (incluyendo las nuevas de Corrida 19, `langchain-openai`/`openai`,
+confirmando que este cambio de Dockerfile no rompió nada del trabajo
+concurrente del otro agente de esta sesión) y produjo
+`frontend/dist/static-assets/index-<hash>.js` real dentro de la imagen.
+
+### 3. Contenedor corrido de verdad, con checks HTTP reales — no solo "el build pasó"
+
+`docker run -d -p 48210:8000 -e JWT_SECRET=... -e CORS_ORIGINS=... vigia-combined:test`,
+luego una batería de `curl` reales contra el contenedor corriendo:
+
+| Check | Resultado real |
+|---|---|
+| `GET /health` | `200`, JSON con el aviso legal completo |
+| `GET /` | `200`, HTML real del frontend (`<title>Vigia — panel</title>`, referencias reales a `/static-assets/index-*.js`/`.css`) |
+| `GET /dashboard` (ruta de cliente de React Router, no un archivo real) | `200`, mismo `index.html` — fallback de SPA confirmado para link directo/hard-refresh |
+| `GET /static-assets/index-<hash>.js` | `200`, `Content-Type: text/javascript` |
+| `GET /favicon.svg` (de `frontend/public/`) | `200`, `Content-Type: image/svg+xml` |
+| `GET /auth/typo-nonexistent` | `404` JSON real (`{"detail":"Not Found"}`), no `index.html` |
+| `GET /scans/no-existe` sin token | `401` JSON real (`{"detail":"Not authenticated"}`) — la ruta real de la API sigue ganando sobre el catch-all |
+| `GET /static-assets/no-existe.js` | `404` JSON real del propio `StaticFiles`, no el catch-all |
+| `POST /auth/register` real (`Docker Test Co` / `dockertest@example.com`) | `200`, JWT real devuelto — confirma que el schema SQLite se sigue aplicando solo dentro de este contenedor combinado |
+| `curl --path-as-is ".../../../../etc/passwd"` | Cayó al fallback de `index.html`, no expuso nada del filesystem |
+| `curl "http://.../%2e%2e/%2e%2e/%2e%2e/etc/passwd"` (traversal URL-encoded) | Mismo resultado seguro — `index.html`, sin escape |
+
+Contenedor e imagen de prueba (`vigia-combined-test` / `vigia-combined:test`)
+detenidos y borrados al terminar (`docker stop/rm`, `docker rmi`) — no queda
+nada corriendo ni ninguna imagen local de esta sesión. Un contenedor de ZAP
+huérfano de una sesión anterior (`vigia-zap-<uuid>`, ya `Exited`) apareció en
+`docker ps -a` durante esta verificación — no es de esta corrida, se dejó
+tal cual sin tocarlo (no es parte de este trabajo, y borrarlo sin contexto
+del run que lo generó no correspondía).
+
+### 4. Docs y config de plataforma actualizados
+
+- `frontend/vite.config.ts`: `build.assetsDir: 'static-assets'` (ver punto 1).
+- `render.yaml`: se eliminó el servicio `vigia-frontend` (sitio estático
+  aparte) — ahora un solo servicio (`vigia-backend`, Docker) es el deploy
+  completo. `CORS_ORIGINS` ya no depende de una URL de un segundo servicio
+  que resolver por dependencia circular.
+- `railway.json`: sin cambios estructurales (ya era un único servicio
+  basado en `Dockerfile`) — el cambio real es que ese mismo Dockerfile ahora
+  produce una imagen que sirve ambas cosas.
+- `docs/despliegue.md`: nueva sección "Un solo servicio, no dos" al
+  principio, tabla de variables actualizada (`VITE_API_URL` y
+  `CORS_ORIGINS` ya no obligatorias con el deploy combinado, con la
+  explicación de por qué), y los pasos de Railway/Render simplificados a un
+  solo servicio.
+
+### 5. Regresión: suite existente + typecheck del frontend
+
+- `py -m pytest -q`: **117 passed** (sube de "103+" porque Corrida 19,
+  concurrente en esta misma sesión, agregó tests propios de selección de
+  proveedor LLM — corrido aquí después de sus cambios para confirmar que
+  ninguno de los dos trabajos rompió al otro).
+- `npx tsc --noEmit` en `frontend/`: sin salida, sin errores.
+
+### Lo que esto NO resuelve (documentado sin ocultar)
+
+- El escaneo activo real (ZAP/Nuclei vía `docker` del host) sigue sin
+  funcionar dentro de un deploy Railway/Render — limitación de arquitectura
+  ya documentada antes de esta sesión (`docs/despliegue.md`), no cambiada
+  por este trabajo.
+- Nada de esto se probó desplegado de verdad en Railway o Render — solo
+  local, en Docker real (mismo límite ya documentado en Corrida 15: crear
+  una cuenta de hosting no es algo que un agente pueda hacer).
+- El `ARG VITE_API_URL=""` por default asume que el frontend siempre se
+  sirve desde el mismo origen que el backend (el escenario que este cambio
+  existe para resolver). Si alguna vez se quisiera separar de nuevo
+  (ej. un CDN aparte para el frontend con el backend en otro dominio), hay
+  que volver a pasar `--build-arg VITE_API_URL=https://...` explícito — el
+  código lo soporta, simplemente no es el default ya que el objetivo de esta
+  sesión era exactamente lo contrario (un solo origen, un solo servicio).
+
+
+
+Objetivo del usuario: `agents/_llm.py::call_claude()` solo soportaba
+Anthropic (API real, o el fallback `claude -p` que **no funciona en absoluto
+una vez desplegado** — Railway/Render no tienen la CLI de Claude Code
+instalada ni autenticada). El usuario es consciente del presupuesto y quiso
+una alternativa de LLM genuinamente barata, disponible para cuando esto se
+despliegue de verdad, sin tocar código para elegirla. Mencionó OpenAI como
+candidato pero dejó abierta la puerta a lo que fuera más barato de verdad.
+
+### 1. Research de precios reales (no de memoria de entrenamiento)
+
+Confirmado con `WebFetch`/`WebSearch` contra las páginas de pricing reales
+de cada proveedor en esta sesión (2026-07-21):
+
+- **OpenAI** (`developers.openai.com/api/docs/pricing`, redirigida desde
+  `platform.openai.com/docs/pricing`): el tier `gpt-4o-mini`/`gpt-4.1-mini`
+  que yo recordaba de entrenamiento **ya no existe** en la página actual —
+  la línea vigente es `gpt-5.x`. El tier más barato confirmado es
+  **`gpt-5.4-nano`: $0.20 / $1.25 por millón de tokens (input/output)**.
+  Un escalón arriba, **`gpt-5.4-mini`: $0.75 / $4.50 por millón** — el que
+  se eligió para implementar (ver justificación abajo). Cruzado con una
+  búsqueda independiente (`pricepertoken.com`, `benchlm.ai`) que confirmó
+  los mismos números y que el modelo `gpt-5.4-*` es real y vigente (familia
+  `gpt-5.6-{sol,terra,luna}` en GA desde el 9 de julio de 2026, más caros).
+- **Google Gemini** (`ai.google.dev/gemini-api/docs/pricing`): tier más
+  barato real, **Gemini 2.5 Flash-Lite: $0.10 / $0.40 por millón** (input/
+  output), con tier gratuito para uso bajo. Gemini 3.5 Flash-Lite (más
+  reciente) es más caro (`$0.30/$2.50`) — 2.5 Flash-Lite sigue siendo el
+  más barato disponible en la página de precios vigente.
+- **DeepSeek** (research vía `WebSearch`, varias fuentes cruzadas):
+  **DeepSeek V4 Flash: $0.14 por millón input (cache-miss), $0.0028 cache-hit,
+  $0.28 por millón output** — el más barato de los tres en output.
+- **Anthropic** (`claude-api` skill, tabla de modelos cacheada 2026-06-24):
+  Claude Sonnet 5 (el que usaría la API real de este proyecto si
+  `ANTHROPIC_API_KEY` estuviera configurada) cuesta **$3/$15 por millón**
+  ($2/$10 con descuento de introducción hasta 2026-08-31) — 4-8× más caro
+  que cualquiera de las tres alternativas de arriba, dependiendo del mix
+  input/output real.
+
+**Decisión: se implementó OpenAI**, no la opción más barata en el papel
+(DeepSeek/Gemini Flash-Lite), por tres razones concretas, no solo "el
+usuario lo mencionó primero":
+1. Mismo patrón exacto que ya usa este módulo (`langchain-anthropic` →
+   `langchain-openai`, ambos paquetes de LangChain de primera clase, mismo
+   contrato `ChatModel.invoke()` con `SystemMessage`/`HumanMessage`) — cero
+   código nuevo de integración custom, cero riesgo de un shim OpenAI-compatible
+   mal hecho.
+2. Calidad de salida en JSON estructurado y español more probada/documentada
+   para este tipo de tarea (razonamiento de hallazgos de seguridad) que
+   DeepSeek (lab más nuevo, menos historial de uso en producción para este
+   caso de uso) — el propio proyecto necesita que `agents/priorizacion.py`,
+   `remediacion.py`, `reporteria.py`, `cumplimiento.py` reciban texto en
+   español consistente, sin mojibake (ver el bug real de Corrida 8/6
+   documentado en `HANDOFF.md` para el fallback de CLI).
+3. Sigue siendo 4-8× más barato que la API real de Claude — "genuinamente
+   barato" no exigía perseguir el mínimo absoluto de precio, exigía dejar
+   de depender de la CLI de Claude Code (que no existe en producción).
+
+Gemini/DeepSeek quedan documentados como alternativas más baratas **no
+implementadas esta sesión** — si el volumen de uso real lo justifica más
+adelante, agregar un tercer proveedor a `_resolve_provider()` es una
+extensión directa del mismo patrón (no un rediseño).
+
+### 2. Diseño: capa de selección de proveedor
+
+Leído `agents/_llm.py` completo y los 6 call sites reales de `call_claude()`
+(`priorizacion.py`, `remediacion.py`, `reporteria.py`, `cumplimiento.py`,
+`revision_ia.py`, `antisuplantacion.py`, `orquestador.py` — uno más de los
+5 que mencionaba la tarea original). Los 7 llaman
+`call_claude(system_prompt, user_message)` posicional, sin tocar `model` —
+confirmado por `grep`, no supuesto — así que el cambio de firma interna no
+los afecta.
+
+UX elegida para `VIGIA_LLM_PROVIDER`: **explícita pero opcional**, con
+auto-detección por key presente como fallback (`ANTHROPIC_API_KEY` gana si
+ambas están configuradas, para no romper el default de nadie que ya tenía
+esa key). Alternativa descartada: auto-detección pura sin variable
+explícita — se descartó porque no cubre el caso real de alguien con AMBAS
+keys configuradas (ej. una key de prueba de OpenAI y la key real de
+Anthropic) que quiere forzar cuál se usa sin borrar ninguna de las dos.
+
+Implementado en `agents/_llm.py`:
+- `_resolve_provider()` — nueva función, la lógica de arriba.
+- `_client_openai()` / `_call_via_openai_api()` — mismo patrón exacto que
+  `_client()`/`_call_via_api()` ya existentes para Anthropic (mismo
+  `lru_cache`, mismo manejo de contenido en bloques estructurados, mismo
+  estilo de `LLMNoDisponibleError` cuando falta la key).
+- `call_claude()` — ahora resuelve el proveedor primero; si es `"openai"`,
+  sustituye el `model` default (que sigue siendo el id de Claude,
+  `DEFAULT_MODEL`, por compatibilidad de firma) por `DEFAULT_OPENAI_MODEL`
+  a menos que el llamador haya pasado un `model` explícito distinto del
+  default. Comportamiento con nada configurado: IDÉNTICO al de antes de
+  esta sesión (cae a `"anthropic"` → sin `ANTHROPIC_API_KEY` → fallback de
+  CLI) — verificado con un test de regresión explícito, no solo por
+  inspección.
+- `pyproject.toml`: agregada `langchain-openai` como dependencia (ya estaba
+  instalada en el entorno de desarrollo por una dependencia transitiva de
+  otro paquete, pero no declarada — ahora sí, mismo estilo que
+  `langchain-anthropic`).
+
+### 3. Qué se verificó de verdad vs. qué quedó mockeado
+
+**No se obtuvo una key real de OpenAI en esta sesión** — el proyecto no
+tiene un mecanismo para crear cuentas de terceros de forma autónoma, y las
+reglas de esta tarea explícitamente prohíben entrar información de pago o
+crear cuentas sin supervisión directa del usuario. Esto se documenta aquí
+sin ambigüedad: **no hay una llamada real de punta a punta contra la API
+de OpenAI verificada en esta sesión.**
+
+Lo que SÍ se verificó, con mocks (`tests/test_llm_provider_selection.py`,
+14 tests, patrón idéntico a `tests/test_llm_cli_encoding.py`):
+
+- `_resolve_provider()`: auto-detección con solo `ANTHROPIC_API_KEY`, solo
+  `OPENAI_API_KEY`, ambas presentes (Anthropic gana), override explícito
+  de `VIGIA_LLM_PROVIDER` (incluso con la key "no preferida" presente),
+  case/espacios tolerados, valor inválido rechazado con error explícito.
+- `call_claude()` con nada configurado: sigue cayendo al fallback de CLI
+  de Anthropic exactamente como antes (regresión explícita).
+- `call_claude()` con `VIGIA_LLM_PROVIDER=openai` sin `OPENAI_API_KEY`:
+  falla explícito, sin fallback de CLI (a diferencia de Anthropic, OpenAI
+  no tiene un fallback gratuito de CLI).
+- `call_claude()` con `ChatOpenAI` reemplazado por un fake que captura los
+  argumentos de construcción y los mensajes de `.invoke()`: confirma que
+  usa `DEFAULT_OPENAI_MODEL` cuando no se pide un modelo explícito, que
+  respeta un `model=` explícito cuando sí se pide, que arma
+  `SystemMessage`/`HumanMessage` correctamente, y que maneja contenido en
+  bloques estructurados igual que el camino de Anthropic.
+- **Codificación en español**: el fake de OpenAI devuelve texto real con
+  tildes/eñe/em-dash (`"contraseña"`, `"—"`) y el test confirma que llega
+  intacto (sin la firma de mojibake `"Ã"`) — a diferencia del bug real que
+  sí afectaba al fallback de CLI (`subprocess` + `cp1252` en Windows, ver
+  `HANDOFF.md`), el camino de LangChain no pasa por decodificación manual
+  de bytes de un subprocess, así que el riesgo de corrupción es
+  estructuralmente menor aquí. Confirmado, no solo asumido.
+
+**Lo que esto NO prueba:** que la API real de OpenAI acepte estos
+parámetros exactos (`model`, `api_key`, `timeout`, `max_retries` en
+`ChatOpenAI`), que el modelo `gpt-5.4-mini` responda con la calidad
+esperada en español para hallazgos de seguridad reales, ni el
+comportamiento real de rate-limiting/latencia. Si se consigue una key real
+de OpenAI en una sesión futura, el siguiente paso concreto es repetir la
+verificación de Item 1 de `HANDOFF.md` (invocar `priorizacion.py`/
+`remediacion.py`/`reporteria.py` con hallazgos de ejemplo reales) pero con
+`VIGIA_LLM_PROVIDER=openai`, y confirmar en vivo que el español sale
+correcto también contra la red real (no solo contra el mock).
+
+### 4. Documentación actualizada
+
+- `docs/despliegue.md`: tabla de variables de entorno — `OPENAI_API_KEY`,
+  `VIGIA_LLM_PROVIDER`, `VIGIA_OPENAI_MODEL` documentadas con el precio real
+  y una estimación de costo por reporte completo (`~$0.03` con
+  `gpt-5.4-mini` contra `~$0.11` con la API real de Claude Sonnet 5,
+  asumiendo ~4 llamadas por ciclo de ~4.000 tokens de entrada/~1.000 de
+  salida cada una — números redondos, no una medición real de tokens de
+  este proyecto).
+- `.env.example`: agregadas las tres variables nuevas con comentarios,
+  aclarando que `VIGIA_LLM_PROVIDER` es opcional.
+
+### 5. Tests y verificación de no-regresión
+
+`pytest -q` completo: **117 passed** (103 según la última cifra documentada
+en `HANDOFF.md`, más las que se agregaron en Corridas posteriores no
+numeradas ahí + las 14 nuevas de esta sesión) — cero regresiones. Se
+extendió también la fixture autouse de `tests/conftest.py`
+(`_sin_llm_real_por_defecto`) para limpiar `OPENAI_API_KEY` y
+`VIGIA_LLM_PROVIDER` del entorno antes de cada test, por la misma razón que
+ya limpiaba `ANTHROPIC_API_KEY` — que el shell real de quien corra la suite
+no vuelva no-determinista un test que no toca esas variables explícitamente.
+
+**No se tocó `Dockerfile`** (otro agente concurrente lo estaba modificando
+esta sesión para otra tarea) ni se hizo `git commit` — cambios dejados sin
+commitear para que el orquestador los revise.
+
 ## Corrida 18 (2026-07-19/20) — `findings.severidad` valía "info" para ~99% de las filas reales: causa raíz, fix, backfill
 
 Objetivo: bug confirmado por el usuario antes de empezar (no una hipótesis a

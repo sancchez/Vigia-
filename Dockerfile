@@ -1,7 +1,20 @@
-# Vigia — backend FastAPI (api.main:app)
+# Vigia — un solo servicio deployable: backend FastAPI (api.main:app)
+# sirviendo también el build de producción del frontend (React/Vite) como
+# archivos estáticos. Antes de esta sesión, un deploy en Railway/Render
+# hubiera significado DOS servicios (backend + frontend estático) -- más
+# setup, más costo, más superficie de config. Ver docs/despliegue.md y
+# api/main.py (bloque final, "Servir el build de producción del frontend")
+# para el razonamiento completo del lado de FastAPI.
 #
-# Empaqueta SOLO el servicio HTTP (orchestrator/ + agents/ + api/ + db/ + auth/
-# + tools/ + eval/, todo lo que pyproject.toml declara como paquete instalable).
+# Build en dos etapas:
+#   1. "frontend-build" (node): compila frontend/ a frontend/dist/ (Vite).
+#      Esta etapa NUNCA llega a la imagen final -- solo su resultado
+#      (frontend/dist/) se copia a la etapa de Python de abajo.
+#   2. Etapa final (python:3.12-slim, como antes): empaqueta SOLO el
+#      servicio HTTP (orchestrator/ + agents/ + api/ + db/ + auth/ + tools/ +
+#      eval/, lo que pyproject.toml declara como paquete instalable) más el
+#      resultado del build del frontend.
+#
 # NO empaqueta ZAP/Nuclei/Trivy/Grype/Semgrep ni el propio Docker: ese
 # escaneo activo (`tools/scan.py`) invoca el binario `docker` del host vía
 # subprocess, y este contenedor deliberadamente no tiene acceso a él (ver
@@ -20,6 +33,38 @@
 # ver docstring de db/connection.py. Por eso no hace falta un ENTRYPOINT ni
 # comando aparte de migracion antes de uvicorn.
 
+# ---------------------------------------------------------------------------
+# Etapa 1 — build del frontend (Vite -> frontend/dist/)
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS frontend-build
+
+WORKDIR /app/frontend
+
+# Copiar solo los manifiestos primero para cachear "npm ci" independiente de
+# cambios en el codigo fuente del frontend (mismo principio que la capa de
+# pip install de la etapa de Python, abajo).
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+
+# VITE_API_URL es de TIEMPO DE BUILD (Vite la inyecta al compilar, no al
+# arrancar -- ver docs/despliegue.md). Default vacío a propósito: con el
+# backend sirviendo el frontend desde el mismo origen (este mismo
+# Dockerfile/contenedor), `frontend/src/api.ts` puede usar paths relativos
+# ("" + "/auth/login" = "/auth/login") en vez de necesitar la URL absoluta
+# del backend -- más simple, y no se rompe si el dominio público cambia.
+# Pasar --build-arg VITE_API_URL=https://... solo hace falta si el frontend
+# de esta imagen se sirviera desde un origen DISTINTO al del backend (no es
+# el caso de este Dockerfile combinado, pero el ARG queda disponible por si
+# se reutiliza esta etapa para ese escenario).
+ARG VITE_API_URL=""
+ENV VITE_API_URL=${VITE_API_URL}
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Etapa 2 — runtime de Python (backend + frontend estático)
+# ---------------------------------------------------------------------------
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -47,6 +92,14 @@ COPY db ./db
 COPY auth ./auth
 
 RUN pip install --no-cache-dir .
+
+# Resultado del build de la etapa "frontend-build" -- api/main.py lo detecta
+# solo (`FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"`,
+# que en este contenedor resuelve a /app/frontend/dist) y activa el mount de
+# estáticos + el catch-all de SPA. Si este COPY faltara, el backend arranca
+# igual (mismo comportamiento que dev local sin build) pero sin servir el
+# frontend -- nunca un fallo duro.
+COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 # Nunca copiar .env real a la imagen -- las variables de entorno se inyectan
 # en tiempo de ejecucion (docker run --env-file, o el panel de variables de

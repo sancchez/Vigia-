@@ -58,16 +58,26 @@ def _reset_pg_tables(pg_url: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _sin_llm_real_por_defecto(monkeypatch):
-    """Autouse: ningún test dispara una llamada real a Claude por accidente.
+    """Autouse: ningún test dispara una llamada real a Claude (ni a OpenAI)
+    por accidente.
 
     Fuerza `agents._llm.call_claude` a levantar `LLMNoDisponibleError` de
     forma inmediata y determinista (sin red, sin subprocess) -- exactamente
     el mismo camino que todos los nodos/agentes ya saben manejar con
     gracia (fallback determinista). Un test que sí quiera ejercitar
-    `_call_via_cli` de verdad (ver test_llm_cli_encoding.py) sobreescribe
-    esto explícitamente con su propio `monkeypatch.setattr`.
+    `_call_via_cli` de verdad (ver test_llm_cli_encoding.py) o el proveedor
+    OpenAI mockeado (ver test_llm_provider_selection.py) sobreescribe esto
+    explícitamente con su propio `monkeypatch.setattr`/`monkeypatch.setenv`.
+
+    `OPENAI_API_KEY` y `VIGIA_LLM_PROVIDER` se limpian por la misma razón
+    que `ANTHROPIC_API_KEY`: si la máquina que corre la suite los tiene
+    configurados en su shell real (ej. para desarrollo local con el
+    proveedor barato), un test que no los toca explícitamente no debe
+    heredar ese estado y volverse no-determinista.
     """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("VIGIA_LLM_PROVIDER", raising=False)
     monkeypatch.setattr("agents._llm.shutil.which", lambda _name: None)
 
 

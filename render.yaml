@@ -1,11 +1,19 @@
 # Blueprint de Render para Vigia (https://render.com/docs/blueprint-spec,
 # verificado contra la doc real antes de escribir esto, no adivinado).
 #
-# Define dos servicios: el backend FastAPI (Docker, este mismo repo) y el
-# frontend (sitio estático, build de Vite). Deploy real: subir este archivo
-# a la raíz del repo y usar "New +" -> "Blueprint" en el dashboard de Render,
-# apuntando al repo de GitHub -- Render detecta este archivo solo. Ver
-# docs/despliegue.md para el paso a paso completo (cuenta, repo, env vars).
+# UN SOLO servicio -- backend FastAPI (Docker) sirviendo también el build de
+# producción del frontend (React/Vite) como archivos estáticos desde el mismo
+# proceso. Antes de esta sesión este archivo definía dos servicios (backend +
+# un "Static Site" de Render aparte para el frontend) -- se combinaron porque
+# el `Dockerfile` ahora compila el frontend en una etapa de build (node) y
+# copia el resultado (`frontend/dist/`) a la imagen final, y `api/main.py`
+# lo sirve él mismo (mount de estáticos + catch-all para las rutas de React
+# Router) cuando detecta que `frontend/dist/` existe. Menos servicios = menos
+# configuración y menos costo (objetivo explícito de esta sesión, usuario
+# budget-conscious). Deploy real: subir este archivo a la raíz del repo y
+# usar "New +" -> "Blueprint" en el dashboard de Render, apuntando al repo de
+# GitHub -- Render lo detecta solo. Ver docs/despliegue.md para el paso a
+# paso completo (cuenta, repo, env vars).
 #
 # OJO -- limitación real de la capa gratuita de Render (confirmado en su
 # documentación, no supuesto): un "Web Service" free tier tiene filesystem
@@ -35,9 +43,15 @@ services:
         # Postgres externo) para persistencia real.
         value: sqlite:///./ciberseguridad.db
       - key: CORS_ORIGINS
-        # Actualizar con la URL real que Render asigna al servicio de abajo
-        # (vigia-frontend) una vez creado por primera vez.
-        value: https://vigia-frontend.onrender.com
+        # Con un solo servicio, el frontend se sirve desde el MISMO origen
+        # que la API (mismo dominio `*.onrender.com`) -- las llamadas del
+        # frontend ya no son cross-origin, así que CORS_ORIGINS deja de ser
+        # estrictamente necesario para que el panel funcione. Se deja
+        # configurable de todas formas (valor de ejemplo abajo) por si algo
+        # más necesita golpear la API desde otro origen (Postman, un script,
+        # o el flujo de dev local con dos servidores separados de
+        # HANDOFF.md, que sigue funcionando igual que siempre).
+        value: https://vigia-backend.onrender.com
       - key: VIGIA_CLAUDE_CLI_TIMEOUT
         value: "300"
       - key: VIGIA_SCAN_INTERVAL_HOURS
@@ -48,24 +62,6 @@ services:
         sync: false
       - key: VIGIA_CERTSTREAM_REFRESH_MINUTES
         value: "30"
-
-  - type: web
-    name: vigia-frontend
-    runtime: static
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: ./dist
-    envVars:
-      - key: VITE_API_URL
-        # Actualizar con la URL real que Render asigna al servicio de arriba
-        # (vigia-backend) una vez creado por primera vez -- hay una
-        # dependencia circular de URLs entre ambos servicios la primera vez
-        # que se crean (ver docs/despliegue.md).
-        value: https://vigia-backend.onrender.com
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
 
 # Postgres administrado, opcional -- descomentar si se quiere persistencia
 # real sin pasar a un plan pago del web service. Gratis por 30 días (ver

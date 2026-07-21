@@ -34,10 +34,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from pathlib import Path
+
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from auth.jwt_auth import (
@@ -1497,3 +1500,99 @@ def previsualizar_invitacion(token: str) -> InvitationPreview:
     return InvitationPreview(
         valido=True, email=d["email"], tenant_nombre=d["tenant_nombre"], role=d["role"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Servir el build de producción del frontend (React/Vite) desde el mismo
+# proceso/contenedor -- objetivo: un solo servicio deployable en Railway/Render
+# en vez de backend + frontend como dos servicios separados (más setup, más
+# costo, ver docs/despliegue.md). Todo este bloque se registra AL FINAL del
+# archivo, después de cada `@app.get/post/delete` de arriba, a propósito: en
+# Starlette/FastAPI la primera ruta registrada que matchea un request gana, y
+# el catch-all de abajo (`/{full_path:path}`) matchea *cualquier* string --
+# si se registrara antes, le robaría requests a las rutas reales de la API.
+# Registrado último, nunca compite con ellas.
+#
+# Solo se activa si `frontend/dist/` existe de verdad (un build real ya
+# corrido) -- así el flujo de dev local sin build presente
+# (`scripts/demo.ps1`, dos dev servers separados por HANDOFF.md) sigue
+# funcionando exactamente igual que antes: sin `frontend/dist/`, ninguna ruta
+# nueva se registra y el comportamiento del proceso no cambia en nada.
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+# Primer segmento de cada ruta de API real declarada arriba en este archivo
+# (auth/*, assets, assets/{id}/verify, scans/*, findings, reports/*,
+# tenant/*, health, me, scan, scan/activo) -- usado únicamente para que el
+# catch-all de más abajo pueda distinguir "esto se parece a una llamada de
+# API con un path equivocado" (debe seguir devolviendo 404 JSON real) de
+# "esto es una ruta de cliente de React Router" (debe servir index.html).
+# No reemplaza el ruteo real: cualquier ruta de arriba que sí matchea exacto
+# (ej. GET /health, POST /auth/login) ya fue resuelta por FastAPI antes de
+# que un request llegue hasta aquí -- esta lista solo importa para los
+# sub-paths que NO matchean ninguna ruta real (ej. GET /auth/typo-de-ruta).
+_API_PATH_PREFIXES = {
+    "auth",
+    "me",
+    "assets",
+    "scans",
+    "findings",
+    "reports",
+    "tenant",
+    "health",
+    "scan",
+    "docs",
+    "redoc",
+    "openapi.json",
+}
+
+if FRONTEND_DIST.is_dir():
+    _assets_dir = FRONTEND_DIST / "static-assets"
+    if _assets_dir.is_dir():
+        # Nombre de carpeta distinto de "/assets" a propósito (ver
+        # frontend/vite.config.ts, build.assetsDir) -- "/assets" ya es una
+        # ruta real de la API (CRUD de activos del tenant, GET/POST /assets
+        # arriba en este archivo). Montar StaticFiles ahí habría creado una
+        # colisión real de nombres entre los JS/CSS con hash de Vite y el
+        # endpoint de activos, no solo teórica.
+        app.mount("/static-assets", StaticFiles(directory=str(_assets_dir)), name="frontend-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def servir_frontend(full_path: str) -> Response:
+        """Catch-all: sirve el SPA de React para cualquier GET que no sea la API.
+
+        Necesario para que las rutas de React Router (ej. `/login`,
+        `/dashboard`) funcionen con un hard refresh o un link directo, no
+        solo con navegación client-side -- sin esto, `GET /dashboard` directo
+        contra el servidor (sin pasar primero por `/` y el router de React)
+        devolvería 404 en vez de la SPA real.
+
+        Tres casos, en este orden:
+        1. `full_path` empieza con un prefijo de la API real (`_API_PATH_PREFIXES`)
+           pero no matcheó ninguna ruta real arriba (ya se intentó antes de
+           llegar aquí) -- 404 JSON real, nunca `index.html`. Evita que un
+           typo de ruta de API se sirva silenciosamente como HTML.
+        2. `full_path` corresponde a un archivo real dentro de `frontend/dist/`
+           (ej. `favicon.svg`, o un asset bajo `static-assets/` si el mount de
+           arriba no lo resolvió por algún motivo) -- se sirve ese archivo tal
+           cual.
+        3. Cualquier otro GET (incluyendo `/`, `/login`, `/dashboard`, etc.)
+           -- se sirve `index.html`, dejando que React Router decida la vista
+           en el cliente.
+        """
+        primer_segmento = full_path.split("/", 1)[0]
+        if primer_segmento in _API_PATH_PREFIXES:
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # Resuelve dentro de FRONTEND_DIST y confirma que el resultado sigue
+        # siendo un descendiente real de ese directorio -- sin esto, un
+        # `full_path` malicioso tipo `../../etc/passwd` podría escapar del
+        # directorio del build (path traversal real, no hipotético).
+        candidato = (FRONTEND_DIST / full_path).resolve()
+        if (
+            full_path
+            and candidato.is_file()
+            and candidato.is_relative_to(FRONTEND_DIST)
+        ):
+            return FileResponse(candidato)
+
+        return FileResponse(FRONTEND_DIST / "index.html")
