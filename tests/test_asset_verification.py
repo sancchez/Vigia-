@@ -53,6 +53,19 @@ def test_localhost_exento_como_dominio_y_como_puerto():
     assert es_target_exento_de_verificacion("app", "localhost:8080") is True
 
 
+def test_dominios_publicos_autorizados_exentos():
+    """La familia *.vulnweb.com de Acunetix es una categoría de excepción
+    DISTINTA de localhost/IP privada -- son terceros reales, pero con
+    autorización general ya otorgada por su propio operador para pruebas de
+    herramientas de seguridad (ver DOMINIOS_PUBLICOS_AUTORIZADOS). No debe
+    confundirse con "cualquier dominio que suene a sitio de prueba" -- ver
+    test_dominio_publico_real_o_sintetico_no_exento, que confirma que
+    microsoft.com y dominios sintéticos NO se eximen."""
+    assert es_target_exento_de_verificacion("dominio", "testasp.vulnweb.com") is True
+    assert es_target_exento_de_verificacion("dominio", "http://testphp.vulnweb.com/") is True
+    assert es_target_exento_de_verificacion("dominio", "microsoft.com") is False
+
+
 def test_ip_privada_y_loopback_exentas():
     assert es_target_exento_de_verificacion("ip", "127.0.0.1") is True
     assert es_target_exento_de_verificacion("ip", "10.0.0.5") is True

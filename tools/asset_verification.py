@@ -85,6 +85,29 @@ TOKEN_PREFIX = "vigia-verify-"
 
 METODOS_VALIDOS = ("dns_txt", "http_file")
 
+# ---------------------------------------------------------------------------
+# Excepción #2: objetivos públicos de prueba con autorización general ya
+# otorgada por su propio operador -- categoría DISTINTA de la excepción de
+# localhost/IP privada de arriba (esa es "solo alcanzable desde la misma
+# máquina"; esta es "un tercero real, pero ya dio permiso general a
+# cualquiera"). Hoy: solo la familia *.vulnweb.com de Acunetix
+# (testphp/testasp/testaspnet/testhtml5.vulnweb.com), operada
+# explícitamente por Acunetix como objetivo público para que herramientas de
+# seguridad se prueben contra ella -- práctica estándar de la industria
+# (se referencia en documentación y entrenamientos de OWASP y de la propia
+# Acunetix), no un sitio de un tercero cualquiera.
+#
+# Deliberadamente NO es una lista abierta ni configurable por el tenant --
+# agregar un dominio acá es una decisión de código, revisada, igual que
+# cualquier otro cambio a este archivo. Un tenant nunca puede eximir un
+# dominio propio simplemente pareciéndose a uno de estos.
+DOMINIOS_PUBLICOS_AUTORIZADOS = frozenset({
+    "testphp.vulnweb.com",
+    "testasp.vulnweb.com",
+    "testaspnet.vulnweb.com",
+    "testhtml5.vulnweb.com",
+})
+
 
 def generar_token() -> str:
     """Token único, impredecible, por asset -- 32 hex chars (128 bits) de `secrets`."""
@@ -121,6 +144,8 @@ def es_target_exento_de_verificacion(tipo: str, valor: str) -> bool:
         host = _hostname_de(valor) or valor
         host = host.split(":")[0]  # 'localhost:3000' -> 'localhost'
         if host == "localhost" or host.endswith(".localhost"):
+            return True
+        if host in DOMINIOS_PUBLICOS_AUTORIZADOS:
             return True
 
     try:
