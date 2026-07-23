@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
-import { api, ApiError, type Asset, type Finding, type ScanHistoryItem } from "../api";
+import { api, ApiError, type Asset, type CumplimientoReport, type Finding, type ScanDetail, type ScanHistoryItem } from "../api";
 import ScanHistoryChart from "../components/ScanHistoryChart";
 import Equipo from "../components/Equipo";
 
@@ -31,6 +31,22 @@ const NIVEL_BG: Record<string, string> = {
   rojo: "var(--alert-bg)",
 };
 
+const SEV_ORDEN = ["critical", "high", "medium", "low", "info"] as const;
+const SEV_LABEL: Record<string, string> = {
+  critical: "Crítico",
+  high: "Alto",
+  medium: "Medio",
+  low: "Bajo",
+  info: "Info",
+};
+const SEV_BAR_COLOR: Record<string, string> = {
+  critical: "var(--alert)",
+  high: "var(--accent)",
+  medium: "#c9862b",
+  low: "#7f97a0",
+  info: "#b8c2c7",
+};
+
 export default function Dashboard() {
   const { me, logout } = useAuth();
   const navigate = useNavigate();
@@ -43,6 +59,12 @@ export default function Dashboard() {
   const [escaneando, setEscaneando] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
   const [descargando, setDescargando] = useState<string | null>(null);
+  const [progreso, setProgreso] = useState<string | null>(null);
+  const [filtroSev, setFiltroSev] = useState<string>("todos");
+  const [scanVisto, setScanVisto] = useState<ScanDetail | null>(null);
+  const [viendoScan, setViendoScan] = useState<string | null>(null);
+  const [cumplimiento, setCumplimiento] = useState<CumplimientoReport | null>(null);
+  const [cargandoCumpl, setCargandoCumpl] = useState(false);
   const [assetVerificando, setAssetVerificando] = useState<string | null>(null);
   const [assetExpandido, setAssetExpandido] = useState<string | null>(null);
   const [metodoElegido, setMetodoElegido] = useState<Record<string, "dns_txt" | "http_file">>({});
@@ -97,24 +119,48 @@ export default function Dashboard() {
   };
 
   const correrScan = async (valor: string) => {
+    if (!autorizado) {
+      setMensaje(
+        `Para correr un escaneo activo sobre ${valor}, marca primero "Autorización de pruebas firmada".`
+      );
+      return;
+    }
     setEscaneando(valor);
     setMensaje(null);
+    setProgreso("Iniciando escaneo activo…");
     try {
-      const resultado = await api.runScan(valor, autorizado);
-      if (!autorizado) {
-        setMensaje(
-          `${valor}: escaneo pasivo completado. Para un análisis activo completo, confirma la autorización de pruebas antes de escanear.`
-        );
+      const { scan_id } = await api.startActiveScan(valor);
+      // El escaneo corre en background en el backend; consultamos su estado
+      // cada 3s. `reporte_final` trae el checkpoint de progreso en vivo
+      // ("[spider] Spider clásico: 57%", "[ascan] Escaneo activo: 12%")
+      // mientras `estado === "corriendo"`.
+      let detalle = await api.getScan(scan_id);
+      while (detalle.estado === "corriendo") {
+        setProgreso(detalle.reporte_final ?? "Escaneando…");
+        await new Promise((r) => setTimeout(r, 3000));
+        detalle = await api.getScan(scan_id);
+      }
+      if (detalle.estado === "completado") {
+        setMensaje(`${valor}: escaneo activo completado — ${detalle.findings.length} hallazgo(s).`);
       } else {
-        setMensaje(`${valor}: escaneo completado — ${resultado.verified_findings.length} hallazgo(s).`);
+        setMensaje(
+          `${valor}: el escaneo terminó con estado "${detalle.estado}". ${detalle.reporte_final ?? ""}`.trim()
+        );
       }
       await cargarTodo();
     } catch (err) {
       setMensaje(err instanceof ApiError ? err.message : "El escaneo no se pudo completar.");
     } finally {
       setEscaneando(null);
+      setProgreso(null);
     }
   };
+
+  const progresoPct = (() => {
+    if (!progreso) return null;
+    const m = progreso.match(/(\d+)%/);
+    return m ? Math.min(100, Number(m[1])) : null;
+  })();
 
   const descargarCumplimiento = async (formato: "pdf" | "docx") => {
     const clave = `cumplimiento-${formato}`;
@@ -142,10 +188,42 @@ export default function Dashboard() {
     }
   };
 
+  const verScan = async (scanId: string) => {
+    setViendoScan(scanId);
+    try {
+      const detalle = await api.getScan(scanId);
+      setScanVisto(detalle);
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo abrir el reporte del escaneo.");
+    } finally {
+      setViendoScan(null);
+    }
+  };
+
+  const verCumplimiento = async () => {
+    setCargandoCumpl(true);
+    setMensaje(null);
+    try {
+      const reporte = await api.getCumplimiento();
+      setCumplimiento(reporte);
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo generar el reporte de cumplimiento.");
+    } finally {
+      setCargandoCumpl(false);
+    }
+  };
+
   if (!me) return null;
 
   const riesgo = nivelDeRiesgo(findings);
   const porSeveridad = (sev: string) => findings.filter((f) => f.severidad === sev).length;
+  const ordenarPorSev = (lista: Finding[]) =>
+    [...lista].sort(
+      (a, b) => SEV_ORDEN.indexOf(a.severidad as (typeof SEV_ORDEN)[number]) - SEV_ORDEN.indexOf(b.severidad as (typeof SEV_ORDEN)[number])
+    );
+  const findingsFiltrados = ordenarPorSev(
+    findings.filter((f) => filtroSev === "todos" || f.severidad === filtroSev)
+  );
 
   return (
     <div style={{ maxWidth: 960, margin: "0 auto", padding: "2rem 1.5rem" }}>
@@ -212,6 +290,37 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {findings.length > 0 && (
+            <div className="card" style={{ marginBottom: "1.25rem" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+                <h2 style={{ fontSize: 17 }}>Distribución por severidad</h2>
+                <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{findings.length} hallazgo(s)</span>
+              </div>
+              <div style={{ display: "flex", height: 14, borderRadius: 99, overflow: "hidden", background: "var(--bg-sunken)" }}>
+                {SEV_ORDEN.map((sev) => {
+                  const n = porSeveridad(sev);
+                  if (n === 0) return null;
+                  return (
+                    <div
+                      key={sev}
+                      title={`${SEV_LABEL[sev]}: ${n}`}
+                      style={{ width: `${(n / findings.length) * 100}%`, background: SEV_BAR_COLOR[sev] }}
+                    />
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12 }}>
+                {SEV_ORDEN.map((sev) => (
+                  <div key={sev} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 3, background: SEV_BAR_COLOR[sev], display: "inline-block" }} />
+                    <span style={{ color: "var(--text-secondary)" }}>{SEV_LABEL[sev]}</span>
+                    <strong>{porSeveridad(sev)}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {mensaje && (
             <div className="card" style={{ marginBottom: "1.25rem", fontSize: 14 }}>
               {mensaje}
@@ -262,6 +371,40 @@ export default function Dashboard() {
                         </button>
                       </div>
                     </div>
+
+                    {escaneando === a.valor && (
+                      <div style={{ marginTop: 10 }}>
+                        <div
+                          style={{
+                            height: 8,
+                            borderRadius: 999,
+                            background: "var(--bg-sunken)",
+                            overflow: "hidden",
+                          }}
+                        >
+                          <div
+                            style={{
+                              height: "100%",
+                              width: progresoPct !== null ? `${progresoPct}%` : "40%",
+                              background: "var(--accent)",
+                              borderRadius: 999,
+                              transition: "width 0.4s ease",
+                              animation: progresoPct === null ? "vigia-pulse 1.2s ease-in-out infinite" : undefined,
+                            }}
+                          />
+                        </div>
+                        <p
+                          style={{
+                            marginTop: 6,
+                            fontSize: 12.5,
+                            fontFamily: "var(--font-mono)",
+                            color: "var(--text-secondary)",
+                          }}
+                        >
+                          {progreso ?? "Escaneando…"}
+                        </p>
+                      </div>
+                    )}
 
                     {assetExpandido === a.id && a.instrucciones_verificacion && (
                       <div
@@ -328,6 +471,82 @@ export default function Dashboard() {
             </form>
           </div>
 
+          <div className="card" style={{ marginBottom: "1.25rem" }}>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+              <h2 style={{ fontSize: 17 }}>Hallazgos detectados</h2>
+              <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                {findings.length} en total · {porSeveridad("critical")} críticos · {porSeveridad("high")} altos
+              </span>
+            </div>
+
+            <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+              {(["todos", ...SEV_ORDEN] as const).map((sev) => {
+                const activo = filtroSev === sev;
+                const n = sev === "todos" ? findings.length : porSeveridad(sev);
+                return (
+                  <button
+                    key={sev}
+                    onClick={() => setFiltroSev(sev)}
+                    style={{
+                      fontSize: 12,
+                      padding: "0.3rem 0.7rem",
+                      borderRadius: 99,
+                      border: activo ? "1px solid var(--accent)" : "0.5px solid var(--border)",
+                      background: activo ? "var(--accent-bg)" : "transparent",
+                      color: activo ? "var(--accent-ink)" : "var(--text-secondary)",
+                    }}
+                  >
+                    {sev === "todos" ? "Todos" : SEV_LABEL[sev]} ({n})
+                  </button>
+                );
+              })}
+            </div>
+
+            {findingsFiltrados.length === 0 ? (
+              <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>
+                {findings.length === 0
+                  ? "Todavía no hay hallazgos. Corré un escaneo para poblar esta tabla."
+                  : "No hay hallazgos con esa severidad."}
+              </p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
+                      <th style={{ padding: "0.4rem 0.5rem" }}>Severidad</th>
+                      <th style={{ padding: "0.4rem 0.5rem" }}>Tipo</th>
+                      <th style={{ padding: "0.4rem 0.5rem" }}>Endpoint / Objetivo</th>
+                      <th style={{ padding: "0.4rem 0.5rem" }}>Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {findingsFiltrados.slice(0, 100).map((f) => (
+                      <tr key={f.id} style={{ borderTop: "0.5px solid var(--border)" }}>
+                        <td style={{ padding: "0.5rem 0.5rem" }}>
+                          <span className={`chip ${f.severidad}`}>{SEV_LABEL[f.severidad] ?? f.severidad}</span>
+                        </td>
+                        <td style={{ padding: "0.5rem 0.5rem" }}>{f.tipo}</td>
+                        <td style={{ padding: "0.5rem 0.5rem", fontFamily: "var(--font-mono)", fontSize: 12.5, color: "var(--text-secondary)", wordBreak: "break-all" }}>
+                          {f.endpoint || "—"}
+                        </td>
+                        <td style={{ padding: "0.5rem 0.5rem" }}>
+                          <span className={`chip ${f.confirmado ? "verificado" : "info"}`}>
+                            {f.confirmado ? "confirmado" : "sin confirmar"}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {findingsFiltrados.length > 100 && (
+                  <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+                    Mostrando los primeros 100 de {findingsFiltrados.length}. Descargá el reporte para el detalle completo.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="card">
             <h2 style={{ fontSize: 17, marginBottom: 12 }}>Actividad reciente</h2>
             {scans.length === 0 ? (
@@ -351,6 +570,13 @@ export default function Dashboard() {
                     <span style={{ color: "var(--text-muted)" }}>{new Date(s.created_at).toLocaleString("es-CO")}</span>
                     {s.estado === "completado" && (
                       <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          onClick={() => verScan(s.id)}
+                          disabled={viendoScan === s.id}
+                          style={{ fontSize: 12, padding: "0.3rem 0.6rem" }}
+                        >
+                          {viendoScan === s.id ? "…" : "Ver"}
+                        </button>
                         <button
                           onClick={() => descargarScan(s.id, "pdf")}
                           disabled={descargando === `${s.id}-pdf`}
@@ -387,6 +613,9 @@ export default function Dashboard() {
               Evidencia acumulada de todo tu historial de escaneos, mapeada a ISO 27001 y Ley 2573.
             </p>
             <div style={{ display: "flex", gap: 8 }}>
+              <button className="primary" onClick={verCumplimiento} disabled={cargandoCumpl}>
+                {cargandoCumpl ? "Generando…" : "Ver en pantalla"}
+              </button>
               <button onClick={() => descargarCumplimiento("pdf")} disabled={descargando === "cumplimiento-pdf"}>
                 {descargando === "cumplimiento-pdf" ? "Generando…" : "Descargar PDF"}
               </button>
@@ -401,6 +630,186 @@ export default function Dashboard() {
             <Equipo />
           </div>
         </>
+      )}
+
+      {scanVisto && (
+        <div
+          onClick={() => setScanVisto(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(16, 22, 28, 0.45)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: "3rem 1.5rem",
+            overflowY: "auto",
+            zIndex: 50,
+          }}
+        >
+          <div
+            className="card"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: 720, width: "100%", maxHeight: "85vh", overflowY: "auto" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+              <h2 style={{ fontSize: 18 }}>Reporte del escaneo</h2>
+              <button onClick={() => setScanVisto(null)} style={{ fontSize: 13 }}>Cerrar</button>
+            </div>
+            <p style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-secondary)", marginBottom: 4 }}>
+              {scanVisto.target}
+            </p>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <span className={`chip ${scanVisto.estado}`}>{scanVisto.estado}</span>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                {scanVisto.findings.length} hallazgo(s)
+              </span>
+            </div>
+
+            {scanVisto.findings.length > 0 && (
+              <div style={{ overflowX: "auto", marginBottom: 18 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <tbody>
+                    {ordenarPorSev(scanVisto.findings).map((f) => (
+                      <tr key={f.id} style={{ borderTop: "0.5px solid var(--border)" }}>
+                        <td style={{ padding: "0.45rem 0.5rem" }}>
+                          <span className={`chip ${f.severidad}`}>{SEV_LABEL[f.severidad] ?? f.severidad}</span>
+                        </td>
+                        <td style={{ padding: "0.45rem 0.5rem" }}>{f.tipo}</td>
+                        <td style={{ padding: "0.45rem 0.5rem", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)", wordBreak: "break-all" }}>
+                          {f.endpoint || "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <h3 style={{ fontSize: 14, marginBottom: 8 }}>Análisis técnico</h3>
+            <pre
+              style={{
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                fontFamily: "var(--font-mono)",
+                fontSize: 12.5,
+                lineHeight: 1.7,
+                background: "var(--bg-sunken)",
+                padding: "0.9rem 1rem",
+                borderRadius: 8,
+                margin: 0,
+              }}
+            >
+              {scanVisto.reporte_final || "Este escaneo no tiene un reporte técnico generado."}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {cumplimiento && (
+        <div
+          onClick={() => setCumplimiento(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(16, 22, 28, 0.45)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: "3rem 1.5rem",
+            overflowY: "auto",
+            zIndex: 50,
+          }}
+        >
+          <div
+            className="card"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: 760, width: "100%", maxHeight: "85vh", overflowY: "auto" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+              <h2 style={{ fontSize: 19 }}>Reporte de cumplimiento</h2>
+              <button onClick={() => setCumplimiento(null)} style={{ fontSize: 13 }}>Cerrar</button>
+            </div>
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 18 }}>
+              ISO 27001 · Ley 2573 de 2026 — evidencia acumulada de {cumplimiento.total_hallazgos} hallazgo(s).
+              Generado {new Date(cumplimiento.generado_en).toLocaleString("es-CO")}.
+            </p>
+
+            <h3 style={{ fontSize: 15, marginBottom: 10 }}>Hallazgos por categoría normativa</h3>
+            {cumplimiento.resumen_por_categoria.length === 0 ? (
+              <p style={{ fontSize: 14, color: "var(--text-secondary)", marginBottom: 18 }}>
+                Sin hallazgos clasificados todavía.
+              </p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 22 }}>
+                {cumplimiento.resumen_por_categoria.map((c) => (
+                  <div
+                    key={c.categoria}
+                    style={{ padding: "0.9rem 1rem", background: "var(--bg-sunken)", borderRadius: 8 }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                      <strong style={{ fontSize: 14.5 }}>{c.nombre}</strong>
+                      <span className="chip high">{c.cantidad}</span>
+                    </div>
+                    <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "6px 0 10px" }}>{c.explicacion}</p>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {c.iso27001.map((iso) => (
+                        <span key={iso} className="chip ok" style={{ fontSize: 10.5 }}>ISO {iso}</span>
+                      ))}
+                      {c.ley2573_obligaciones.map((o) => (
+                        <span key={o.id} className="chip verificado" style={{ fontSize: 10.5 }} title={o.texto}>
+                          Ley 2573 · {o.id}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <h3 style={{ fontSize: 15, marginBottom: 10 }}>Cobertura Ley 2573 de 2026</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 22 }}>
+              {Object.entries(cumplimiento.cobertura_ley2573).map(([oid, info]) => {
+                const cubierta = info.categorias_relacionadas.length > 0;
+                return (
+                  <div key={oid} style={{ display: "flex", gap: 10, alignItems: "flex-start", fontSize: 13 }}>
+                    <span className={`chip ${cubierta ? "verificado" : "info"}`} style={{ flexShrink: 0, marginTop: 2 }}>
+                      {cubierta ? "con evidencia" : "sin evidencia"}
+                    </span>
+                    <span style={{ color: "var(--text-secondary)" }}>
+                      <strong style={{ color: "var(--text-primary)" }}>{oid}</strong> — {info.texto}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <details>
+              <summary style={{ cursor: "pointer", fontSize: 14, marginBottom: 8 }}>Ver reporte completo (markdown)</summary>
+              <pre
+                style={{
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  lineHeight: 1.7,
+                  background: "var(--bg-sunken)",
+                  padding: "0.9rem 1rem",
+                  borderRadius: 8,
+                  marginTop: 8,
+                }}
+              >
+                {cumplimiento.reporte_markdown}
+              </pre>
+            </details>
+
+            <p style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 18, lineHeight: 1.6 }}>
+              {cumplimiento.advertencia_alcance_legal}
+              <br />
+              {cumplimiento.advertencia_iso27001}
+            </p>
+          </div>
+        </div>
       )}
     </div>
   );

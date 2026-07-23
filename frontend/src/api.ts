@@ -44,6 +44,42 @@ export type ScanResult = {
   reporte_final: string | null;
 };
 
+export type ActiveScanAccepted = {
+  scan_id: string;
+  estado: string;
+};
+
+export type ScanDetail = {
+  id: string;
+  target: string;
+  estado: string;
+  autorizacion_firmada: boolean;
+  reporte_final: string | null;
+  created_at: string;
+  completed_at: string | null;
+  findings: Finding[];
+};
+
+export type CumplimientoCategoria = {
+  categoria: string;
+  nombre: string;
+  cantidad: number;
+  iso27001: string[];
+  ley2573_obligaciones: { id: string; texto: string }[];
+  explicacion: string;
+  ejemplos: { id?: string; endpoint?: string; severidad?: string; scan_id?: string }[];
+};
+
+export type CumplimientoReport = {
+  reporte_markdown: string;
+  resumen_por_categoria: CumplimientoCategoria[];
+  cobertura_ley2573: Record<string, { texto: string; categorias_relacionadas: string[] }>;
+  advertencia_alcance_legal: string;
+  advertencia_iso27001: string;
+  generado_en: string;
+  total_hallazgos: number;
+};
+
 export type Me = {
   user_id: string;
   tenant_id: string;
@@ -188,6 +224,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ target, autorizacion_firmada }),
     }),
+  startActiveScan: (target_url: string, minutes = 10, ajax_spider = false) =>
+    request<ActiveScanAccepted>("/scan/activo", {
+      method: "POST",
+      body: JSON.stringify({ target_url, minutes, ajax_spider, autorizacion_firmada: true }),
+    }),
+  getScan: (scanId: string) => request<ScanDetail>(`/scans/${scanId}`),
+  getCumplimiento: () => request<CumplimientoReport>("/reports/cumplimiento"),
   downloadCumplimiento: (formato: "pdf" | "docx") =>
     downloadFile(`/reports/cumplimiento/download?formato=${formato}`, `reporte-cumplimiento.${formato}`),
   downloadScanReport: (scanId: string, formato: "pdf" | "docx") =>

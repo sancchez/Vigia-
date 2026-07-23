@@ -143,3 +143,8 @@ select:focus {
   border-radius: 12px;
   padding: 1.1rem 1.25rem;
 }
+
+@keyframes vigia-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}

@@ -86,6 +86,7 @@ deliberadamente fuera de alcance de esta sesión (ver HANDOFF.md).
 
 from __future__ import annotations
 
+import os
 import socket
 import time
 from dataclasses import dataclass, field
@@ -193,7 +194,22 @@ def start_daemon(container_name: str, host_port: int | None = None) -> tuple[str
         "instalar Docker Desktop (https://docs.docker.com/desktop/) y luego: "
         "docker pull ghcr.io/zaproxy/zaproxy:stable",
     )
+
     port = host_port or _free_host_port()
+    # Un SOLO comando de docker a propósito. Lecciones aprendidas en vivo:
+    #   1. `docker run -d` es detached y con la imagen presente vuelve en ~4s.
+    #   2. Si la imagen (~1.6GB) no está, ESE mismo comando la descarga antes
+    #      de arrancar -- por eso el presupuesto debe cubrir una descarga real.
+    #   3. En Docker Desktop (Windows/WSL2), la PRIMERA llamada a docker desde
+    #      el proceso del backend arranca "en frío" (despertar la conexión con
+    #      el daemon) y puede tardar bastante más que cuando el CLI ya está
+    #      caliente. Partir esto en `image inspect` + `pull` + `run` sumaba un
+    #      timeout corto por cada paso y cada uno podía tropezar con ese
+    #      arranque en frío. Con un único comando y un presupuesto amplio, el
+    #      arranque en frío y la descarga caben sin falsos errores.
+    # No es infinito a propósito: un timeout infinito escondería un daemon
+    # muerto y colgaría el escaneo en silencio. Configurable por si hace falta.
+    start_timeout = int(os.environ.get("VIGIA_ZAP_DAEMON_START_TIMEOUT", "1200"))
     cmd = [
         binary,
         "run",
@@ -218,7 +234,7 @@ def start_daemon(container_name: str, host_port: int | None = None) -> tuple[str
         "-config",
         "api.addrs.addr.regex=true",
     ]
-    result = run_command("zap-daemon-start", cmd, timeout=30)
+    result = run_command("zap-daemon-start", cmd, timeout=start_timeout)
     if not result.ok:
         raise ZapDaemonError(
             f"No se pudo arrancar el contenedor daemon de ZAP: {result.stderr or result.stdout}"
@@ -399,6 +415,13 @@ def run_checkpointed_active_scan(
             return presupuesto_total
         return presupuesto_total - (time.monotonic() - inicio)
 
+    # ZAP exige una URL completa con esquema -- pasarle un dominio pelado
+    # ('testasp.vulnweb.com') hace que /JSON/spider/action/scan/ devuelva
+    # 400 Bad Request (error real observado en vivo). El baseline
+    # (tools/scan.py via agents/escaneo.py) ya normalizaba esto; el escaneo
+    # activo no. Se antepone http:// si no viene esquema, igual que allá.
+    if "://" not in target_url:
+        target_url = f"http://{target_url}"
     zap_target = target_url.replace("localhost", "host.docker.internal").replace(
         "127.0.0.1", "host.docker.internal"
     )
