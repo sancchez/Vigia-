@@ -11,63 +11,63 @@
 ## Grupo 6a — `fase6a-operacion-produccion`
 
 ### 6a.1 Infraestructura — DB
-- [ ] 6a.1.1 Agregar tabla `llm_usage` a `db/schema.sql` (`CREATE TABLE IF
+- [x] 6a.1.1 Agregar tabla `llm_usage` a `db/schema.sql` (`CREATE TABLE IF
       NOT EXISTS`, índices por `tenant_id` y `scan_id`) — ver design.md 6a.2.
-- [ ] 6a.1.2 Agregar columnas `scan_frequency_hours` (INTEGER null) y
+- [x] 6a.1.2 Agregar columnas `scan_frequency_hours` (INTEGER null) y
       `scan_paused` (INTEGER default 0) al `CREATE TABLE assets` de
       `db/schema.sql`.
-- [ ] 6a.1.3 En `db/connection.py`: añadir
+- [x] 6a.1.3 En `db/connection.py`: añadir
       `_ensure_sqlite_assets_scheduling_columns(conn)` (gemelo de
       `_ensure_sqlite_assets_autorizacion_columns`) y la rama Postgres `ADD
       COLUMN IF NOT EXISTS`; registrar en la función de reconciliación que
       corre al conectar (junto a las tres `_ensure_*` ya existentes).
-- [ ] 6a.1.4 Test de migración idempotente en SQLite y (si hay fixture)
+- [x] 6a.1.4 Test de migración idempotente en SQLite y (si hay fixture)
       Postgres: correr dos veces, esquema estable, suite existente verde.
 
 ### 6a.2 Implementación — Monitoreo de costo LLM
-- [ ] 6a.2.1 En `agents/_llm.py`: `ContextVar` de contexto
+- [x] 6a.2.1 En `agents/_llm.py`: `ContextVar` de contexto
       (`{tenant_id, scan_id}`) + helper `set_llm_context(...)`.
-- [ ] 6a.2.2 Tabla de tarifas por model id (Sonnet, `gpt-5.4-mini`, etc.,
+- [x] 6a.2.2 Tabla de tarifas por model id (Sonnet, `gpt-5.4-mini`, etc.,
       valores de `docs/despliegue.md`) y cálculo de `costo_estimado`.
-- [ ] 6a.2.3 Registrar en `llm_usage` tras cada `_call_via_api` /
+- [x] 6a.2.3 Registrar en `llm_usage` tras cada `_call_via_api` /
       `_call_via_openai_api` (tokens de `usage_metadata`); registrar CLI con
       `costo_estimado=null`, `provider="cli"`. Sin cambiar el retorno de
       `call_claude` ni los 7 call sites.
-- [ ] 6a.2.4 Poblar el contexto donde arranca un scan/reporte (`POST /scan`,
+- [x] 6a.2.4 Poblar el contexto donde arranca un scan/reporte (`POST /scan`,
       `POST /scan/activo`, `api/scheduler.py`) vía `set_llm_context`.
-- [ ] 6a.2.5 `GET /costos` (o `/usage`): agregado por `scan_id` y total del
+- [x] 6a.2.5 `GET /costos` (o `/usage`): agregado por `scan_id` y total del
       tenant, scoped por `tenant_id`.
-- [ ] 6a.2.6 Documentar en `docs/despliegue.md`: el fallback CLI no mide
+- [x] 6a.2.6 Documentar en `docs/despliegue.md`: el fallback CLI no mide
       costo; producción usa `ANTHROPIC_API_KEY`/OpenAI.
 
 ### 6a.3 Implementación — Escaneo activo programado seguro
-- [ ] 6a.3.1 En `api/scheduler.py::run_scan_cycle_once`: ampliar el `SELECT`
+- [x] 6a.3.1 En `api/scheduler.py::run_scan_cycle_once`: ampliar el `SELECT`
       a `autorizacion_activa`, `scan_frequency_hours`, `scan_paused`.
-- [ ] 6a.3.2 Saltar activos con `scan_paused=1` y los que aún no cumplen su
+- [x] 6a.3.2 Saltar activos con `scan_paused=1` y los que aún no cumplen su
       `scan_frequency_hours` desde su último scan.
-- [ ] 6a.3.3 Ramificar: `autorizacion_activa==1` (y verificado/exento) →
+- [x] 6a.3.3 Ramificar: `autorizacion_activa==1` (y verificado/exento) →
       `run_checkpointed_active_scan`, persistir scan con
       `autorizacion_firmada=1`; si no → recon pasivo como hoy. Mantener el
       gate `asset_autorizado_para_escanear` para ambos.
-- [ ] 6a.3.4 Manejo de error del escaneo activo (ZAP no disponible): loguear
+- [x] 6a.3.4 Manejo de error del escaneo activo (ZAP no disponible): loguear
       y continuar el ciclo, nunca marcar autorización que no hubo.
 
 ### 6a.4 Implementación — API/UI de programación
-- [ ] 6a.4.1 Endpoint de programación por activo (`PUT /assets/{id}/schedule`
+- [x] 6a.4.1 Endpoint de programación por activo (`PUT /assets/{id}/schedule`
       o extender `PATCH /assets/{id}`): setear frecuencia/pausa, scoped por
       tenant (404 para asset de otro tenant).
-- [ ] 6a.4.2 `frontend/src/api.ts`: tipos + métodos para programación y
+- [x] 6a.4.2 `frontend/src/api.ts`: tipos + métodos para programación y
       `GET /costos`.
-- [ ] 6a.4.3 UI: control de frecuencia/pausa por activo (en Dashboard o
+- [x] 6a.4.3 UI: control de frecuencia/pausa por activo (en Dashboard o
       componente nuevo) + widget de costo por reporte/tenant.
 
 ### 6a.5 Testing 6a
-- [ ] 6a.5.1 Registro de `llm_usage` con LLM mockeado (API y CLI).
-- [ ] 6a.5.2 Agregación de `GET /costos` + aislamiento por tenant.
-- [ ] 6a.5.3 Ramificación activo/pasivo del scheduler (ZAP mockeado):
+- [x] 6a.5.1 Registro de `llm_usage` con LLM mockeado (API y CLI).
+- [x] 6a.5.2 Agregación de `GET /costos` + aislamiento por tenant.
+- [x] 6a.5.3 Ramificación activo/pasivo del scheduler (ZAP mockeado):
       activo con `autorizacion_activa=1` → activo; =0 → pasivo; no
       verificado → omitido; pausado → omitido.
-- [ ] 6a.5.4 `PUT schedule` scoped por tenant (404 cross-tenant).
+- [x] 6a.5.4 `PUT schedule` scoped por tenant (404 cross-tenant).
 
 ---
 

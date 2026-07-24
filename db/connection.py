@@ -115,6 +115,14 @@ _ASSETS_AUTORIZACION_COLUMNS: list[tuple[str, str]] = [
     ("autorizado_en", "TIMESTAMP"),
 ]
 
+# Columnas de programación de escaneo agregadas a `assets` en Fase 6a
+# (openspec/changes/fase6-endurecimiento-produccion) -- mismo motivo/patrón
+# que _ASSETS_AUTORIZACION_COLUMNS de arriba.
+_ASSETS_SCHEDULING_COLUMNS: list[tuple[str, str]] = [
+    ("scan_frequency_hours", "INTEGER"),
+    ("scan_paused", "INTEGER NOT NULL DEFAULT 0"),
+]
+
 # `finding_transiciones`/`tenant_sla_config` (fase2a-ciclo-vida-hallazgo) NO
 # necesitan una lista de reconciliación como las de arriba: a diferencia de
 # `_ASSET_VERIFICATION_COLUMNS`/`_FINDINGS_LIFECYCLE_COLUMNS`/
@@ -218,6 +226,16 @@ def _get_pg_conn(url: str) -> _PgConnection:
                     conn.execute(
                         f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {column} {coltype}"
                     )
+                # Reconciliación análoga para las columnas de programación de
+                # escaneo agregadas en Fase 6a -- ver
+                # _ASSETS_SCHEDULING_COLUMNS más arriba. `llm_usage` no
+                # necesita esto: es una tabla enteramente nueva (ver
+                # comentario de _FINDINGS_LIFECYCLE_COLUMNS/finding_transiciones
+                # más abajo para el porqué esa distinción importa).
+                for column, coltype in _ASSETS_SCHEDULING_COLUMNS:
+                    conn.execute(
+                        f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {column} {coltype}"
+                    )
                 conn.commit()
                 _pg_schema_ready.add(url)
     return _PgConnection(conn)
@@ -271,6 +289,19 @@ def _ensure_sqlite_assets_autorizacion_columns(conn: sqlite3.Connection) -> None
             conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
 
 
+def _ensure_sqlite_assets_scheduling_columns(conn: sqlite3.Connection) -> None:
+    """Agrega a `assets` las columnas de programación de escaneo si la tabla es de antes de Fase 6a.
+
+    Mismo patrón que `_ensure_sqlite_asset_verification_columns`.
+    """
+    columnas_existentes = {
+        row[1] for row in conn.execute("PRAGMA table_info(assets)").fetchall()
+    }
+    for column, coltype in _ASSETS_SCHEDULING_COLUMNS:
+        if column not in columnas_existentes:
+            conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
+
+
 def get_conn() -> sqlite3.Connection | _PgConnection:
     """Abre una conexión nueva con el schema ya aplicado (idempotente).
 
@@ -294,6 +325,7 @@ def get_conn() -> sqlite3.Connection | _PgConnection:
     _ensure_sqlite_asset_verification_columns(conn)
     _ensure_sqlite_findings_columns(conn)
     _ensure_sqlite_assets_autorizacion_columns(conn)
+    _ensure_sqlite_assets_scheduling_columns(conn)
     conn.commit()
     return conn
 

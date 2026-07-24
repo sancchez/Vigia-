@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS assets (
     autorizacion_doc_url    TEXT,
     autorizado_por          TEXT,
     autorizado_en           TIMESTAMP,
+    -- Programación de escaneo por activo (Fase 6a,
+    -- openspec/changes/fase6-endurecimiento-produccion) -- columnas 1:1 con
+    -- el activo en vez de una tabla `scan_schedules` separada (ver
+    -- design.md, Decisión 6a.4: evita un JOIN por ciclo del scheduler para
+    -- un dato de cardinalidad 1). `scan_frequency_hours IS NULL` significa
+    -- "usa el intervalo global de VIGIA_SCAN_INTERVAL_HOURS" -- no todo
+    -- activo necesita una frecuencia propia. Mismo caso que las columnas de
+    -- verificación/autorización de arriba: este CREATE TABLE ya las trae
+    -- para una base nueva, pero una `ciberseguridad.db`/Postgres existente
+    -- de una sesión anterior necesita la reconciliación de
+    -- `db/connection.py` (`_ensure_sqlite_assets_scheduling_columns()`).
+    scan_frequency_hours    INTEGER,
+    scan_paused             INTEGER NOT NULL DEFAULT 0,
     UNIQUE(tenant_id, tipo, valor)
 );
 CREATE INDEX IF NOT EXISTS idx_assets_tenant_id ON assets(tenant_id);
@@ -252,3 +265,25 @@ CREATE TABLE IF NOT EXISTS dmarc_reports (
     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_dmarc_reports_tenant_id ON dmarc_reports(tenant_id);
+
+-- Registro de uso/costo de LLM por llamada (Fase 6a,
+-- openspec/changes/fase6-endurecimiento-produccion) -- ver `agents/_llm.py`
+-- (`set_llm_context`, `_registrar_uso`). Tabla enteramente nueva, así que
+-- `CREATE TABLE IF NOT EXISTS` alcanza en ambos motores (no necesita el
+-- patrón `_ensure_sqlite_*_columns` de `db/connection.py`, ver el comentario
+-- de esa función para el porqué). `costo_estimado IS NULL` significa "no
+-- medible" (fallback CLI de `claude -p`, que no expone conteo de tokens) --
+-- nunca un número inventado.
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id                TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    scan_id           TEXT REFERENCES scans(id) ON DELETE SET NULL,
+    provider          TEXT NOT NULL,          -- 'anthropic' | 'openai' | 'cli'
+    model             TEXT NOT NULL,
+    tokens_in         INTEGER,
+    tokens_out        INTEGER,
+    costo_estimado    REAL,                   -- USD; NULL si no medible (CLI)
+    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_tenant_id ON llm_usage(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_scan_id ON llm_usage(scan_id);

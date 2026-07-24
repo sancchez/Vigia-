@@ -5,6 +5,7 @@ import {
   api,
   ApiError,
   type Asset,
+  type Costos,
   type CumplimientoReport,
   type Finding,
   type Member,
@@ -107,6 +108,11 @@ export default function Dashboard() {
   // pero como prop simple en vez de callback porque el panel se auto-alimenta).
   const [protegiendoMarca, setProtegiendoMarca] = useState<string | null>(null);
   const [refrescarProteccion, setRefrescarProteccion] = useState(0);
+  // Fase 6a (openspec/changes/fase6-endurecimiento-produccion): programación
+  // de escaneo por activo (frecuencia/pausa) y widget de costo de LLM.
+  const [costos, setCostos] = useState<Costos | null>(null);
+  const [frecuenciaEditando, setFrecuenciaEditando] = useState<Record<string, string>>({});
+  const [guardandoProgramacion, setGuardandoProgramacion] = useState<string | null>(null);
 
   const cargarTodo = async () => {
     setCargando(true);
@@ -140,6 +146,11 @@ export default function Dashboard() {
       } catch {
         setWatchedBrands([]);
       }
+      try {
+        setCostos(await api.getCostos());
+      } catch {
+        setCostos(null);
+      }
     }
   };
 
@@ -172,6 +183,31 @@ export default function Dashboard() {
       setMensaje(err instanceof ApiError ? err.message : "No se pudo comprobar la verificación.");
     } finally {
       setAssetVerificando(null);
+    }
+  };
+
+  // Fase 6a: guarda frecuencia (horas, vacío = usar el intervalo global) y/o
+  // pausa del ciclo recurrente para un activo. `pausar` llega explícito
+  // (true/false) en vez de leerse de un estado local porque el checkbox de
+  // pausa dispara el guardado inmediatamente al togglearse.
+  const guardarProgramacion = async (asset: Asset, pausar?: boolean) => {
+    setGuardandoProgramacion(asset.id);
+    setMensaje(null);
+    try {
+      const texto = frecuenciaEditando[asset.id];
+      const body: { scan_frequency_hours?: number | null; scan_paused?: boolean } = {};
+      if (texto !== undefined) {
+        body.scan_frequency_hours = texto.trim() === "" ? null : Number(texto);
+      }
+      if (pausar !== undefined) {
+        body.scan_paused = pausar;
+      }
+      await api.updateAssetSchedule(asset.id, body);
+      await cargarTodo();
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo guardar la programación del escaneo.");
+    } finally {
+      setGuardandoProgramacion(null);
     }
   };
 
@@ -463,6 +499,35 @@ export default function Dashboard() {
                       </div>
                     </div>
 
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 12.5, color: "var(--text-secondary)" }}>
+                      <span>Escaneo automático:</span>
+                      <input
+                        type="number"
+                        min={1}
+                        placeholder="horas (global)"
+                        value={frecuenciaEditando[a.id] ?? (a.scan_frequency_hours != null ? String(a.scan_frequency_hours) : "")}
+                        onChange={(e) => setFrecuenciaEditando((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                        style={{ width: 120, fontSize: 12.5, padding: "0.25rem 0.5rem" }}
+                      />
+                      <button
+                        onClick={() => guardarProgramacion(a)}
+                        disabled={guardandoProgramacion === a.id}
+                        style={{ fontSize: 12, padding: "0.25rem 0.6rem" }}
+                      >
+                        {guardandoProgramacion === a.id ? "…" : "Guardar frecuencia"}
+                      </button>
+                      <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <input
+                          type="checkbox"
+                          checked={a.scan_paused}
+                          disabled={guardandoProgramacion === a.id}
+                          onChange={(e) => guardarProgramacion(a, e.target.checked)}
+                          style={{ width: "auto" }}
+                        />
+                        Pausado
+                      </label>
+                    </div>
+
                     {escaneando === a.valor && (
                       <div style={{ marginTop: 10 }}>
                         <div
@@ -656,6 +721,48 @@ export default function Dashboard() {
           <KpiWidget assets={assets} />
 
           <DmarcPanel />
+
+          {costos && (
+            <div className="card" style={{ marginBottom: "1.25rem" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+                <h2 style={{ fontSize: 17 }}>Costo de análisis con IA</h2>
+                <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                  {costos.total_costo_estimado != null ? `USD ${costos.total_costo_estimado.toFixed(4)}` : "sin datos medibles"} · {costos.total_llamadas} llamada(s)
+                </span>
+              </div>
+              {costos.por_scan.length === 0 ? (
+                <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>Todavía no se ha registrado uso de IA.</p>
+              ) : (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
+                        <th style={{ padding: "0.3rem 0.5rem" }}>Scan</th>
+                        <th style={{ padding: "0.3rem 0.5rem" }}>Llamadas</th>
+                        <th style={{ padding: "0.3rem 0.5rem" }}>Tokens in/out</th>
+                        <th style={{ padding: "0.3rem 0.5rem" }}>Costo estimado</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {costos.por_scan.slice(0, 20).map((c) => (
+                        <tr key={c.scan_id ?? "sin-scan"} style={{ borderTop: "0.5px solid var(--border)" }}>
+                          <td style={{ padding: "0.4rem 0.5rem", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+                            {c.scan_id ? c.scan_id.slice(0, 8) : "—"}
+                          </td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>{c.llamadas}</td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>{c.tokens_in} / {c.tokens_out}</td>
+                          <td style={{ padding: "0.4rem 0.5rem" }}>
+                            {c.costo_estimado != null ? `USD ${c.costo_estimado.toFixed(4)}` : "no medible (CLI)"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <p style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 10 }}>{costos.nota}</p>
+            </div>
+          )}
 
           {findings.length > 0 && (
             <RemediationBoard findings={findings} members={members} onChanged={cargarTodo} />

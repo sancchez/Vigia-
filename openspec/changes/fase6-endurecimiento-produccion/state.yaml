@@ -1,29 +1,52 @@
 change: fase6-endurecimiento-produccion
 mode: openspec
 created_at: 2026-07-24T00:00:00Z
-updated_at: 2026-07-24T00:00:00Z
+updated_at: 2026-07-24T13:00:00Z
 dag:
   explore:      skipped
   proposal:     complete
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        pending
+  apply:        partial   # solo bloque 6a aplicado -- ver nota
   verify:       pending
   archive:      pending
 notes: >
-  Solo planificación (sdd-propose -> sdd-spec -> sdd-design -> sdd-tasks). NO
-  se corrió sdd-apply. Change más heterogéneo del plan: el proposal recomienda
-  PARTIRLO en 3 sub-changes -- fase6a-operacion-produccion (LLM prod + costo +
-  scheduling activo seguro), fase6b-billing-wompi (GATED: HANDOFF.md 165 dice
-  no retomar Wompi sin que el usuario lo pida), fase6c-onboarding-y-export.
-  spec/design/tasks ya vienen organizados por esos 3 bloques para que el corte
-  sea limpio si el orquestador aprueba el split. Contexto verificado en codigo
-  real, no asumido: agents/_llm.py (3 backends, sin medicion de costo hoy),
-  api/scheduler.py (solo pasivo, desbloqueado por columnas autorizacion_activa
-  de Fase 0), tools/asset_verification.py (DNS/HTTP ya implementado -> onboarding
-  es solo UI), subscriptions + planes ya en schema.sql, tools/report_export.py
-  + GET /kpis (fase2c) reusables para el export ejecutivo. Fase 6 no toca
-  vigia_core_private/ (100% infra/UI). Dependencia de secuenciado con changes
-  hermanos fase3a/3b/3e/4/5/7 (tocan api/main.py y frontend en paralelo): el
-  orquestador ordena los sdd-apply para evitar edicion concurrente.
+  Solo planificación (sdd-propose -> sdd-spec -> sdd-design -> sdd-tasks). El
+  proposal recomendó PARTIRLO en 3 sub-changes -- fase6a-operacion-produccion
+  (LLM prod + costo + scheduling activo seguro), fase6b-billing-wompi (GATED:
+  HANDOFF.md 165 dice no retomar Wompi sin que el usuario lo pida),
+  fase6c-onboarding-y-export. spec/design/tasks vienen organizados por esos 3
+  bloques.
+
+  ESTADO REAL TRAS ESTA RONDA (worktree agent-a39bce5eb88f88423, aplicado
+  sobre main con Fases 0-2c ya mergeadas -- el worktree arrancó apuntando a un
+  commit viejo sin esas fases, se corrigió con `git reset --hard main` antes
+  de implementar):
+
+  - Bloque 6a (fase6a-operacion-produccion): APLICADO. Ver tasks.md, sección
+    "Grupo 6a" -- todos los checkboxes marcados. Resumen: tabla `llm_usage` +
+    columnas `assets.scan_frequency_hours`/`scan_paused` (migración
+    idempotente SQLite/Postgres, mismo patrón db/connection.py de Fase 0);
+    `agents/_llm.py` registra costo vía ContextVar (`set_llm_context`) sin
+    tocar la firma de `call_claude` ni los 7 call sites; `GET /costos`;
+    `api/scheduler.py::run_scan_cycle_once` rama activo/pasivo por
+    `autorizacion_activa` persistida (nunca un booleano de request), respeta
+    `scan_paused`/`scan_frequency_hours`; `PUT /assets/{id}/schedule`;
+    UI de frecuencia/pausa por activo + widget de costo en Dashboard.tsx.
+    Tests nuevos: test_fase6a_migration.py, test_llm_usage_tracking.py,
+    test_scheduler_fase6a.py (17 tests, todos verdes). Suite completa:
+    209 passed, 1 skipped (Postgres opcional), `npm run build` limpio.
+
+  - Bloque 6b (fase6b-billing-wompi): NO APLICADO -- sigue GATED, fuera de
+    alcance de esta ronda por instrucción explícita. Ningún archivo de
+    checkout/webhook/billing se tocó.
+
+  - Bloque 6c (fase6c-onboarding-y-export): NO APLICADO en esta ronda --
+    corresponde a otro agente en paralelo (mismo commit base). Ningún archivo
+    de onboarding/export ejecutivo se tocó desde este worktree.
+
+  Fase 6 no toca vigia_core_private/ (confirmado, 100% infra/UI). El
+  orquestador debe secuenciar el merge de 6a con los changes hermanos que
+  también tocan api/main.py/frontend (fase3a/3b/3e/4/5 y el propio 6c) para
+  evitar conflictos.

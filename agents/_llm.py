@@ -38,14 +38,20 @@ quiera forzar cuál se usa sin borrar ninguna.
 
 from __future__ import annotations
 
+import contextvars
+import logging
 import os
 import shutil
 import subprocess
+import uuid
 from functools import lru_cache
+from typing import Optional, TypedDict
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger("vigia.llm_usage")
 
 # Configurable por entorno para no atar el código a un solo model id
 # a medida que Anthropic/OpenAI liberan nuevas versiones.
@@ -59,6 +65,120 @@ DEFAULT_MODEL = os.environ.get("CIBERSEGURIDAD_LLM_MODEL", "claude-sonnet-4-5-20
 DEFAULT_OPENAI_MODEL = os.environ.get("VIGIA_OPENAI_MODEL", "gpt-5.4-mini")
 
 _PROVEEDORES_VALIDOS = ("anthropic", "openai")
+
+# --- Monitoreo de costo por reporte (Fase 6a,
+# openspec/changes/fase6-endurecimiento-produccion) -------------------------
+#
+# Ver design.md ("Decisión 6a.1 — Monitoreo de costo: envolver, no reescribir
+# call_claude"): un ContextVar puebla el {tenant_id, scan_id} de la llamada
+# en curso -- lo hace el endpoint/ciclo que arranca el scan (`POST /scan`,
+# `POST /scan/activo`, `api/scheduler.py`) vía `set_llm_context()` ANTES de
+# invocar el grafo -- y este módulo registra en `llm_usage` tras cada llamada
+# real a la API (Anthropic u OpenAI), sin tocar la firma de `call_claude` ni
+# los 7 call sites existentes. Contextvars son aislados por thread nativo de
+# Python (un `threading.Thread` nuevo arranca con un Context vacío, no
+# hereda el del hilo que lo creó) -- por eso cada camino que puede correr en
+# su propio thread (`api/main.py::_correr_escaneo_activo_en_background`)
+# debe llamar `set_llm_context()` DENTRO de ese thread, no antes de arrancarlo.
+
+
+class _LlmContext(TypedDict):
+    tenant_id: Optional[str]
+    scan_id: Optional[str]
+
+
+_llm_context: contextvars.ContextVar[Optional[_LlmContext]] = contextvars.ContextVar(
+    "_llm_context", default=None
+)
+
+
+def set_llm_context(tenant_id: Optional[str], scan_id: Optional[str] = None) -> None:
+    """Puebla el contexto (tenant/scan) que `_registrar_uso` usa para escribir en `llm_usage`.
+
+    Llamar `set_llm_context(None)` (o no llamarlo nunca, el default) hace que
+    ninguna llamada a `call_claude` se registre -- es el comportamiento de
+    todos los tests unitarios existentes de `agents/_llm.py`, que no tocan
+    esta función y por lo tanto nunca escriben en la base de datos real.
+    """
+    _llm_context.set({"tenant_id": tenant_id, "scan_id": scan_id})
+
+
+# Tarifas por millón de tokens (USD, input/output) -- mismos valores
+# documentados en `docs/despliegue.md`. Un model id no listado aquí (ej. un
+# `model=` explícito que un call site futuro pase) simplemente no puede
+# costearse -- `costo_estimado` queda `None`, nunca un número inventado.
+_TARIFAS_POR_MILLON_USD: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-5-20250929": (3.0, 15.0),
+    "gpt-5.4-mini": (0.75, 4.50),
+}
+
+
+def _calcular_costo_estimado(
+    model: str, tokens_in: Optional[int], tokens_out: Optional[int]
+) -> Optional[float]:
+    if tokens_in is None or tokens_out is None:
+        return None
+    tarifa = _TARIFAS_POR_MILLON_USD.get(model)
+    if tarifa is None:
+        return None
+    precio_in, precio_out = tarifa
+    return (tokens_in / 1_000_000) * precio_in + (tokens_out / 1_000_000) * precio_out
+
+
+def _extraer_tokens(response: object) -> tuple[Optional[int], Optional[int]]:
+    """Lee `usage_metadata` (atributo estandarizado por langchain_core,
+    presente en ambos backends -- Anthropic y OpenAI -- ver design.md)."""
+    usage = getattr(response, "usage_metadata", None)
+    if not usage:
+        return None, None
+    return usage.get("input_tokens"), usage.get("output_tokens")
+
+
+def _registrar_uso(
+    provider: str,
+    model: str,
+    tokens_in: Optional[int],
+    tokens_out: Optional[int],
+    costo_estimado: Optional[float],
+) -> None:
+    """Inserta una fila en `llm_usage`, si (y solo si) hay contexto poblado.
+
+    Nunca lanza hacia el llamador -- un fallo al registrar el costo NO debe
+    tumbar el pipeline real de escaneo/reporte (mismo principio de
+    degradación con gracia que el resto del proyecto). Import de
+    `db.connection` diferido a dentro de la función para no introducir un
+    ciclo de import a nivel de módulo entre `agents/_llm.py` y `db/`.
+    """
+    ctx = _llm_context.get()
+    if not ctx or not ctx.get("tenant_id"):
+        return
+    try:
+        from db.connection import get_conn
+
+        conn = get_conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO llm_usage
+                    (id, tenant_id, scan_id, provider, model, tokens_in, tokens_out, costo_estimado)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    ctx["tenant_id"],
+                    ctx.get("scan_id"),
+                    provider,
+                    model,
+                    tokens_in,
+                    tokens_out,
+                    costo_estimado,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 -- registrar costo nunca debe tumbar el scan real
+        logger.exception("No se pudo registrar el uso de LLM en llm_usage (provider=%s, model=%s)", provider, model)
 
 
 class LLMNoDisponibleError(RuntimeError):
@@ -78,6 +198,10 @@ def _call_via_api(system_prompt: str, user_message: str, model: str) -> str:
     llm = _client(model)
     response = llm.invoke(
         [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
+    )
+    tokens_in, tokens_out = _extraer_tokens(response)
+    _registrar_uso(
+        "anthropic", model, tokens_in, tokens_out, _calcular_costo_estimado(model, tokens_in, tokens_out)
     )
     content = response.content
     if isinstance(content, list):
@@ -112,6 +236,10 @@ def _call_via_openai_api(system_prompt: str, user_message: str, model: str) -> s
     llm = _client_openai(model)
     response = llm.invoke(
         [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
+    )
+    tokens_in, tokens_out = _extraer_tokens(response)
+    _registrar_uso(
+        "openai", model, tokens_in, tokens_out, _calcular_costo_estimado(model, tokens_in, tokens_out)
     )
     content = response.content
     if isinstance(content, list):
@@ -226,6 +354,11 @@ def _call_via_cli(system_prompt: str, user_message: str, model: str) -> str:
             f"La CLI de Claude devolvió un error (código {result.returncode}): "
             f"{result.stderr.strip()[:500]}"
         )
+    # CLI (`claude -p`) no expone conteo de tokens -- se registra la llamada
+    # igual (para que `GET /costos` muestre "N llamadas no medibles" en vez
+    # de subestimar el uso real) pero con `costo_estimado=None`, nunca un
+    # número inventado (ver design.md, Decisión 6a.1).
+    _registrar_uso("cli", model, None, None, None)
     return result.stdout.strip()
 
 
