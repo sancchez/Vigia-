@@ -156,6 +156,29 @@ export type FindingDetail = Finding & {
   evidencia_exploitdb: { cve: string; edb_id: string; descripcion: string }[];
 };
 
+// Fase 2c (openspec/changes/fase2c-verificacion-cierre-y-kpis): resultado
+// de `POST /findings/{id}/verificar-cierre` -- ver `VerificarCierreOut` en
+// el backend. `estado` es el estado FINAL del hallazgo tras la llamada
+// (puede no haber cambiado si `reaparece=true`, o si el hallazgo ya estaba
+// en un estado terminal).
+export type VerificarCierreResult = {
+  finding_id: string;
+  estado: EstadoHallazgo;
+  reaparece: boolean;
+  detalle: string;
+};
+
+// Contrato real de `GET /kpis` (`KpiOut` en el backend). `precision` en
+// `mttr_por_severidad` es "exacto" hoy (fase2a persiste
+// `finding_transiciones.created_at` real) -- se tipa como `string`, no un
+// literal fijo, para no romper si un backend futuro degradara a
+// "aproximado" ante la ausencia de esa tabla.
+export type KpiSummary = {
+  mttr_por_severidad: { severidad: string; mttr_dias: number | null; precision: string }[];
+  porcentaje_dentro_sla: number | null;
+  tendencia_por_activo: { asset_id: string; puntos: Record<string, unknown>[] }[];
+};
+
 export type Invitation = {
   id: string;
   email: string;
@@ -282,6 +305,12 @@ export const api = {
   // 401 -- todos propagados como `ApiError` con `status` + `message`).
   patchFinding: (id: string, body: PatchFindingBody) =>
     request<Finding>(`/findings/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  // Fase 2c: re-escanea solo el endpoint puntual del hallazgo; 422 si la
+  // herramienta de origen no soporta verificación automática (semgrep/
+  // trivy/grype), 503 si ZAP/nuclei no están disponibles, 404 cross-tenant.
+  verificarCierre: (id: string) =>
+    request<VerificarCierreResult>(`/findings/${id}/verificar-cierre`, { method: "POST" }),
+  getKpis: () => request<KpiSummary>("/kpis"),
   runScan: (target: string, autorizacion_firmada: boolean) =>
     request<ScanResult>("/scan", {
       method: "POST",

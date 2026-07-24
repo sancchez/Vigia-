@@ -6,6 +6,7 @@ import ScanHistoryChart from "../components/ScanHistoryChart";
 import Equipo from "../components/Equipo";
 import FindingDetailPanel from "../components/FindingDetailPanel";
 import RemediationBoard from "../components/RemediationBoard";
+import KpiWidget from "../components/KpiWidget";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -585,6 +586,8 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+
+          <KpiWidget assets={assets} />
 
           {findings.length > 0 && (
             <RemediationBoard findings={findings} members={members} onChanged={cargarTodo} />

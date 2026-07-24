@@ -69,7 +69,8 @@ from tools.asset_verification import (
     verificar_asset,
 )
 from tools.report_export import markdown_to_docx_bytes, markdown_to_pdf_bytes
-from tools.zap_api import run_checkpointed_active_scan
+from tools.scan import run_nuclei
+from tools.zap_api import run_checkpointed_active_scan, run_single_target_verification
 from urllib.parse import urlparse
 
 load_dotenv()
@@ -984,6 +985,378 @@ def actualizar_finding(
         conn.close()
 
     return _finding_out_de_row(dict_from_row(row_actualizado))
+
+
+# ---------------------------------------------------------------------------
+# Verificación de cierre + KPIs de remediación
+# (openspec/changes/fase2c-verificacion-cierre-y-kpis). Ver design.md para
+# el flujo completo (Data Flow) y las decisiones de arquitectura.
+# ---------------------------------------------------------------------------
+
+
+class VerificarCierreOut(BaseModel):
+    finding_id: str
+    estado: str
+    reaparece: bool
+    detalle: str
+
+
+def _herramienta_de_finding(raw_json: str | None) -> str:
+    """Deriva la herramienta de origen de un finding para el dispatch de
+    `POST /findings/{id}/verificar-cierre` -- mismo criterio de parseo
+    tolerante que `_detalle_desde_raw_json` (JSON ausente/corrupto o sin la
+    clave `herramienta` nunca lanza, siempre degrada). Ausencia de
+    `herramienta` se trata como ZAP (alertas planas de escaneo activo
+    checkpointed, o `zap-baseline`/`zap-full-scan` con wrapper -- ambos
+    comparten el mismo modo single-target nuevo)."""
+    if not raw_json:
+        return "zap"
+    try:
+        data = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return "zap"
+    if not isinstance(data, dict):
+        return "zap"
+    herramienta = str(data.get("herramienta") or "").strip().lower()
+    if herramienta == "nuclei":
+        return "nuclei"
+    if herramienta in ("semgrep", "trivy", "grype"):
+        return herramienta
+    return "zap"
+
+
+_HERRAMIENTAS_SIN_ENDPOINT_REESCANEABLE = ("semgrep", "trivy", "grype")
+
+
+def _registrar_transicion_verificacion(
+    conn, finding_id: str, tenant_id: str, changed_by: str, estado_anterior: str, estado_nuevo: str, nota: str, now: str
+) -> None:
+    """Inserta una fila de auditoría en `finding_transiciones` para un cambio
+    de estado disparado por `POST /findings/{id}/verificar-cierre` --
+    `changed_by` es el usuario que llamó al endpoint (a diferencia de la
+    detección de reincidencia en `_registrar_findings_con_ciclo_de_vida`,
+    que deja `changed_by=NULL` porque la dispara el sistema al insertar un
+    scan nuevo, sin que nadie lo haya pedido explícitamente). Estas filas
+    son las que `GET /kpis` usa para MTTR real (ver
+    `_calcular_mttr_por_severidad`)."""
+    conn.execute(
+        """
+        INSERT INTO finding_transiciones
+            (id, finding_id, tenant_id, estado_anterior, estado_nuevo, nota, changed_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (str(uuid.uuid4()), finding_id, tenant_id, estado_anterior, estado_nuevo, nota, changed_by, now),
+    )
+
+
+@app.post("/findings/{finding_id}/verificar-cierre", response_model=VerificarCierreOut)
+def verificar_cierre_finding(
+    finding_id: str, user: UserContext = Depends(get_current_user)
+) -> VerificarCierreOut:
+    """Re-escanea ÚNICAMENTE el `endpoint` del hallazgo (no el asset
+    completo) y, si la alerta original ya no aparece, transiciona el
+    hallazgo `verificado` -> `cerrado` automáticamente.
+
+    Dispatch por herramienta de origen (`_herramienta_de_finding`): nuclei
+    re-invoca `run_nuclei(endpoint)` directo (ya es single-target por
+    diseño); ZAP (baseline o alertas planas de escaneo activo) usa el modo
+    nuevo `run_single_target_verification`; semgrep/trivy/grype responden
+    422 -- no tienen un endpoint HTTP puntual que re-escanear (código/
+    imagen, no URL), no se finge soporte.
+
+    A propósito NO llama al `PATCH /findings/{id}` de `fase2a` -- dos
+    `UPDATE` secuenciales directos sobre `estado` (mismos valores del CHECK
+    constraint de `db/schema.sql`) para no acoplar este endpoint a la firma
+    de esa API (ver design.md, Decision "Transición de estado reusa el
+    vocabulario de fase2a, no inventa uno nuevo"). Sí registra su propia
+    fila en `finding_transiciones` por cada `UPDATE` -- necesario para que
+    `GET /kpis` pueda calcular MTTR real a partir de estas transiciones
+    (igual que ya hace `fase2a` para sus propios cambios vía PATCH).
+
+    Mismo scoping/404 que `GET /findings/{id}`: un hallazgo inexistente o
+    de otro tenant responde 404, nunca 403.
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM findings WHERE id = ? AND tenant_id = ?", (finding_id, user.tenant_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Hallazgo no encontrado")
+        finding = dict_from_row(row)
+    finally:
+        conn.close()
+
+    herramienta = _herramienta_de_finding(finding.get("raw_json"))
+    if herramienta in _HERRAMIENTAS_SIN_ENDPOINT_REESCANEABLE:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Verificación de cierre automática no soportada para hallazgos de origen "
+                f"'{herramienta}': no tienen un endpoint HTTP puntual que re-escanear "
+                "(código fuente o imagen de contenedor, no una URL). Cambia el estado "
+                f"manualmente vía PATCH /findings/{finding_id} tras confirmar la remediación."
+            ),
+        )
+
+    estado_actual = finding["estado"]
+    if estado_actual in ("cerrado", "aceptado_riesgo"):
+        return VerificarCierreOut(
+            finding_id=finding_id,
+            estado=estado_actual,
+            reaparece=False,
+            detalle=f"Este hallazgo ya está en estado terminal ('{estado_actual}') -- no se volvió a escanear.",
+        )
+
+    endpoint = finding["endpoint"]
+    try:
+        if herramienta == "nuclei":
+            alertas = run_nuclei(endpoint).findings
+        else:
+            zap_resultado = run_single_target_verification(
+                target_url=endpoint,
+                endpoint_url=endpoint,
+                bearer_token=None,
+                scan_id=finding_id,
+            )
+            alertas = zap_resultado.findings
+    except ToolExecutionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo re-escanear el endpoint para verificar el cierre: {exc}",
+        )
+
+    reaparece = len(alertas) > 0
+    now = datetime.now(timezone.utc).isoformat()
+
+    if not reaparece:
+        conn = get_conn()
+        try:
+            # Salta el paso intermedio si el hallazgo YA estaba en
+            # 'verificado' (ej. alguien lo verificó a mano vía PATCH antes
+            # de llamar a este endpoint) -- evita una fila de auditoría
+            # auto-referencial ('verificado' -> 'verificado') sin sentido.
+            if estado_actual != "verificado":
+                conn.execute("UPDATE findings SET estado = 'verificado' WHERE id = ?", (finding_id,))
+                _registrar_transicion_verificacion(
+                    conn, finding_id, user.tenant_id, user.user_id, estado_actual, "verificado",
+                    "Re-escaneo puntual de verificación de cierre no encontró la alerta original.", now,
+                )
+            conn.execute("UPDATE findings SET estado = 'cerrado' WHERE id = ?", (finding_id,))
+            _registrar_transicion_verificacion(
+                conn, finding_id, user.tenant_id, user.user_id, "verificado", "cerrado",
+                "Verificación de cierre automática confirmó ausencia de la alerta.", now,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return VerificarCierreOut(
+            finding_id=finding_id,
+            estado="cerrado",
+            reaparece=False,
+            detalle=f"El hallazgo no reprodujo en el re-escaneo puntual de '{endpoint}'; transicionado a verificado -> cerrado.",
+        )
+
+    # Reaparece: refresca `estado_verificacion`/`cves_detectados`/
+    # `evidencia_exploitdb` dentro de raw_json con la alerta encontrada
+    # ahora, sin tocar `estado` (task 2.4 de tasks.md).
+    verificado = verificar_un_hallazgo(alertas[0])
+    try:
+        data = json.loads(finding.get("raw_json") or "{}")
+        if not isinstance(data, dict):
+            data = {}
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    data["estado_verificacion"] = verificado.get("estado_verificacion")
+    data["cves_detectados"] = verificado.get("cves_detectados") or []
+    data["evidencia_exploitdb"] = verificado.get("evidencia_exploitdb") or []
+
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE findings SET raw_json = ? WHERE id = ?", (json.dumps(data, default=str), finding_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return VerificarCierreOut(
+        finding_id=finding_id,
+        estado=estado_actual,
+        reaparece=True,
+        detalle=f"El hallazgo sigue reproduciendo en el re-escaneo puntual de '{endpoint}'; estado sin cambios.",
+    )
+
+
+SEVERIDADES_KPI: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
+
+
+class KpiSeveridad(BaseModel):
+    severidad: str
+    mttr_dias: Optional[float] = None
+    # `fase2a-ciclo-vida-hallazgo` ya está aplicado y persiste
+    # `finding_transiciones.created_at` real (no aproximado) en cada
+    # transición -- manual (PATCH) o automática (drift/verificar-cierre) --
+    # así que el MTTR de este endpoint es "exacto" siempre, no la
+    # aproximación con `ultima_vez_visto`/`created_at` que design.md había
+    # dejado documentada como fallback por si esa tabla no existiera (ver
+    # design.md, Open Question #1, actualizado en esta sesión).
+    precision: str = "exacto"
+
+
+class KpiTendenciaAsset(BaseModel):
+    asset_id: str
+    puntos: list[dict]
+
+
+class KpiOut(BaseModel):
+    mttr_por_severidad: list[KpiSeveridad]
+    porcentaje_dentro_sla: Optional[float] = None
+    tendencia_por_activo: list[KpiTendenciaAsset]
+
+
+def _parse_dt_utc_naive(valor: str) -> datetime:
+    """Parsea un timestamp de la DB (ISO con offset, ej.
+    `datetime.now(timezone.utc).isoformat()`; o el formato sin offset que
+    deja `DEFAULT CURRENT_TIMESTAMP` de SQLite/Postgres tal como los
+    normaliza `db/connection.py`) a un `datetime` naive en UTC.
+
+    Necesario porque `finding_transiciones.created_at` puede venir en
+    cualquiera de los dos formatos según cómo se insertó la fila (ver
+    `actualizar_finding` -- deja el DEFAULT -- vs.
+    `_registrar_findings_con_ciclo_de_vida`/`_registrar_transicion_verificacion`
+    -- insertan `now` explícito con offset), y restar un `datetime` aware
+    contra uno naive lanza `TypeError` en Python. Ambos orígenes son UTC de
+    hecho; esto solo unifica la representación, no cambia el instante real.
+    """
+    dt = datetime.fromisoformat(valor)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _calcular_mttr_por_severidad(findings: list[dict], primer_cierre: dict[str, str]) -> list[KpiSeveridad]:
+    """MTTR real por severidad: para cada finding con al menos una fila en
+    `finding_transiciones` donde `estado_nuevo='cerrado'`, el delta es esa
+    transición (la más temprana, primer cierre) menos `findings.created_at`
+    -- ambos timestamps reales. Severidades sin ningún hallazgo cerrado
+    devuelven `mttr_dias=None` (spec.md: nunca `0`, nunca se omite la
+    severidad)."""
+    deltas: dict[str, list[float]] = {sev: [] for sev in SEVERIDADES_KPI}
+    for finding in findings:
+        cerrado_en = primer_cierre.get(finding["id"])
+        if cerrado_en is None:
+            continue
+        try:
+            delta_dias = (
+                _parse_dt_utc_naive(cerrado_en) - _parse_dt_utc_naive(finding["created_at"])
+            ).total_seconds() / 86400.0
+        except (TypeError, ValueError):
+            continue
+        deltas.setdefault(finding["severidad"], []).append(max(delta_dias, 0.0))
+
+    resultado: list[KpiSeveridad] = []
+    for sev in SEVERIDADES_KPI:
+        valores = deltas.get(sev) or []
+        mttr = (sum(valores) / len(valores)) if valores else None
+        resultado.append(KpiSeveridad(severidad=sev, mttr_dias=mttr, precision="exacto"))
+    return resultado
+
+
+def _calcular_porcentaje_sla(findings: list[dict]) -> Optional[float]:
+    """% de hallazgos abiertos (`estado` distinto de `cerrado`/
+    `aceptado_riesgo`) cuyo `sla_due_at` aún no venció. Sin plazo definido
+    (`sla_due_at IS NULL`, ej. severidad `low`/`info` sin config de tenant)
+    se cuenta como dentro de plazo -- mismo criterio que `badgeSla` del
+    frontend (`RemediationBoard.tsx`): "sin SLA" nunca es "vencido"."""
+    abiertos = [f for f in findings if f["estado"] not in ("cerrado", "aceptado_riesgo")]
+    if not abiertos:
+        return None
+    ahora = datetime.now(timezone.utc).replace(tzinfo=None)
+    dentro = 0
+    for f in abiertos:
+        sla = f.get("sla_due_at")
+        if not sla:
+            dentro += 1
+            continue
+        try:
+            vence = _parse_dt_utc_naive(sla)
+        except (TypeError, ValueError):
+            dentro += 1
+            continue
+        if vence >= ahora:
+            dentro += 1
+    return round(100.0 * dentro / len(abiertos), 2)
+
+
+def _calcular_tendencia_por_activo(filas: list[dict]) -> list[KpiTendenciaAsset]:
+    """Serie temporal de conteo de hallazgos ABIERTOS por severidad, un
+    punto por scan (fecha) de cada asset -- `filas` ya viene de un JOIN
+    `scans`+`findings` (ver `obtener_kpis`), ordenado por
+    `asset_id, scan_fecha` ascendente. Varios findings pueden compartir
+    scan/fecha -- se agregan antes de emitir un punto por fecha."""
+    por_asset: dict[str, dict[str, dict[str, int]]] = {}
+    for fila in filas:
+        asset_id = fila["asset_id"]
+        fecha = fila["scan_fecha"]
+        severidad = fila["severidad"]
+        puntos_de_asset = por_asset.setdefault(asset_id, {})
+        conteo = puntos_de_asset.setdefault(fecha, {sev: 0 for sev in SEVERIDADES_KPI})
+        conteo[severidad] = conteo.get(severidad, 0) + 1
+
+    resultado: list[KpiTendenciaAsset] = []
+    for asset_id, puntos_por_fecha in por_asset.items():
+        puntos = [{"fecha": fecha, **conteo} for fecha, conteo in puntos_por_fecha.items()]
+        resultado.append(KpiTendenciaAsset(asset_id=asset_id, puntos=puntos))
+    return resultado
+
+
+@app.get("/kpis", response_model=KpiOut)
+def obtener_kpis(user: UserContext = Depends(get_current_user)) -> KpiOut:
+    """KPIs de remediación agregados sobre `findings`/`finding_transiciones`
+    (solo lectura, scoped por tenant, sin ETL ni tabla nueva): MTTR real por
+    severidad, % de hallazgos abiertos dentro de SLA, y tendencia de riesgo
+    por activo a lo largo de sus escaneos. Ver design.md para el porqué del
+    cálculo en Python (portabilidad SQLite/Postgres sin `julianday()`/
+    `EXTRACT`)."""
+    conn = get_conn()
+    try:
+        findings_rows = conn.execute(
+            "SELECT id, severidad, estado, created_at, sla_due_at FROM findings WHERE tenant_id = ?",
+            (user.tenant_id,),
+        ).fetchall()
+        cierres_rows = conn.execute(
+            """
+            SELECT finding_id, MIN(created_at) AS cerrado_en
+            FROM finding_transiciones
+            WHERE tenant_id = ? AND estado_nuevo = 'cerrado'
+            GROUP BY finding_id
+            """,
+            (user.tenant_id,),
+        ).fetchall()
+        tendencia_rows = conn.execute(
+            """
+            SELECT s.asset_id AS asset_id, s.created_at AS scan_fecha, f.severidad AS severidad
+            FROM scans s JOIN findings f ON f.scan_id = s.id
+            WHERE s.tenant_id = ? AND s.asset_id IS NOT NULL
+              AND f.estado NOT IN ('cerrado', 'aceptado_riesgo')
+            ORDER BY s.asset_id, s.created_at
+            """,
+            (user.tenant_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    findings = [dict_from_row(r) for r in findings_rows]
+    cierres = [dict_from_row(r) for r in cierres_rows]
+    primer_cierre = {fila["finding_id"]: fila["cerrado_en"] for fila in cierres}
+    tendencia_filas = [dict_from_row(r) for r in tendencia_rows]
+
+    return KpiOut(
+        mttr_por_severidad=_calcular_mttr_por_severidad(findings, primer_cierre),
+        porcentaje_dentro_sla=_calcular_porcentaje_sla(findings),
+        tendencia_por_activo=_calcular_tendencia_por_activo(tendencia_filas),
+    )
 
 
 class CumplimientoCategoriaOut(BaseModel):

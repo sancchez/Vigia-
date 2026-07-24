@@ -8,12 +8,20 @@ dag:
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        blocked
+  apply:        complete
   verify:       pending
   archive:      pending
 notes: >
-  apply está bloqueado a propósito: este change toca api/main.py y
-  frontend/src/pages/Dashboard.tsx, los mismos archivos que
-  fase2a-ciclo-vida-hallazgo y fase2b-tablero-remediacion. sdd-apply de
-  este change NO debe correr hasta que ambos estén implementados y
-  aplicados.
+  apply completado. fase2a-ciclo-vida-hallazgo y fase2b-tablero-remediacion
+  ya estaban mergeados a main antes de este sdd-apply -- se leyó su código
+  real (api/main.py, RemediationBoard.tsx) en vez de asumir lo planeado en
+  paralelo. Desviación principal de design.md: MTTR usa precisión "exacto"
+  (finding_transiciones.created_at real) en vez de la aproximación
+  documentada como fallback, porque fase2a sí persiste ese historial (ver
+  design.md, sección "Actualizado durante sdd-apply"). El spike en vivo de
+  ZAP (task 1.1) no se pudo correr (Docker Desktop sin el daemon activo en
+  este sandbox) -- se documentó la investigación de código y la decisión
+  tomada (access_url() incondicional antes de ascan(recurse=False)) en
+  tasks.md y design.md, Open Questions #3. pytest tests/: 188 passed, 1
+  skipped (baseline 165/1 + 23 tests nuevos). frontend: tsc -b && vite
+  build compila sin errores.

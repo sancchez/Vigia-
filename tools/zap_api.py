@@ -335,9 +335,35 @@ def ajax_spider_stop(base_url: str) -> None:
         pass
 
 
-def ascan_start(base_url: str, target_url: str) -> str:
-    data = _zap_get(base_url, "/JSON/ascan/action/scan/", params={"url": target_url, "recurse": "true"})
+def ascan_start(base_url: str, target_url: str, recurse: bool = True) -> str:
+    """Arranca un escaneo activo. `recurse=True` (default, retrocompatible
+    con `run_checkpointed_active_scan`) expande el ataque a todo lo que
+    cuelgue de `target_url`; `recurse=False` (usado por
+    `run_single_target_verification`, ver `openspec/changes/
+    fase2c-verificacion-cierre-y-kpis`) limita el ataque a ese nodo/URL
+    exacta -- ver spec.md de ese change, Requirement "Escaneo activo de ZAP
+    sin recorrer el sitio completo"."""
+    data = _zap_get(
+        base_url,
+        "/JSON/ascan/action/scan/",
+        params={"url": target_url, "recurse": "true" if recurse else "false"},
+    )
     return str(data["scan"])
+
+
+def access_url(base_url: str, target_url: str) -> None:
+    """Le pide a ZAP que visite `target_url` directamente (acción de la API
+    real de ZAP, no un spider) y la registre en su Sites tree.
+
+    Existe para `run_single_target_verification`: no se confirmó en vivo en
+    esta sesión (Docker Desktop no tenía el daemon corriendo en este
+    entorno sandbox -- ver docstring de esa función) si `ascan(recurse=
+    False)` sobre una URL que el daemon nunca visitó funciona igual que
+    sobre una ya conocida, o si exige que la URL ya esté en el Sites tree.
+    Esta llamada es la mitigación barata que design.md ya dejaba prevista
+    para ese caso (Open Questions #3): registra el nodo sin pagar el costo
+    de un spider completo, y no cuesta nada si de verdad no hacía falta."""
+    _zap_get(base_url, "/JSON/core/action/accessUrl/", params={"url": target_url})
 
 
 def ascan_status(base_url: str, scan_id: str) -> int:
@@ -487,6 +513,107 @@ def run_checkpointed_active_scan(
         resultado.detalle_final = (
             f"Fases completadas: {', '.join(resultado.fases_completadas)}. "
             f"{len(resultado.findings)} hallazgo(s)."
+        )
+        _reportar("completado", resultado.detalle_final)
+        return resultado
+    finally:
+        stop_daemon(container_name)
+
+
+def run_single_target_verification(
+    target_url: str,
+    endpoint_url: str,
+    bearer_token: str | None,
+    scan_id: str,
+    on_progress: Callable[[ZapProgress], None] | None = None,
+    poll_interval: float = 4.0,
+    minutes: int = 5,
+) -> ZapCheckpointedResult:
+    """Re-escanea ÚNICAMENTE `endpoint_url` (sin spider/AJAX spider, sin
+    `recurse`) -- usado por `POST /findings/{id}/verificar-cierre`
+    (`openspec/changes/fase2c-verificacion-cierre-y-kpis`) para confirmar
+    si un hallazgo de origen ZAP ya no reproduce, sin pagar el costo de
+    re-escanear el asset completo.
+
+    Arranca su propio daemon efímero (mismo patrón que
+    `run_checkpointed_active_scan`, contenedor con nombre distinto
+    `vigia-zap-verif-<scan_id>` para no chocar con un escaneo activo normal
+    que pudiera estar corriendo en paralelo sobre el mismo `scan_id`) y lo
+    limpia siempre en `finally`.
+
+    **Sobre `access_url()` antes del `ascan`, y el porqué (Open Question #3
+    de design.md de ese change):** esta sesión de `sdd-apply` NO pudo
+    confirmarlo en vivo -- el entorno sandbox tiene el CLI de Docker
+    instalado pero el daemon de Docker Desktop no estaba corriendo
+    (`docker ps` devolvió "cannot connect to the Docker API"), así que no
+    hubo forma de levantar un contenedor ZAP real en esta sesión para
+    probar `ascan(recurse=False)` contra una URL nunca visitada por un
+    spider. Decisión tomada con el mejor entendimiento disponible leyendo
+    el código de este módulo (no se degradó a "no soportado"): se llama
+    `access_url()` incondicionalmente antes de `ascan_start(recurse=False)`
+    -- una sola llamada HTTP a la propia API de ZAP, barata, y sin efecto
+    negativo si el nodo ya estaba registrado. Si una sesión futura SÍ
+    levanta Docker Desktop y confirma que este registro previo es innecesario
+    (o insuficiente), este comentario y la llamada deben actualizarse con el
+    resultado real -- no se debe asumir "confirmado" a partir de este
+    comentario.
+
+    Raises:
+        ToolNotInstalledError: si `docker` no está en PATH.
+        ZapDaemonError: si el daemon nunca llegó a estar listo.
+    """
+
+    def _reportar(fase: str, detalle: str, porcentaje: int | None = None) -> None:
+        if on_progress is not None:
+            on_progress(ZapProgress(fase=fase, detalle=detalle, porcentaje=porcentaje))
+
+    container_name = f"vigia-zap-verif-{scan_id}"
+    presupuesto_total = max(30, minutes * 60)
+    inicio: float | None = None
+
+    def _tiempo_restante() -> float:
+        if inicio is None:
+            return presupuesto_total
+        return presupuesto_total - (time.monotonic() - inicio)
+
+    if "://" not in endpoint_url:
+        endpoint_url = f"http://{endpoint_url}"
+    zap_endpoint = endpoint_url.replace("localhost", "host.docker.internal").replace(
+        "127.0.0.1", "host.docker.internal"
+    )
+
+    resultado = ZapCheckpointedResult(target=endpoint_url)
+    base_url = ""
+    try:
+        _reportar("iniciando", "Arrancando el daemon de ZAP para verificación puntual…")
+        base_url, _port = start_daemon(container_name)
+        wait_ready(base_url)
+        inicio = time.monotonic()
+        _reportar("iniciando", "Daemon de ZAP listo.")
+
+        if bearer_token:
+            add_bearer_auth_replacer(base_url, bearer_token)
+
+        # Ver docstring: mitigación barata ante la incertidumbre no
+        # confirmada en vivo sobre si ascan(recurse=False) exige que la URL
+        # ya esté en el Sites tree.
+        access_url(base_url, zap_endpoint)
+
+        ascan_id = ascan_start(base_url, zap_endpoint, recurse=False)
+        while _tiempo_restante() > 0:
+            pct = ascan_status(base_url, ascan_id)
+            _reportar("ascan", f"Verificación puntual: {pct}%", pct)
+            if pct >= 100:
+                break
+            time.sleep(poll_interval)
+        else:
+            ascan_stop(base_url, ascan_id)
+            _reportar("ascan", "Presupuesto de tiempo agotado -- verificación puntual detenida a mitad.")
+        resultado.fases_completadas.append("ascan")
+
+        resultado.findings = get_alerts(base_url, zap_endpoint)
+        resultado.detalle_final = (
+            f"Verificación puntual de {endpoint_url}: {len(resultado.findings)} alerta(s) restante(s)."
         )
         _reportar("completado", resultado.detalle_final)
         return resultado

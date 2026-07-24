@@ -251,3 +251,100 @@ def test_zap_get_propaga_si_todos_los_reintentos_fallan(monkeypatch):
 
     with pytest.raises(requests.exceptions.ReadTimeout):
         zap_api._zap_get("http://fake", "/JSON/spider/view/status/", retries=2)
+
+
+# ---------------------------------------------------------------------------
+# fase2c-verificacion-cierre-y-kpis: `ascan_start(recurse=...)` +
+# `run_single_target_verification` -- modo single-target para
+# `POST /findings/{id}/verificar-cierre`.
+# ---------------------------------------------------------------------------
+
+
+def test_ascan_start_default_recurse_true_retrocompatible(monkeypatch):
+    """Default `recurse=True` no cambia el comportamiento existente de
+    `run_checkpointed_active_scan` (que llama `ascan_start(base_url,
+    target)` sin el nuevo parámetro)."""
+    llamadas = []
+
+    def _zap_get_falso(_base_url, _path, params=None, **_k):
+        llamadas.append(params)
+        return {"scan": "0"}
+
+    monkeypatch.setattr(zap_api, "_zap_get", _zap_get_falso)
+    zap_api.ascan_start("http://fake", "http://example.test")
+    assert llamadas[-1]["recurse"] == "true"
+
+
+def test_ascan_start_recurse_false_serializa_false(monkeypatch):
+    llamadas = []
+
+    def _zap_get_falso(_base_url, _path, params=None, **_k):
+        llamadas.append(params)
+        return {"scan": "0"}
+
+    monkeypatch.setattr(zap_api, "_zap_get", _zap_get_falso)
+    zap_api.ascan_start("http://fake", "http://example.test/login", recurse=False)
+    assert llamadas[-1]["recurse"] == "false"
+    assert llamadas[-1]["url"] == "http://example.test/login"
+
+
+def test_run_single_target_verification_camino_feliz_limita_a_un_endpoint(monkeypatch):
+    """No corre spider/AJAX spider (a diferencia de
+    `run_checkpointed_active_scan`) -- solo `access_url` + `ascan(recurse=
+    False)` + `get_alerts` sobre el endpoint puntual, y limpia el daemon."""
+    monkeypatch.setattr(zap_api, "require_binary", lambda *_a, **_k: "docker")
+    monkeypatch.setattr(zap_api.time, "sleep", lambda _s: None)
+
+    llamadas = {"stop_daemon": [], "access_url": [], "ascan_start_args": None}
+    monkeypatch.setattr(zap_api, "start_daemon", lambda name: (f"http://fake/{name}", 1))
+    monkeypatch.setattr(zap_api, "wait_ready", lambda base_url, **_k: None)
+    monkeypatch.setattr(zap_api, "access_url", lambda base_url, url: llamadas["access_url"].append(url))
+    monkeypatch.setattr(
+        zap_api,
+        "ascan_start",
+        lambda base_url, url, recurse=True: llamadas.__setitem__("ascan_start_args", (url, recurse)) or "ascan-0",
+    )
+    monkeypatch.setattr(zap_api, "ascan_status", lambda *_a: 100)
+    monkeypatch.setattr(zap_api, "ascan_stop", lambda *_a: None)
+    monkeypatch.setattr(zap_api, "get_alerts", lambda base_url, url: [])
+    monkeypatch.setattr(zap_api, "stop_daemon", lambda name: llamadas["stop_daemon"].append(name))
+
+    resultado = zap_api.run_single_target_verification(
+        target_url="http://example.test",
+        endpoint_url="http://example.test/login",
+        bearer_token=None,
+        scan_id="verif-1",
+        poll_interval=0,
+    )
+
+    assert resultado.findings == []
+    assert llamadas["access_url"] == ["http://example.test/login"]
+    assert llamadas["ascan_start_args"] == ("http://example.test/login", False)
+    assert llamadas["stop_daemon"] == ["vigia-zap-verif-verif-1"]
+
+
+def test_run_single_target_verification_limpia_daemon_incluso_si_falla(monkeypatch):
+    monkeypatch.setattr(zap_api, "require_binary", lambda *_a, **_k: "docker")
+    monkeypatch.setattr(zap_api.time, "sleep", lambda _s: None)
+
+    llamadas = {"stop_daemon": []}
+    monkeypatch.setattr(zap_api, "start_daemon", lambda name: (f"http://fake/{name}", 1))
+    monkeypatch.setattr(zap_api, "wait_ready", lambda base_url, **_k: None)
+    monkeypatch.setattr(zap_api, "access_url", lambda *_a: None)
+
+    def _ascan_start_rompe(*_a, **_k):
+        raise RuntimeError("la API de ZAP se cayó")
+
+    monkeypatch.setattr(zap_api, "ascan_start", _ascan_start_rompe)
+    monkeypatch.setattr(zap_api, "stop_daemon", lambda name: llamadas["stop_daemon"].append(name))
+
+    with pytest.raises(RuntimeError):
+        zap_api.run_single_target_verification(
+            target_url="http://example.test",
+            endpoint_url="http://example.test/login",
+            bearer_token=None,
+            scan_id="verif-falla",
+            poll_interval=0,
+        )
+
+    assert llamadas["stop_daemon"] == ["vigia-zap-verif-verif-falla"]

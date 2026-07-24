@@ -164,6 +164,28 @@ export default function RemediationBoard({ findings, members, onChanged }: Props
     }
   };
 
+  // Fase 2c (openspec/changes/fase2c-verificacion-cierre-y-kpis): re-escanea
+  // solo el endpoint del hallazgo y cierra automáticamente si ya no
+  // reproduce. `verificando` es un estado propio (distinto de `guardando`)
+  // porque esta llamada puede tardar bastante más (levanta un daemon de
+  // ZAP) que un PATCH normal -- no queremos que las otras filas se vean
+  // "bloqueadas" por el `disabled` de `guardando` mientras esto corre.
+  const [verificando, setVerificando] = useState<string | null>(null);
+
+  const verificarCierre = async (findingId: string) => {
+    setVerificando(findingId);
+    setMensaje(null);
+    try {
+      const resultado = await api.verificarCierre(findingId);
+      setMensaje(resultado.detalle);
+      onChanged();
+    } catch (err) {
+      setMensaje(mensajeDeError(err));
+    } finally {
+      setVerificando(null);
+    }
+  };
+
   const porEstado = (estado: string) =>
     estado === "todos" ? findings.length : findings.filter((f) => (f.estado ?? "descubierto") === estado).length;
 
@@ -254,6 +276,7 @@ export default function RemediationBoard({ findings, members, onChanged }: Props
                 <th style={{ padding: "0.4rem 0.5rem" }}>Estado</th>
                 <th style={{ padding: "0.4rem 0.5rem" }}>Dueño</th>
                 <th style={{ padding: "0.4rem 0.5rem" }}>SLA</th>
+                <th style={{ padding: "0.4rem 0.5rem" }}>Acciones</th>
               </tr>
             </thead>
             <tbody>
@@ -263,6 +286,12 @@ export default function RemediationBoard({ findings, members, onChanged }: Props
                 const sinTransiciones = TRANSICIONES_VALIDAS[estadoActual].length === 0;
                 const sla = badgeSla(f.sla_due_at);
                 const guardandoEsta = guardando === f.id;
+                // Fase 2c: solo tiene sentido re-escanear el endpoint puntual
+                // una vez que alguien ya reportó una remediación
+                // ('mitigado') o ya lo verificó a mano ('verificado') --
+                // antes de eso no hay nada que confirmar todavía.
+                const puedeVerificarCierre = estadoActual === "mitigado" || estadoActual === "verificado";
+                const verificandoEsta = verificando === f.id;
 
                 const opcionesDueno = [{ id: "", label: "Sin asignar" }, ...members.map((m) => ({ id: m.id, label: m.email }))];
                 if (f.owner_user_id && !members.some((m) => m.id === f.owner_user_id)) {
@@ -319,6 +348,18 @@ export default function RemediationBoard({ findings, members, onChanged }: Props
                       <span className={`chip ${sla.clase}`}>{sla.texto}</span>
                       {guardandoEsta && (
                         <span style={{ marginLeft: 6, fontSize: 11, color: "var(--text-muted)" }}>guardando…</span>
+                      )}
+                    </td>
+                    <td style={{ padding: "0.5rem 0.5rem" }}>
+                      {puedeVerificarCierre && (
+                        <button
+                          onClick={() => verificarCierre(f.id)}
+                          disabled={verificandoEsta}
+                          title="Re-escanea solo este endpoint; cierra el hallazgo automáticamente si ya no reproduce."
+                          style={{ fontSize: 12, padding: "0.3rem 0.6rem" }}
+                        >
+                          {verificandoEsta ? "Verificando…" : "Verificar arreglo"}
+                        </button>
                       )}
                     </td>
                   </tr>

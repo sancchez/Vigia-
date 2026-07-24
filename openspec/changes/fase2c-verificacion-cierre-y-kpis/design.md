@@ -13,6 +13,36 @@ se hacen **en Python** sobre timestamps ya traídos con `SELECT`, no con
 funciones SQL de fecha (evita `julianday()` de SQLite vs `EXTRACT(EPOCH
 FROM ...)` de Postgres — ninguna es portable entre motores).
 
+> **Actualizado durante `sdd-apply` (post-merge de `fase2a`/`fase2b` a
+> `main`):** este design.md se escribió en paralelo con `fase2a` y dejaba
+> el MTTR en modo "aproximado" (`ultima_vez_visto`/`created_at`) como
+> salvavidas explícito por si esa fase no llegaba a persistir un historial
+> de transiciones con timestamp exacto (ver Open Question #1 original, más
+> abajo). Al aplicar este change, `fase2a-ciclo-vida-hallazgo` ya estaba
+> mergeado y CONFIRMADO en vivo (`tests/test_finding_patch.py`,
+> `tests/test_drift_reincidencia.py`) persistiendo `finding_transiciones`
+> con `created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP` real en
+> cada transición, manual (`PATCH /findings/{id}`) o automática (drift).
+> Por eso el MTTR implementado usa **precisión real**, no la aproximación:
+> para cada finding, se toma el timestamp de su primera fila en
+> `finding_transiciones` con `estado_nuevo='cerrado'` menos
+> `findings.created_at` (ambos parseados con `_parse_dt_utc_naive` en
+> `api/main.py`, que normaliza el formato mixto de timestamp entre
+> inserciones manuales -- `DEFAULT CURRENT_TIMESTAMP`, sin offset -- y
+> automáticas -- ISO explícito con offset). `precision` en la respuesta de
+> `GET /kpis` es `"exacto"` siempre. El resto de este documento (secciones
+> de abajo) describe la decisión que se HABRÍA tomado si `fase2a` no
+> hubiera persistido ese historial -- se deja tal cual para trazabilidad de
+> la decisión original, no describe el comportamiento realmente
+> implementado.
+>
+> También se actualizó el punto de montaje real del botón "verificar
+> arreglo": `fase2b-tablero-remediacion` sí aplicó `RemediationBoard.tsx`
+> con una fila por hallazgo (el "Open Question #2" de abajo especulaba con
+> un fallback standalone si no existiera ese punto de montaje) -- el botón
+> se insertó ahí, en una columna "Acciones" nueva, visible solo cuando
+> `estado` es `mitigado` o `verificado`.
+
 ## Architecture Decisions
 
 ### Decision: Single-target ZAP sin spider previo, dentro de una función nueva
@@ -196,14 +226,29 @@ código).
    es un widget standalone nuevo (`KpiWidget.tsx` + sección propia en
    `Dashboard.tsx`, mismo patrón de card que el resto de la página) — no
    bloquea la entrega de este change.
-3. **Incertidumbre real sobre ZAP**: no se confirmó en esta sesión si
-   `ascan` acepta una URL que nunca fue visitada por el spider de esa
-   sesión de daemon (daemon nuevo, sin estado previo). Es posible que ZAP
-   requiera que la URL ya esté en su Sites tree. **Antes de dar por
-   sentado el diseño de `run_single_target_verification`**, correr una
-   prueba real contra Juice Shop: si falla, la mitigación es un `GET`
-   simple a `endpoint_url` (vía `requests`, no spider completo) para
-   registrar el nodo en ZAP antes del `ascan`.
+3. **Incertidumbre real sobre ZAP -- resultado de la sesión de `sdd-apply`**:
+   el plan (task 1.1 de tasks.md) era levantar Juice Shop + un daemon ZAP
+   real y confirmar en vivo si `ascan(recurse=False)` funciona sobre una
+   URL nunca visitada por el spider. **No se pudo ejecutar ese spike**: el
+   entorno sandbox de esta sesión tiene el CLI de Docker instalado
+   (`docker --version` responde) pero el daemon de Docker Desktop no
+   estaba corriendo (`docker ps` devolvió `error during connect ... the
+   system cannot find the file specified` contra el pipe de Docker
+   Desktop) -- no hay forma de levantar un contenedor real en este entorno.
+   Decisión tomada con el mejor entendimiento disponible, leyendo el código
+   de `tools/zap_api.py` (no se degradó a "no soportado" ni se dejó la
+   pregunta abierta en silencio): `run_single_target_verification` llama
+   `access_url(base_url, endpoint_url)` -- la acción real
+   `/JSON/core/action/accessUrl/` de la API de ZAP, que le pide al propio
+   ZAP que visite la URL y la registre en su Sites tree -- **antes**,
+   siempre, de `ascan_start(recurse=False)`. Es la misma mitigación barata
+   que ya preveía este documento, aplicada por defecto en vez de
+   condicionada a un spike que no se pudo correr: una sola llamada HTTP más
+   a la propia API de ZAP, sin costo si el registro no hacía falta. Si una
+   sesión futura SÍ levanta Docker Desktop y confirma que esto era
+   innecesario (o insuficiente), debe actualizar este párrafo y el
+   docstring de `run_single_target_verification` con el resultado real --
+   no asumir "confirmado" a partir de este texto.
 4. **Hallazgos semgrep/trivy/grype**: quedan explícitamente fuera del
    re-escaneo automático de cierre (422 documentado) — no es un bug ni un
    TODO, es una limitación de dominio (código/imagen no tiene un
