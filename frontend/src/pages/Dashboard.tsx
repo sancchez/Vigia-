@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
-import { api, ApiError, type Asset, type CumplimientoReport, type Finding, type ScanDetail, type ScanHistoryItem } from "../api";
+import { api, ApiError, type Asset, type CumplimientoReport, type Finding, type Member, type ScanDetail, type ScanHistoryItem } from "../api";
 import ScanHistoryChart from "../components/ScanHistoryChart";
 import Equipo from "../components/Equipo";
 import FindingDetailPanel from "../components/FindingDetailPanel";
+import RemediationBoard from "../components/RemediationBoard";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -54,6 +55,11 @@ export default function Dashboard() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [scans, setScans] = useState<ScanHistoryItem[]>([]);
   const [findings, setFindings] = useState<Finding[]>([]);
+  // Fase 2b (openspec/changes/fase2b-tablero-remediacion): dueños posibles
+  // para el tablero de remediación. Se pide por fuera del `Promise.all`
+  // crítico de abajo (ver `cargarTodo`) para no tumbar el resto del
+  // dashboard si `/tenant/members` responde 403 a un rol sin acceso.
+  const [members, setMembers] = useState<Member[]>([]);
   const [cargando, setCargando] = useState(true);
   const [nuevoDominio, setNuevoDominio] = useState("");
   const [autorizado, setAutorizado] = useState(false);
@@ -76,6 +82,7 @@ export default function Dashboard() {
 
   const cargarTodo = async () => {
     setCargando(true);
+    let sigueAutenticado = true;
     try {
       const [a, s, f] = await Promise.all([api.listAssets(), api.listScans(), api.listFindings()]);
       setAssets(a);
@@ -83,11 +90,23 @@ export default function Dashboard() {
       setFindings(f);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
+        sigueAutenticado = false;
         logout();
         navigate("/");
       }
     } finally {
       setCargando(false);
+    }
+    // Deliberadamente fuera del Promise.all de arriba: si `/tenant/members`
+    // no es accesible para el rol actual (ver design.md de fase2b, Open
+    // Question sobre roles), el tablero de remediación degrada su filtro
+    // de dueño en vez de dejar todo el dashboard sin datos.
+    if (sigueAutenticado) {
+      try {
+        setMembers(await api.listMembers());
+      } catch {
+        setMembers([]);
+      }
     }
   };
 
@@ -566,6 +585,10 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+
+          {findings.length > 0 && (
+            <RemediationBoard findings={findings} members={members} onChanged={cargarTodo} />
+          )}
 
           <div className="card">
             <h2 style={{ fontSize: 17, marginBottom: 12 }}>Actividad reciente</h2>

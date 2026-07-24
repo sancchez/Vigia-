@@ -148,6 +148,22 @@ select:focus {
   border: 1px solid var(--border-strong);
 }
 
+/* Fase 2b (openspec/changes/fase2b-tablero-remediacion): badges de
+   proximidad de SLA en el tablero de remediación, mismo lenguaje visual que
+   el resto de `.chip.*` (paleta reusada, sin color nuevo). */
+.chip.sla-vencido {
+  background: var(--alert-bg);
+  color: var(--alert);
+}
+.chip.sla-proximo {
+  background: var(--accent-bg);
+  color: var(--accent-ink);
+}
+.chip.sla-ok {
+  background: var(--verified-bg);
+  color: var(--verified);
+}
+
 .card {
   background: var(--bg-raised);
   border: 0.5px solid var(--border);

@@ -1,0 +1,23 @@
+change: fase2b-tablero-remediacion
+mode: openspec
+created_at: 2026-07-23T00:00:00Z
+updated_at: 2026-07-23T00:00:00Z
+dag:
+  explore:      skipped
+  proposal:     complete
+  spec:         complete
+  design:       complete
+  tasks:        complete
+  apply:        complete
+  verify:       pending
+  archive:      pending
+notes: |
+  apply (2026-07-23): contrato de fase2a corregido por el orquestador antes
+  de aplicar (errores reales 409/422, no 400; nota condicional a `estado`;
+  owner_email/primera_vez_visto/ultima_vez_visto agregados al contrato de
+  lectura). Ver tasks.md para deviaciones puntuales (sin estado optimista
+  local para el revert de selects, listMembers() fuera del Promise.all
+  crítico, opciones de estado limitadas a TRANSICIONES_VALIDAS). tsc -b y
+  npm run build corren limpios. Tests unitarios de 5.1/5.2 no se
+  automatizaron por falta de infra de test en frontend/ (gap preexistente,
+  documentado en tasks.md).

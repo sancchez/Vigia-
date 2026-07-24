@@ -89,6 +89,19 @@ export type Me = {
   plan: string;
 };
 
+// Fase 2b (openspec/changes/fase2b-tablero-remediacion): los 8 valores del
+// CHECK de `findings.estado` en el backend de `fase2a-ciclo-vida-hallazgo`
+// (`TRANSICIONES_VALIDAS`, ver api/main.py).
+export type EstadoHallazgo =
+  | "descubierto"
+  | "triage"
+  | "asignado"
+  | "en_progreso"
+  | "mitigado"
+  | "verificado"
+  | "cerrado"
+  | "aceptado_riesgo";
+
 export type Finding = {
   id: string;
   scan_id: string;
@@ -97,6 +110,35 @@ export type Finding = {
   endpoint: string;
   confirmado: boolean;
   created_at: string;
+  // Fase 2b: ciclo de vida agregado por `fase2a-ciclo-vida-hallazgo`
+  // (backend). Contrato REAL confirmado (`FindingOut`): `estado` es
+  // requerido (siempre presente una vez desplegado fase2a) -- se mantiene
+  // opcional aquí solo para tolerar una ventana de despliegue parcial donde
+  // el backend viejo aún no lo expone (ver spec.md, "Degradación cuando GET
+  // /findings no expone los campos nuevos"). `owner_email` es derivado
+  // (LEFT JOIN users en el backend). `primera_vez_visto`/`ultima_vez_visto`
+  // se tipan por completitud del contrato pero no se renderizan en este
+  // change (fuera de alcance -- ver proposal.md, KPIs de MTTR quedan para
+  // una fase de reporting posterior).
+  estado?: EstadoHallazgo;
+  owner_user_id?: string | null;
+  owner_email?: string | null;
+  sla_due_at?: string | null;
+  primera_vez_visto?: string | null;
+  ultima_vez_visto?: string | null;
+};
+
+// Fase 2b: contrato REAL de `FindingPatchIn` (fase2a) -- `nota` es
+// requerida por el backend (min_length 1) SOLO cuando el body incluye
+// `estado`; no lo es para un cambio de solo `owner_user_id`. El backend
+// responde 409 si la transición de `estado` no es válida según
+// `TRANSICIONES_VALIDAS`, 422 si falta `nota` al mandar `estado` (o el
+// body viene vacío, o `owner_user_id` es de otro tenant), 404 si el
+// finding no existe o es de otro tenant, 401 sin auth.
+export type PatchFindingBody = {
+  estado?: EstadoHallazgo;
+  owner_user_id?: string | null;
+  nota?: string;
 };
 
 // Fase 1 (openspec/changes/fase1-deteccion-visible): superset de `Finding`
@@ -235,6 +277,11 @@ export const api = {
   listScans: () => request<ScanHistoryItem[]>("/scans"),
   listFindings: () => request<Finding[]>("/findings"),
   getFinding: (id: string) => request<FindingDetail>(`/findings/${id}`),
+  // Fase 2b: ver `PatchFindingBody` arriba para el contrato real (409
+  // transición inválida, 422 falta nota/dueño inválido/body vacío, 404,
+  // 401 -- todos propagados como `ApiError` con `status` + `message`).
+  patchFinding: (id: string, body: PatchFindingBody) =>
+    request<Finding>(`/findings/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   runScan: (target: string, autorizacion_firmada: boolean) =>
     request<ScanResult>("/scan", {
       method: "POST",
