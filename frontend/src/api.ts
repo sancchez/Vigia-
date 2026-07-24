@@ -179,6 +179,31 @@ export type KpiSummary = {
   tendencia_por_activo: { asset_id: string; puntos: Record<string, unknown>[] }[];
 };
 
+// Fase 4 (openspec/changes/fase4-revision-codigo-ia): contrato de
+// `POST /reports/revision-ia` (`HallazgoLogicaOut`/`RevisionIAOut` en el
+// backend). `revisar_codigo()` complementa a Semgrep -- encuentra fallas de
+// LÓGICA DE NEGOCIO, no patrones sintácticos -- por eso los campos son
+// texto libre (descripción/evidencia/recomendación), no un CWE fijo.
+export type HallazgoLogica = {
+  archivo: string;
+  linea_aprox: number | null;
+  categoria: string;
+  severidad: string;
+  descripcion: string;
+  evidencia: string;
+  recomendacion: string;
+  relacionado_con_semgrep: string | null;
+};
+
+export type RevisionIAResult = {
+  scan_id: string | null;
+  hallazgos_logica: HallazgoLogica[];
+  archivos_revisados: string[];
+  archivos_omitidos: string[];
+  contexto_semgrep_usado: boolean;
+  generado_en: string;
+};
+
 export type Invitation = {
   id: string;
   email: string;
@@ -277,6 +302,31 @@ async function downloadFile(path: string, filename: string): Promise<void> {
   URL.revokeObjectURL(url);
 }
 
+// Fase 4: multipart dedicado -- no puede reusar `request()` de arriba
+// porque ese helper fuerza `Content-Type: application/json` en todos los
+// requests; un POST multipart necesita que el navegador ponga su propio
+// `Content-Type: multipart/form-data; boundary=...` (no se puede fijar a
+// mano sin romper el boundary), así que aquí se omite ese header a
+// propósito, igual que ya hace `downloadFile()` para su propio caso.
+async function requestMultipart<T>(path: string, body: FormData): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = { "bypass-tunnel-reminder": "vigia" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${API_URL}${path}`, { method: "POST", headers, body });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const errBody = await res.json();
+      detail = errBody.detail ?? detail;
+    } catch {
+      /* respuesta sin cuerpo JSON */
+    }
+    throw new ApiError(res.status, typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return res.json() as Promise<T>;
+}
+
 export const api = {
   register: (nombre_negocio: string, email: string, password: string, invite_token?: string) =>
     request<{ access_token: string }>("/auth/register", {
@@ -333,6 +383,24 @@ export const api = {
     request<Invitation>("/tenant/invitations", { method: "POST", body: JSON.stringify({ email, role }) }),
   revokeInvitation: (id: string) => request<void>(`/tenant/invitations/${id}`, { method: "DELETE" }),
   previewInvitation: (token: string) => request<InvitationPreview>(`/tenant/invitations/preview/${token}`),
+  // Fase 4: doble consentimiento va en el body multipart, no en query/headers
+  // -- el backend responde 403 (motivo distinto por cada flag) si falta
+  // cualquiera, antes de leer un solo archivo (ver spec.md).
+  revisarCodigo: (
+    files: File[],
+    autorizacionFirmada: boolean,
+    envioCodigoALlmAutorizado: boolean,
+    contextoNegocio = "",
+    label = ""
+  ) => {
+    const form = new FormData();
+    form.append("autorizacion_firmada", String(autorizacionFirmada));
+    form.append("envio_codigo_a_llm_autorizado", String(envioCodigoALlmAutorizado));
+    form.append("contexto_negocio", contextoNegocio);
+    form.append("label", label);
+    for (const f of files) form.append("files", f, f.name);
+    return requestMultipart<RevisionIAResult>("/reports/revision-ia", form);
+  },
 };
 
 export { ApiError };

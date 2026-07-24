@@ -8,16 +8,29 @@ dag:
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        pending
+  apply:        complete
   verify:       pending
   archive:      pending
 notes: >
-  Solo planificación (proposal→spec→design→tasks). NO se corrió sdd-apply.
-  Change hermano de fase3a/3b/3e/5/6/7 planificándose en paralelo — comparten
-  api/main.py, frontend/src/api.ts y Dashboard.tsx, así que design.md lista los
-  archivos exactos que tocará el apply para que el orquestador secuencie el
-  merge. Decisión de diseño clave: exponer `revisar_codigo()` (ya completo, con
-  open-core resuelto — NO se toca) vía POST /reports/revision-ia con ingesta de
-  código sandboxeada por tenant (evita LFI multi-tenant) y persistencia como
-  scans+findings sintéticos, sin schema nuevo (precedente CertStream). No se
-  toca agents/revision_ia.py, vigia_core_private/ ni db/.
+  sdd-apply completo: `POST /reports/revision-ia` (multipart) implementado en
+  api/main.py (_sandbox_revision, _map_severidad_revision, _persistir_revision_ia,
+  HallazgoLogicaOut/RevisionIAOut) invocando agents/revision_ia.py::revisar_codigo()
+  sin tocar su lógica interna. Ingesta sandboxeada por tenant con rechazo
+  explícito (422) de nombres de archivo con traversal (../, ..\\, componentes
+  de directorio) vía _nombre_archivo_seguro(); código subido se borra al
+  terminar cada review (no se retiene). Hallazgos persistidos como scans+
+  findings sintéticos vía _registrar_findings_con_ciclo_de_vida (mismo
+  precedente que CertStream), visibles en GET /findings sin schema nuevo.
+  Frontend: tipos + revisarCodigo() en api.ts (multipart dedicado, no reusa
+  request() por el Content-Type), componente RevisionIA.tsx (2 checkboxes de
+  consentimiento, envío deshabilitado hasta ambos), montado en Dashboard.tsx
+  junto a RemediationBoard. Tests: tests/test_revision_ia_endpoint.py (11
+  casos: doble consentimiento, persistencia con/sin hallazgos, degradación
+  LLM caído, traversal, mapeo de severidad). python-multipart agregado a
+  pyproject.toml (línea compartida con fase3e-monitoreo-dmarc, a deduplicar
+  en el merge). pytest tests/ completo: 203 passed, 1 skipped. npm run build
+  (tsc -b && vite build): sin errores. NOTA: este worktree estaba desactualizado
+  respecto a main (basado en un commit previo a Fases 0-2c) -- se hizo
+  `git merge main` (fast-forward limpio, sin conflictos) antes de empezar a
+  implementar, para tener agents/revision_ia.py, el schema con ciclo de vida,
+  y openspec/changes/* disponibles.
