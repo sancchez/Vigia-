@@ -1,0 +1,19 @@
+change: fase2c-verificacion-cierre-y-kpis
+mode: openspec
+created_at: 2026-07-23T00:00:00Z
+updated_at: 2026-07-23T00:00:00Z
+dag:
+  explore:      skipped
+  proposal:     complete
+  spec:         complete
+  design:       complete
+  tasks:        complete
+  apply:        blocked
+  verify:       pending
+  archive:      pending
+notes: >
+  apply está bloqueado a propósito: este change toca api/main.py y
+  frontend/src/pages/Dashboard.tsx, los mismos archivos que
+  fase2a-ciclo-vida-hallazgo y fase2b-tablero-remediacion. sdd-apply de
+  este change NO debe correr hasta que ambos estén implementados y
+  aplicados.
