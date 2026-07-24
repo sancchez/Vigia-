@@ -1,0 +1,45 @@
+# Fase 3c (openspec/changes/fase3b-vigilancia-continua-certstream): feed
+# CertStream self-hosted. El feed público histórico
+# `wss://certstream.calidog.io` está muerto (ver el docstring de
+# `api/certstream_listener.py`, "AVISO IMPORTANTE") -- sin un feed vivo el
+# listener nunca recibe eventos y no hay findings `dominio_variante_certstream`
+# que mostrar en el panel de vigilancia. `certstream-server-go`
+# (https://github.com/d-Rickyy-b/certstream-server-go) es la alternativa
+# self-hosted activa: escucha logs reales de Certificate Transparency y
+# expone un websocket compatible con el formato original de CertStream
+# (`message_type: "certificate_update"`, `data.leaf_cert.all_domains`) que
+# `procesar_mensaje_certstream()` ya sabe parsear -- cero cambios de código
+# en el listener, solo apuntar `VIGIA_CERTSTREAM_URL` acá.
+#
+# Deliberadamente en `deploy/certstream/` (subdirectorio propio, NO el root
+# del repo) -- ver design.md "Ubicación del docker-compose (3c)": hay
+# changes hermanos de despliegue (fase6/fase7) que probablemente agreguen
+# un compose global en la raíz; este servicio queda aislado para no
+# colisionar con ese archivo.
+#
+# Uso: ver README.md de este mismo directorio.
+services:
+  certstream-server-go:
+    # Build desde el repo oficial (no hay un tag estable y verificado en un
+    # registry público al momento de este change -- ver design.md, Open
+    # Question "Imagen concreta de certstream-server-go (repo/tag)"). Si tu
+    # organización publica su propia imagen en un registry privado,
+    # reemplazá este bloque `build:` por `image: tu-registry/certstream-server-go:tag`.
+    build:
+      context: https://github.com/d-Rickyy-b/certstream-server-go.git
+    container_name: vigia-certstream-server-go
+    restart: unless-stopped
+    ports:
+      # Puerto local del websocket que consume api/certstream_listener.py.
+      # `/full-stream` expone el shape completo compatible con el CertStream
+      # original (el que el listener ya sabe parsear); `/domains-only` y
+      # `/example` son otras rutas que expone el mismo servidor pero no las
+      # usamos.
+      - "8080:8080"
+    environment:
+      # certstream-server-go escucha logs CT reales -- puede tardar unos
+      # minutos en emitir el primer certificado tras arrancar (depende de
+      # cuántos logs CT configura por default). Ver su propio README para
+      # variables de configuración adicionales (logs CT específicos, nivel
+      # de log, etc.) si hace falta ajustar el volumen de eventos.
+      LOG_LEVEL: info

@@ -317,6 +317,15 @@ class FindingOut(BaseModel):
     sla_due_at: Optional[str] = None
     primera_vez_visto: Optional[str] = None
     ultima_vez_visto: Optional[str] = None
+    # Fase 3b (openspec/changes/fase3b-vigilancia-continua-certstream):
+    # campo agregado, fuera del contrato original de fase2a/2b (docstring de
+    # arriba). `raw_json` ya viaja en cada fila de `findings` (`SELECT f.*`
+    # en `listar_findings`) pero nunca se proyectaba a `FindingOut` -- el
+    # panel de vigilancia (`VigilanciaPanel.tsx`) lo necesita para leer
+    # `dominio_base` de los findings `dominio_variante_certstream` (ver
+    # `certstream_listener.py::registrar_finding_certstream`). Opcional con
+    # default `None`: aditivo, no rompe ningún consumidor existente.
+    raw_json: Optional[str] = None
 
 
 def _slugify(nombre: str) -> str:
@@ -634,6 +643,7 @@ def _finding_out_de_row(d: dict) -> FindingOut:
         sla_due_at=d.get("sla_due_at"),
         primera_vez_visto=d.get("primera_vez_visto"),
         ultima_vez_visto=d.get("ultima_vez_visto"),
+        raw_json=d.get("raw_json"),
     )
 
 
@@ -2433,6 +2443,94 @@ def previsualizar_invitacion(token: str) -> InvitationPreview:
 
 
 # ---------------------------------------------------------------------------
+# Fase 3b (openspec/changes/fase3b-vigilancia-continua-certstream): CRUD de
+# `watched_brands` -- marcas/keywords que un tenant quiere vigilar además de
+# sus dominios-activo registrados. La tabla ya existe desde
+# `fase0-fundaciones-datos`; este bloque es lo primero que la consume de
+# verdad (antes era config muerta). Mismo patrón de aislamiento por
+# `tenant_id` que `/tenant/invitations` arriba en este archivo.
+class WatchedBrandIn(BaseModel):
+    marca: str
+
+
+class WatchedBrandOut(BaseModel):
+    id: str
+    marca: str
+    is_active: bool
+    created_at: str
+
+
+@app.get("/watched-brands", response_model=list[WatchedBrandOut])
+def listar_watched_brands(user: UserContext = Depends(get_current_user)) -> list[WatchedBrandOut]:
+    """Marcas vigiladas del tenant, más recientes primero (spec.md: "Listado aislado por tenant")."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM watched_brands WHERE tenant_id = ? ORDER BY created_at DESC",
+            (user.tenant_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        WatchedBrandOut(id=r["id"], marca=r["marca"], is_active=bool(r["is_active"]), created_at=r["created_at"])
+        for r in rows
+    ]
+
+
+@app.post("/watched-brands", response_model=WatchedBrandOut, status_code=201)
+def crear_watched_brand(
+    payload: WatchedBrandIn, user: UserContext = Depends(get_current_user)
+) -> WatchedBrandOut:
+    """Alta de una marca vigilada (spec.md: "Alta válida" / "Marca vacía rechazada").
+
+    `marca` vacía tras `strip()` -> 422. Un duplicado exacto (misma `marca`
+    ya activa del tenant) se reactiva/reusa en vez de crear otra fila -- ver
+    spec.md, "Un duplicado exacto ... SHOULD reactivarse/deduplicarse"."""
+    marca = payload.marca.strip()
+    if not marca:
+        raise HTTPException(status_code=422, detail="marca no puede estar vacía")
+
+    conn = get_conn()
+    try:
+        existente = conn.execute(
+            "SELECT * FROM watched_brands WHERE tenant_id = ? AND marca = ? AND is_active = 1",
+            (user.tenant_id, marca),
+        ).fetchone()
+        if existente is not None:
+            row = existente
+        else:
+            brand_id = str(uuid.uuid4())
+            conn.execute(
+                "INSERT INTO watched_brands (id, tenant_id, marca, is_active) VALUES (?, ?, ?, 1)",
+                (brand_id, user.tenant_id, marca),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM watched_brands WHERE id = ?", (brand_id,)).fetchone()
+    finally:
+        conn.close()
+
+    d = dict_from_row(row)
+    return WatchedBrandOut(id=d["id"], marca=d["marca"], is_active=bool(d["is_active"]), created_at=d["created_at"])
+
+
+@app.delete("/watched-brands/{brand_id}", status_code=204)
+def desactivar_watched_brand(brand_id: str, user: UserContext = Depends(get_current_user)) -> None:
+    """Baja (soft-delete) de una marca vigilada -- 404 si es de otro tenant
+    (spec.md: "Baja de marca ajena bloqueada"), nunca deja tocar filas ajenas."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM watched_brands WHERE id = ? AND tenant_id = ?", (brand_id, user.tenant_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Marca vigilada no encontrada")
+        conn.execute("UPDATE watched_brands SET is_active = 0 WHERE id = ?", (brand_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Servir el build de producción del frontend (React/Vite) desde el mismo
 # proceso/contenedor -- objetivo: un solo servicio deployable en Railway/Render
 # en vez de backend + frontend como dos servicios separados (más setup, más
@@ -2473,6 +2571,7 @@ _API_PATH_PREFIXES = {
     "docs",
     "redoc",
     "openapi.json",
+    "watched-brands",
 }
 
 if FRONTEND_DIST.is_dir():
