@@ -204,6 +204,33 @@ export type RevisionIAResult = {
   generado_en: string;
 };
 
+// Fase 3e (openspec/changes/fase3e-monitoreo-dmarc): contratos reales de
+// `DmarcIngestOut`/`DmarcReportOut`/`DmarcSenderOut` en el backend.
+export type DmarcIngestResult = {
+  id: string;
+  dominio: string;
+  n_records: number;
+  rango_inicio: string | null;
+  rango_fin: string | null;
+};
+
+export type DmarcReport = {
+  id: string;
+  dominio: string;
+  rango_inicio: string | null;
+  rango_fin: string | null;
+  n_records: number;
+  created_at: string;
+};
+
+export type DmarcSender = {
+  source_ip: string;
+  mensajes: number;
+  autorizado: boolean;
+  spf_pass: number;
+  dkim_pass: number;
+};
+
 export type Invitation = {
   id: string;
   email: string;
@@ -401,6 +428,32 @@ export const api = {
     for (const f of files) form.append("files", f, f.name);
     return requestMultipart<RevisionIAResult>("/reports/revision-ia", form);
   },
+  // Fase 3e: upload de un reporte DMARC agregado (.xml/.xml.gz/.zip).
+  // `FormData` va directo por `fetch` (sin el helper `request<T>`, que fija
+  // `Content-Type: application/json`) -- el navegador pone el
+  // `multipart/form-data` con boundary correcto solo si no se lo pisamos.
+  uploadDmarcReport: async (file: File): Promise<DmarcIngestResult> => {
+    const token = getToken();
+    const headers: Record<string, string> = { "bypass-tunnel-reminder": "vigia" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`${API_URL}/dmarc/reports`, { method: "POST", headers, body: form });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = body.detail ?? detail;
+      } catch {
+        /* respuesta sin cuerpo JSON */
+      }
+      throw new ApiError(res.status, typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    return res.json() as Promise<DmarcIngestResult>;
+  },
+  getDmarcReports: () => request<DmarcReport[]>("/dmarc/reports"),
+  getDmarcSummary: (dominio?: string) =>
+    request<DmarcSender[]>(`/dmarc/summary${dominio ? `?dominio=${encodeURIComponent(dominio)}` : ""}`),
 };
 
 export { ApiError };

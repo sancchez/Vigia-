@@ -8,17 +8,47 @@ dag:
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        pending
+  apply:        complete
   verify:       pending
   archive:      pending
 notes: >
-  Planificacion completa (propose -> spec -> design -> tasks). SOLO
-  planificacion, sdd-apply NO ejecutado. Ingesta v1 = upload manual de XML
-  RUA (.xml/.gz/.zip); buzon/poller IMAP diferido. Store en dmarc_reports
-  (Fase 0) con raw_json + agregacion en Python en lectura -- sin columnas ni
-  tablas nuevas, sin tocar db/schema.sql ni db/connection.py. Parseo con
-  defusedxml (entrada no confiable). Archivos propios: tools/dmarc.py,
-  frontend/src/components/DmarcPanel.tsx, tests/test_dmarc.py. Archivos
-  COMPARTIDOS (solo anadidos aditivos, el orquestador secuencia el apply vs
-  fase3a/fase3b/fase4+): pyproject.toml, api/main.py, frontend/src/api.ts,
-  frontend/src/pages/Dashboard.tsx. Nuevas deps: defusedxml, python-multipart.
+  sdd-apply ejecutado completo (Fases 1-6 de tasks.md, todas marcadas [x]).
+  Ingesta v1 = upload manual de XML RUA (.xml/.gz/.zip); buzon/poller IMAP
+  diferido. Store en dmarc_reports (Fase 0) con raw_json + agregacion en
+  Python en lectura -- sin columnas ni tablas nuevas, sin tocar
+  db/schema.sql ni db/connection.py. Parseo con defusedxml.ElementTree
+  (entrada no confiable, XXE/billion-laughs verificado con test explicito).
+  Archivos propios creados: tools/dmarc.py (parse_aggregate_report,
+  aggregate_senders), frontend/src/components/DmarcPanel.tsx,
+  tests/test_dmarc.py (21 tests, todos verdes). Archivos COMPARTIDOS
+  modificados con SOLO anadidos aditivos (sin editar contratos existentes):
+  pyproject.toml (+defusedxml, +python-multipart), api/main.py (+3 rutas:
+  POST /dmarc/reports, GET /dmarc/reports, GET /dmarc/summary; +3 modelos
+  pydantic; +"dmarc" en _API_PATH_PREFIXES), frontend/src/api.ts (+3 tipos,
+  +3 metodos), frontend/src/pages/Dashboard.tsx (+import y +<DmarcPanel/>
+  junto a KpiWidget).
+
+  Nota de coordinacion (worktree bootstrap): este worktree fue provisto
+  inicialmente apuntando a un commit viejo (b92edd4, sin openspec/ ni
+  Fases 0-2c) en vez de main real (c41cc6b). Se detecto porque
+  openspec/changes/fase3e-monitoreo-dmarc/ no existia y db/schema.sql no
+  tenia dmarc_reports. Se verifico que b92edd4 es ancestro directo de
+  c41cc6b (git merge-base --is-ancestor) y que el branch de este worktree
+  no tenia commits propios (working tree clean) -- se hizo
+  `git merge --ff-only main` (fast-forward puro, sin conflictos, sin
+  reescribir historia) para alinear el worktree con el main real antes de
+  empezar a implementar. Ningun archivo de vigia_core_private/ fue tocado.
+
+  Verificacion real: `pytest tests/` completo -> 213 passed, 1 skipped
+  (skip preexistente, no relacionado). `npm run build` (tsc -b && vite
+  build) en frontend/ -> build limpio (tuvo que correr `npm install`
+  primero, node_modules no existia en este worktree).
+
+  Desviaciones del design: ninguna sustantiva. `policy_evaluated/spf` y
+  `.../dkim` (ya con alineacion aplicada por el receptor, no el resultado
+  crudo de auth_results) se usan para spf_aligned/dkim_aligned -- es el
+  campo correcto de RFC 7489 para "autorizado", el design no lo
+  especificaba a ese nivel de detalle pero es consistente con la
+  definicion de spec.md. No se probo contra un reporte real de Microsoft
+  (Open Question del design sobre namespaces) -- queda para verificacion
+  manual futura, igual que documentaba design.md.

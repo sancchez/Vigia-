@@ -8,6 +8,7 @@ import FindingDetailPanel from "../components/FindingDetailPanel";
 import RemediationBoard from "../components/RemediationBoard";
 import KpiWidget from "../components/KpiWidget";
 import RevisionIA from "../components/RevisionIA";
+import DmarcPanel from "../components/DmarcPanel";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -589,6 +590,8 @@ export default function Dashboard() {
           </div>
 
           <KpiWidget assets={assets} />
+
+          <DmarcPanel />
 
           {findings.length > 0 && (
             <RemediationBoard findings={findings} members={members} onChanged={cargarTodo} />

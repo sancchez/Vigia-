@@ -70,6 +70,7 @@ from tools.asset_verification import (
     instrucciones_verificacion,
     verificar_asset,
 )
+from tools.dmarc import DmarcParseError, aggregate_senders, parse_aggregate_report
 from tools.report_export import markdown_to_docx_bytes, markdown_to_pdf_bytes
 from tools.scan import run_nuclei
 from tools.zap_api import run_checkpointed_active_scan, run_single_target_verification
@@ -1418,6 +1419,157 @@ def obtener_kpis(user: UserContext = Depends(get_current_user)) -> KpiOut:
     )
 
 
+# ---------------------------------------------------------------------------
+# Fase 3e (openspec/changes/fase3e-monitoreo-dmarc): monitoreo DMARC --
+# ingesta manual de reportes agregados (RUA, RFC 7489) y vista de
+# remitentes no autorizados. Complemento de fase3a/fase3b (lookalikes),
+# no consumidor -- sin dependencia de runtime entre ellos. Sin tabla ni
+# columnas nuevas: `dmarc_reports` ya existe desde Fase 0, `raw_json`
+# normalizado por `tools/dmarc.py` y agregación en Python en lectura
+# (mismo patrón que `fase2c`, portabilidad SQLite/Postgres).
+# ---------------------------------------------------------------------------
+
+
+class DmarcIngestOut(BaseModel):
+    id: str
+    dominio: str
+    n_records: int
+    rango_inicio: Optional[str] = None
+    rango_fin: Optional[str] = None
+
+
+class DmarcReportOut(BaseModel):
+    id: str
+    dominio: str
+    rango_inicio: Optional[str] = None
+    rango_fin: Optional[str] = None
+    n_records: int
+    created_at: str
+
+
+class DmarcSenderOut(BaseModel):
+    source_ip: str
+    mensajes: int
+    autorizado: bool
+    spf_pass: int
+    dkim_pass: int
+
+
+@app.post("/dmarc/reports", response_model=DmarcIngestOut)
+async def subir_reporte_dmarc(
+    file: UploadFile = File(...), user: UserContext = Depends(get_current_user)
+) -> DmarcIngestOut:
+    """Ingesta manual (v1) de un reporte DMARC agregado (`.xml`/`.xml.gz`/
+    `.zip`) que el usuario ya recibe en su propio buzón `rua=mailto:` --
+    ver `tools/dmarc.py` para el porqué de este diseño (cero infra nueva) y
+    la evolución futura documentada (buzón dedicado + poller IMAP,
+    diferida). Parsea con `defusedxml` (entrada NO confiable, riesgo XXE);
+    un archivo inválido o que dispare esa protección responde 422 sin
+    persistir ninguna fila."""
+    contenido = await file.read()
+    try:
+        reporte = parse_aggregate_report(contenido)
+    except DmarcParseError as exc:
+        raise HTTPException(status_code=422, detail=f"Reporte DMARC inválido: {exc}")
+
+    report_id = str(uuid.uuid4())
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO dmarc_reports (id, tenant_id, dominio, rango_inicio, rango_fin, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_id,
+                user.tenant_id,
+                reporte["dominio"],
+                reporte["rango_inicio"],
+                reporte["rango_fin"],
+                json.dumps(reporte),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return DmarcIngestOut(
+        id=report_id,
+        dominio=reporte["dominio"],
+        n_records=len(reporte["records"]),
+        rango_inicio=reporte["rango_inicio"],
+        rango_fin=reporte["rango_fin"],
+    )
+
+
+@app.get("/dmarc/reports", response_model=list[DmarcReportOut])
+def listar_reportes_dmarc(user: UserContext = Depends(get_current_user)) -> list[DmarcReportOut]:
+    """Reportes DMARC ingeridos del tenant (solo lectura), más recientes primero."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, dominio, rango_inicio, rango_fin, raw_json, created_at
+            FROM dmarc_reports WHERE tenant_id = ? ORDER BY created_at DESC
+            """,
+            (user.tenant_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    resultado: list[DmarcReportOut] = []
+    for row in rows:
+        fila = dict_from_row(row)
+        try:
+            raw = json.loads(fila["raw_json"] or "{}")
+        except (TypeError, ValueError):
+            raw = {}
+        resultado.append(
+            DmarcReportOut(
+                id=fila["id"],
+                dominio=fila["dominio"],
+                rango_inicio=fila["rango_inicio"],
+                rango_fin=fila["rango_fin"],
+                n_records=len(raw.get("records", [])),
+                created_at=fila["created_at"],
+            )
+        )
+    return resultado
+
+
+@app.get("/dmarc/summary", response_model=list[DmarcSenderOut])
+def resumen_dmarc(dominio: Optional[str] = None, user: UserContext = Depends(get_current_user)) -> list[DmarcSenderOut]:
+    """Agrega, sobre los `raw_json` de todos los reportes del tenant
+    (opcionalmente filtrado por `dominio`), los remitentes por IP de
+    origen -- marca como no autorizada toda IP cuyo correo falla la
+    alineación DMARC (ni SPF ni DKIM). Tenant sin reportes -> lista vacía,
+    nunca error (ver spec.md)."""
+    conn = get_conn()
+    try:
+        if dominio:
+            rows = conn.execute(
+                "SELECT raw_json FROM dmarc_reports WHERE tenant_id = ? AND dominio = ?",
+                (user.tenant_id, dominio),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT raw_json FROM dmarc_reports WHERE tenant_id = ?",
+                (user.tenant_id,),
+            ).fetchall()
+    finally:
+        conn.close()
+
+    reportes: list[dict] = []
+    for row in rows:
+        fila = dict_from_row(row)
+        try:
+            reportes.append(json.loads(fila["raw_json"] or "{}"))
+        except (TypeError, ValueError):
+            continue
+
+    return [DmarcSenderOut(**entrada) for entrada in aggregate_senders(reportes)]
+
+
 class CumplimientoCategoriaOut(BaseModel):
     categoria: str
     nombre: str
@@ -2734,6 +2886,7 @@ _API_PATH_PREFIXES = {
     "docs",
     "redoc",
     "openapi.json",
+    "dmarc",
 }
 
 if FRONTEND_DIST.is_dir():
