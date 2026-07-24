@@ -57,3 +57,9 @@ Thumbs.db
 # Research de mercado / pricing -- inteligencia competitiva, no para
 # publicar en un repo publico. Vive como copia en vigia_core_private/docs/.
 /docs/market-research.md
+
+# Fase 4 (openspec/changes/fase4-revision-codigo-ia): sandbox por tenant
+# donde POST /reports/revision-ia guarda temporalmente el código subido por
+# el cliente para revisarlo -- se borra al terminar cada review, pero nunca
+# debe versionarse (es código propietario de terceros, no del proyecto).
+/uploads/

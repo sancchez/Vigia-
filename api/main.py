@@ -28,6 +28,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -37,7 +38,7 @@ from typing import Any, Optional
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +53,7 @@ from auth.jwt_auth import (
     verify_password,
 )
 from agents.cumplimiento import generar_reporte_cumplimiento
+from agents.revision_ia import revisar_codigo
 from agents.verificacion import verificar_un_hallazgo
 from api.certstream_listener import start_certstream_listener, stop_certstream_listener
 from api.scheduler import start_scheduler, stop_scheduler
@@ -1516,6 +1518,265 @@ def reporte_cumplimiento_download(
         content=contenido,
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fase 4 (openspec/changes/fase4-revision-codigo-ia): exponer
+# `agents/revision_ia.py::revisar_codigo()` -- ver ese módulo, ya completo y
+# NO se toca aquí, solo se invoca. Este bloque es infraestructura pura:
+# ingesta segura (sandbox por tenant) + persistencia (scans+findings
+# sintéticos, mismo precedente que CertStream) + el endpoint mismo.
+# ---------------------------------------------------------------------------
+
+# Raíz de todos los sandboxes de revisión de código, relativa a la raíz del
+# repo (mismo criterio que `FRONTEND_DIST` más abajo). Un directorio por
+# tenant, y dentro de cada uno un directorio por review -- nunca se acepta
+# una ruta absoluta del cliente (ver design.md, Decision "Ingesta por
+# subida a sandbox, no rutas del servidor": aceptar rutas del body sería un
+# LFI directo en un SaaS multi-tenant).
+UPLOADS_ROOT = (Path(__file__).resolve().parent.parent / "uploads" / "revision_ia").resolve()
+
+
+def _nombre_archivo_seguro(filename: str | None) -> str:
+    """Valida el `filename` crudo de un `UploadFile` y devuelve un nombre
+    plano seguro para escribir dentro del sandbox de la review.
+
+    Rechaza (levanta) cualquier nombre que traiga un componente de
+    directorio (`/`, `\\`) o `..` -- ver spec.md, escenario "Intento de
+    traversal": la ruta se rechaza SIN leerla, no se sanea en silencio
+    tomando solo el basename. Un cliente que sube `../../etc/passwd` o
+    `..\\..\\config` recibe 422 explícito, no un archivo guardado
+    silenciosamente como `passwd`.
+    """
+    nombre = (filename or "").strip()
+    if not nombre or nombre in (".", "..") or "/" in nombre or "\\" in nombre or ".." in nombre:
+        raise HTTPException(status_code=422, detail=f"Nombre de archivo inválido o fuera del sandbox: {filename!r}")
+    return nombre
+
+
+def _sandbox_revision(tenant_id: str, review_id: str, files: list[UploadFile]) -> list[str]:
+    """Guarda `files` bajo `uploads/revision_ia/{tenant_id}/{review_id}/` y
+    devuelve las rutas (str) ya validadas dentro del sandbox.
+
+    Cada nombre de archivo se valida con `_nombre_archivo_seguro()` (rechaza
+    componentes de directorio/`..` explícitamente, ver esa función) y,
+    además, cada ruta final se `resolve()` y se confirma que sigue siendo un
+    descendiente real de `sandbox_dir` (`is_relative_to`, mismo patrón que
+    ya usa `servir_frontend()` más abajo para el mismo tipo de riesgo) antes
+    de devolverla -- defensa en profundidad, no solo la validación del
+    nombre. Rechaza (422) al primer archivo que no pase cualquiera de las
+    dos verificaciones, sin escribir ninguno de los siguientes, y limpia lo
+    que ya se hubiera escrito de esta misma review.
+    """
+    sandbox_dir = (UPLOADS_ROOT / tenant_id / review_id).resolve()
+    if not sandbox_dir.is_relative_to(UPLOADS_ROOT):
+        # No debería poder pasar (tenant_id/review_id son UUIDs generados
+        # por este mismo backend, nunca texto libre del cliente), pero se
+        # verifica igual -- "nunca confíes en una ruta sin resolver y
+        # comparar", incluso la que uno mismo construyó.
+        raise HTTPException(status_code=422, detail="Ruta de sandbox inválida.")
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+
+    rutas: list[str] = []
+    try:
+        for archivo in files:
+            nombre_seguro = _nombre_archivo_seguro(archivo.filename)
+
+            destino = (sandbox_dir / nombre_seguro).resolve()
+            if not destino.is_relative_to(sandbox_dir):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Ruta fuera del sandbox del tenant rechazada: {archivo.filename!r}",
+                )
+
+            with open(destino, "wb") as f:
+                shutil.copyfileobj(archivo.file, f)
+            rutas.append(str(destino))
+    except HTTPException:
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+        raise
+
+    return rutas
+
+
+def _map_severidad_revision(sev: str) -> str:
+    """Mapea la severidad libre de `revisar_codigo()` (`alta|media|baja`) a
+    los valores que acepta `findings.severidad` (ver db/schema.sql, CHECK).
+    Cualquier valor no reconocido degrada a `info` en vez de fallar el
+    INSERT -- el LLM no está restringido por un schema real, solo por el
+    prompt (ver `agents/revision_ia.py`, "el LLM puede alucinar")."""
+    return {"alta": "high", "media": "medium", "baja": "low"}.get(str(sev or "").strip().lower(), "info")
+
+
+class HallazgoLogicaOut(BaseModel):
+    archivo: str
+    linea_aprox: Optional[int] = None
+    categoria: str
+    severidad: str
+    descripcion: str
+    evidencia: str
+    recomendacion: str
+    relacionado_con_semgrep: Optional[str] = None
+
+
+class RevisionIAOut(BaseModel):
+    scan_id: Optional[str] = None
+    hallazgos_logica: list[HallazgoLogicaOut]
+    archivos_revisados: list[str]
+    archivos_omitidos: list[str]
+    contexto_semgrep_usado: bool
+    generado_en: str
+
+
+def _persistir_revision_ia(conn, tenant_id: str, resultado: dict, label: str) -> Optional[str]:
+    """Persiste el resultado de `revisar_codigo()` como un `scans` sintético
+    + `findings` (mismo precedente que `api/certstream_listener.py::registrar_finding_certstream()`
+    y `_extraer_findings_antisuplantacion()` más arriba: reusar el ciclo de
+    vida de `findings` en vez de una tabla nueva). Devuelve el `scan_id`
+    creado, o `None` si no hubo ningún hallazgo (sin fila `scans` "vacía"
+    ensuciando el historial del tenant -- ver spec.md, "Revisión sin
+    hallazgos").
+    """
+    hallazgos = resultado.get("hallazgos_logica") or []
+    if not hallazgos:
+        return None
+
+    scan_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn.execute(
+        """
+        INSERT INTO scans
+            (id, tenant_id, asset_id, target, autorizacion_firmada, estado, reporte_final, trace_log_json, completed_at)
+        VALUES (?, ?, NULL, ?, 1, 'completado', ?, ?, ?)
+        """,
+        (
+            scan_id,
+            tenant_id,
+            f"revision-ia: {label}",
+            json.dumps(
+                {
+                    "archivos_revisados": resultado.get("archivos_revisados") or [],
+                    "archivos_omitidos": resultado.get("archivos_omitidos") or [],
+                    "contexto_semgrep_usado": resultado.get("contexto_semgrep_usado", False),
+                    "generado_en": resultado.get("generado_en"),
+                },
+                default=str,
+            ),
+            json.dumps(resultado.get("trace") or []),
+            now,
+        ),
+    )
+
+    hallazgos_normalizados = [
+        {
+            "tipo": f"revision_ia:{h.get('categoria') or 'logica_de_negocio'}",
+            "severidad": _map_severidad_revision(h.get("severidad", "")),
+            "endpoint": f"{h.get('archivo', '?')}:{h.get('linea_aprox')}",
+            "confirmado": False,
+            "raw_json": json.dumps(h, default=str),
+        }
+        for h in hallazgos
+    ]
+    _registrar_findings_con_ciclo_de_vida(conn, tenant_id, scan_id, None, hallazgos_normalizados, now)
+    conn.commit()
+
+    return scan_id
+
+
+@app.post("/reports/revision-ia", response_model=RevisionIAOut)
+def reporte_revision_ia(
+    autorizacion_firmada: bool = Form(...),
+    envio_codigo_a_llm_autorizado: bool = Form(False),
+    contexto_negocio: str = Form(""),
+    label: str = Form(""),
+    files: list[UploadFile] = File(...),
+    user: UserContext = Depends(get_current_user),
+) -> RevisionIAOut:
+    """`POST /reports/revision-ia` — expone `agents/revision_ia.py::revisar_codigo()`
+    (ver docstring de ese módulo, ya completo — NO se modifica aquí, solo se
+    invoca). Mismo patrón bajo-demanda que `GET /reports/cumplimiento`: fuera
+    del grafo, invocado directo desde este archivo.
+
+    Doble consentimiento re-validado en el borde de la API (ver spec.md,
+    Requirement "Doble consentimiento"): si falta cualquiera de los dos
+    flags, se responde 403 con un motivo distinto ANTES de tocar el
+    filesystem o el LLM -- ni un solo archivo subido se guarda si el
+    request ya viene sin el consentimiento necesario. `revisar_codigo()`
+    igual revalida ambos flags internamente (defensa en profundidad, mismo
+    criterio que documenta `agents/escaneo.py::node()`).
+    """
+    if not autorizacion_firmada:
+        raise HTTPException(
+            status_code=403,
+            detail="Falta autorizacion_firmada: no hay permiso para analizar este código.",
+        )
+    if not envio_codigo_a_llm_autorizado:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Falta envio_codigo_a_llm_autorizado: autorizacion_firmada autoriza "
+                "analizar el objetivo, pero enviar el CONTENIDO del código fuente a "
+                "un LLM de terceros requiere un consentimiento explícito adicional, "
+                "que no se dio."
+            ),
+        )
+
+    review_id = str(uuid.uuid4())
+    rutas = _sandbox_revision(user.tenant_id, review_id, files)
+    sandbox_dir = (UPLOADS_ROOT / user.tenant_id / review_id).resolve()
+
+    try:
+        resultado = revisar_codigo(
+            rutas,
+            True,
+            True,
+            semgrep_findings=None,
+            contexto_negocio=contexto_negocio,
+        )
+
+        conn = get_conn()
+        try:
+            scan_id = _persistir_revision_ia(conn, user.tenant_id, resultado, label or review_id)
+        finally:
+            conn.close()
+    finally:
+        # El código subido es propietario del cliente -- se borra del disco
+        # tan pronto termina la revisión, sin importar si tuvo éxito o
+        # falló, para minimizar la ventana de retención (ver design.md,
+        # Open Question "¿Retener el código subido...?", resuelta a favor
+        # de NO retenerlo).
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+    return RevisionIAOut(
+        scan_id=scan_id,
+        # `.get(...)` con defaults en vez de `**h`: el LLM produce JSON libre
+        # (ver `agents/revision_ia.py`, "el LLM puede alucinar") -- no hay
+        # garantía de schema estricto, así que una clave faltante degrada a
+        # un default en vez de tumbar el endpoint con un 500 de validación.
+        hallazgos_logica=[
+            HallazgoLogicaOut(
+                archivo=str(h.get("archivo", "?")),
+                linea_aprox=(
+                    int(h["linea_aprox"])
+                    if isinstance(h.get("linea_aprox"), (int, float, str))
+                    and str(h.get("linea_aprox")).strip().lstrip("-").isdigit()
+                    else None
+                ),
+                categoria=str(h.get("categoria", "logica_de_negocio")),
+                severidad=str(h.get("severidad", "media")),
+                descripcion=str(h.get("descripcion", "")),
+                evidencia=str(h.get("evidencia", "")),
+                recomendacion=str(h.get("recomendacion", "")),
+                relacionado_con_semgrep=h.get("relacionado_con_semgrep"),
+            )
+            for h in (resultado.get("hallazgos_logica") or [])
+        ],
+        archivos_revisados=resultado.get("archivos_revisados") or [],
+        archivos_omitidos=resultado.get("archivos_omitidos") or [],
+        contexto_semgrep_usado=bool(resultado.get("contexto_semgrep_usado")),
+        generado_en=resultado.get("generado_en", ""),
     )
 
 
