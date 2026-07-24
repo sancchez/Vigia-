@@ -1,0 +1,24 @@
+change: fase3e-monitoreo-dmarc
+mode: openspec
+created_at: 2026-07-24T00:00:00Z
+updated_at: 2026-07-24T00:00:00Z
+dag:
+  explore:      skipped
+  proposal:     complete
+  spec:         complete
+  design:       complete
+  tasks:        complete
+  apply:        pending
+  verify:       pending
+  archive:      pending
+notes: >
+  Planificacion completa (propose -> spec -> design -> tasks). SOLO
+  planificacion, sdd-apply NO ejecutado. Ingesta v1 = upload manual de XML
+  RUA (.xml/.gz/.zip); buzon/poller IMAP diferido. Store en dmarc_reports
+  (Fase 0) con raw_json + agregacion en Python en lectura -- sin columnas ni
+  tablas nuevas, sin tocar db/schema.sql ni db/connection.py. Parseo con
+  defusedxml (entrada no confiable). Archivos propios: tools/dmarc.py,
+  frontend/src/components/DmarcPanel.tsx, tests/test_dmarc.py. Archivos
+  COMPARTIDOS (solo anadidos aditivos, el orquestador secuencia el apply vs
+  fase3a/fase3b/fase4+): pyproject.toml, api/main.py, frontend/src/api.ts,
+  frontend/src/pages/Dashboard.tsx. Nuevas deps: defusedxml, python-multipart.

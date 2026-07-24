@@ -1,0 +1,29 @@
+change: fase7-confianza-calidad
+mode: openspec
+created_at: 2026-07-24T00:00:00Z
+updated_at: 2026-07-24T00:00:00Z
+dag:
+  explore:      skipped
+  proposal:     complete
+  spec:         complete
+  design:       complete
+  tasks:        complete
+  apply:        pending
+  verify:       pending
+  archive:      pending
+notes: >
+  Solo planificación (proposal→spec→design→tasks). NO se corrió sdd-apply.
+  Cadena SDD para Fase 7 del plan entregable: (1) extender el harness eval/
+  existente con FP-rate, runner de regresión con baseline, y evals de calidad
+  del FALLBACK público de priorización/remediación/revisión; (2) exponer el
+  trace_log ya persistido (scans.trace_log_json) como registro de auditoría de
+  solo lectura por tenant (GET /scans/{id}/trace, GET /audit) + UI timeline.
+  El design.md documenta el split explícito público/privado: sdd-apply de esta
+  ronda toca SOLO el repo público (api/main.py, frontend/, eval/, tests/,
+  docs/open-core.md). Los evals de CONTENIDO de los prompts privados se
+  documentan como plan separado (Fase 6 de tasks.md) para vigia_core_private/,
+  con su propio commit ahí, nunca mezclado -- mismo patrón que
+  test_cumplimiento_categorizacion.py (ver docs/open-core.md). Secuencia de
+  apply vs changes hermanos (fase3a/3b/3e/4/5/6) la impone el orquestador; este
+  change es aditivo y se aplica después para evitar conflictos en api/main.py y
+  Dashboard.tsx.

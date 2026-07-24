@@ -1,0 +1,28 @@
+change: fase5-notificaciones-alertas
+mode: openspec
+created_at: 2026-07-24T00:00:00Z
+updated_at: 2026-07-24T00:00:00Z
+dag:
+  explore:      skipped
+  proposal:     complete
+  spec:         complete
+  design:       complete
+  tasks:        complete
+  apply:        pending
+  verify:       pending
+  archive:      pending
+notes: >
+  Planificación completa (propose -> spec -> design -> tasks). NO aplicado.
+  Mecanismo de envío elegido: smtplib (stdlib), sin dependencias nuevas en
+  pyproject.toml; config SMTP por variables de entorno. v1 = solo email;
+  Slack/webhook diferido a follow-up explícito. Tres eventos:
+  hallazgo_critico_nuevo (hook en _registrar_findings_con_ciclo_de_vida),
+  dominio_clon_detectado (hook en certstream_listener tras INSERT), y
+  sla_escalamiento (75% y vencido, job periodico nuevo run_sla_escalation_once
+  en api/scheduler.py, mismo patron que run_scan_cycle_once). Idempotencia
+  reusando la tabla notifications (sin cambios de schema; tablas ya existen
+  desde Fase 0). Riesgo abierto NO bloqueante: el contrato exacto del finding
+  de dominio clon lo fija fase3b (en paralelo, diseno no visible) -- v1 se
+  ancla a tipo='dominio_variante_certstream' que el listener ya emite hoy.
+  Open Question a resolver en sdd-apply: clave exacta de idempotencia sin
+  columna nueva (Opcion A recomendada: recurso_id en evento compuesto).

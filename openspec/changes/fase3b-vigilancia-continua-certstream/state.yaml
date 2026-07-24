@@ -1,0 +1,20 @@
+change: fase3b-vigilancia-continua-certstream
+mode: openspec
+created_at: 2026-07-24T00:00:00Z
+updated_at: 2026-07-24T00:00:00Z
+dag:
+  explore:      skipped
+  proposal:     complete
+  spec:         complete
+  design:       complete
+  tasks:        complete
+  apply:        pending
+  verify:       pending
+  archive:      pending
+notes: |
+  Planificación solamente (no sdd-apply). Cubre Fase 3b (panel de vigilancia +
+  config watched_brands) y 3c (feed certstream-server-go self-hosted) del
+  plan-entregable. Changes hermanos en planificación paralela: fase3a, fase3e,
+  fase4, fase5, fase6, fase7 — el orquestador debe secuenciar por archivos
+  compartidos (api/main.py, frontend/src/api.ts, Dashboard.tsx). Ver design.md
+  sección "Coordinación con changes hermanos".

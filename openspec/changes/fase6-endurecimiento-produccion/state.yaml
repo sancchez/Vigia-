@@ -1,0 +1,29 @@
+change: fase6-endurecimiento-produccion
+mode: openspec
+created_at: 2026-07-24T00:00:00Z
+updated_at: 2026-07-24T00:00:00Z
+dag:
+  explore:      skipped
+  proposal:     complete
+  spec:         complete
+  design:       complete
+  tasks:        complete
+  apply:        pending
+  verify:       pending
+  archive:      pending
+notes: >
+  Solo planificación (sdd-propose -> sdd-spec -> sdd-design -> sdd-tasks). NO
+  se corrió sdd-apply. Change más heterogéneo del plan: el proposal recomienda
+  PARTIRLO en 3 sub-changes -- fase6a-operacion-produccion (LLM prod + costo +
+  scheduling activo seguro), fase6b-billing-wompi (GATED: HANDOFF.md 165 dice
+  no retomar Wompi sin que el usuario lo pida), fase6c-onboarding-y-export.
+  spec/design/tasks ya vienen organizados por esos 3 bloques para que el corte
+  sea limpio si el orquestador aprueba el split. Contexto verificado en codigo
+  real, no asumido: agents/_llm.py (3 backends, sin medicion de costo hoy),
+  api/scheduler.py (solo pasivo, desbloqueado por columnas autorizacion_activa
+  de Fase 0), tools/asset_verification.py (DNS/HTTP ya implementado -> onboarding
+  es solo UI), subscriptions + planes ya en schema.sql, tools/report_export.py
+  + GET /kpis (fase2c) reusables para el export ejecutivo. Fase 6 no toca
+  vigia_core_private/ (100% infra/UI). Dependencia de secuenciado con changes
+  hermanos fase3a/3b/3e/4/5/7 (tocan api/main.py y frontend en paralelo): el
+  orquestador ordena los sdd-apply para evitar edicion concurrente.
