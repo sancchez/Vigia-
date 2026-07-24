@@ -327,6 +327,11 @@ export const api = {
     downloadFile(`/reports/cumplimiento/download?formato=${formato}`, `reporte-cumplimiento.${formato}`),
   downloadScanReport: (scanId: string, formato: "pdf" | "docx") =>
     downloadFile(`/scans/${scanId}/report/download?formato=${formato}`, `reporte-scan-${scanId.slice(0, 8)}.${formato}`),
+  // Fase 6c (openspec/changes/fase6-endurecimiento-produccion): export
+  // ejecutivo consolidado multi-activo -- postura por activo + KPIs de
+  // `GET /kpis`, mismo patrón de descarga que `downloadCumplimiento`.
+  downloadEjecutivo: (formato: "pdf" | "docx") =>
+    downloadFile(`/reports/ejecutivo/download?formato=${formato}`, `reporte-ejecutivo.${formato}`),
   listMembers: () => request<Member[]>("/tenant/members"),
   listInvitations: () => request<Invitation[]>("/tenant/invitations"),
   createInvitation: (email: string, role: string) =>

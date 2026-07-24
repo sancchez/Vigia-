@@ -8,22 +8,51 @@ dag:
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        pending
+  apply:        partial
   verify:       pending
   archive:      pending
 notes: >
-  Solo planificación (sdd-propose -> sdd-spec -> sdd-design -> sdd-tasks). NO
-  se corrió sdd-apply. Change más heterogéneo del plan: el proposal recomienda
-  PARTIRLO en 3 sub-changes -- fase6a-operacion-produccion (LLM prod + costo +
-  scheduling activo seguro), fase6b-billing-wompi (GATED: HANDOFF.md 165 dice
-  no retomar Wompi sin que el usuario lo pida), fase6c-onboarding-y-export.
-  spec/design/tasks ya vienen organizados por esos 3 bloques para que el corte
-  sea limpio si el orquestador aprueba el split. Contexto verificado en codigo
-  real, no asumido: agents/_llm.py (3 backends, sin medicion de costo hoy),
-  api/scheduler.py (solo pasivo, desbloqueado por columnas autorizacion_activa
-  de Fase 0), tools/asset_verification.py (DNS/HTTP ya implementado -> onboarding
-  es solo UI), subscriptions + planes ya en schema.sql, tools/report_export.py
-  + GET /kpis (fase2c) reusables para el export ejecutivo. Fase 6 no toca
-  vigia_core_private/ (100% infra/UI). Dependencia de secuenciado con changes
-  hermanos fase3a/3b/3e/4/5/7 (tocan api/main.py y frontend en paralelo): el
-  orquestador ordena los sdd-apply para evitar edicion concurrente.
+  Solo planificación (sdd-propose -> sdd-spec -> sdd-design -> sdd-tasks) para
+  6a/6b. Change más heterogéneo del plan: el proposal recomienda PARTIRLO en 3
+  sub-changes -- fase6a-operacion-produccion (LLM prod + costo + scheduling
+  activo seguro, EN CURSO por otro agente en paralelo, no tocado por esta
+  sesión), fase6b-billing-wompi (GATED: HANDOFF.md 165 dice no retomar Wompi
+  sin que el usuario lo pida -- SIGUE SIN APLICAR, fuera de alcance total),
+  fase6c-onboarding-y-export (APLICADO en esta sesión -- ver abajo).
+
+  Grupo 6c aplicado (`fase6c-onboarding-y-export`, tasks.md 6c.1-6c.3):
+  - 6c.1.1: wizard de onboarding de verificación de dominio en el frontend
+    (`frontend/src/components/OnboardingWizard.tsx`), consumiendo
+    `GET /assets` (`instrucciones_verificacion`) y `POST /assets/{id}/verify`
+    -- sin reimplementar la lógica de verificación (ya vive en
+    `tools/asset_verification.py`). Reemplaza el bloque inline que había en
+    `Dashboard.tsx`. Encadena a "autorizar escaneo activo" (scroll al
+    checkbox de autorización existente, no hay endpoint nuevo de
+    autorización -- eso es 6a).
+  - 6c.1.2: NO se implementó `GET /onboarding/estado` -- el frontend deriva
+    todo de `GET /assets` (decisión tomada en tasks.md, "decidir si aporta").
+  - 6c.2.1/6c.2.2/6c.2.3: `GET /reports/ejecutivo/download?formato=pdf|docx`
+    en `api/main.py` (markdown consolidado multi-activo: postura de
+    hallazgos abiertos por activo + KPIs vía `_kpis_de_tenant`, la MISMA capa
+    que `GET /kpis`, no recalculada en paralelo). Helper de composición
+    `construir_markdown_ejecutivo` en `tools/report_export.py` (no en
+    `vigia_core_private/`). Botón "Export ejecutivo" + `api.downloadEjecutivo`
+    en el frontend (`Dashboard.tsx`/`api.ts`).
+  - 6c.3.1: `tests/test_reporte_ejecutivo.py` (PDF/DOCX no vacío con varios
+    activos, formato inválido -> 422, sin auth -> 401, aislamiento por
+    tenant).
+  - 6c.3.2: recorrido manual del wizard NO ejecutado en esta sesión (sin
+    entorno de navegador contra un asset real disponible) -- queda pendiente
+    de una verificación manual/UI posterior.
+
+  Contexto verificado en código real, no asumido: agents/_llm.py (3 backends,
+  sin medicion de costo hoy), api/scheduler.py (solo pasivo, desbloqueado por
+  columnas autorizacion_activa de Fase 0), tools/asset_verification.py
+  (DNS/HTTP ya implementado -> onboarding es solo UI), subscriptions + planes
+  ya en schema.sql, tools/report_export.py + GET /kpis (fase2c) reusados
+  (no reimplementados) para el export ejecutivo. Fase 6 no toca
+  vigia_core_private/ (100% infra/UI) -- confirmado con `git status` tras
+  aplicar 6c. Dependencia de secuenciado con changes hermanos fase3a/3b/3e/4/
+  5/7 (tocan api/main.py y frontend en paralelo): esta sesión trabajó en un
+  worktree aislado: 6a/6b NO fueron tocados por esta sesión (los aplica otro
+  agente / quedan pendientes de luz verde del usuario respectivamente).

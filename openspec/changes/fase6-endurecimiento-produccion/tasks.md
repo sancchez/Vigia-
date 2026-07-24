@@ -99,27 +99,40 @@
 ## Grupo 6c — `fase6c-onboarding-y-export`
 
 ### 6c.1 Implementación — Onboarding de verificación de dominio (UI)
-- [ ] 6c.1.1 Wizard frontend: paso a paso DNS-TXT/HTTP consumiendo
+- [x] 6c.1.1 Wizard frontend: paso a paso DNS-TXT/HTTP consumiendo
       `GET /assets` (`instrucciones_verificacion`) y `POST /assets/{id}/
       verify`; mostrar resultado negativo con reintento; encadenar a
       "autorizar escaneo activo" al verificarse.
+      (`frontend/src/components/OnboardingWizard.tsx`, integrado en
+      `Dashboard.tsx` reemplazando el bloque inline anterior.)
 - [ ] 6c.1.2 (Opcional) `GET /onboarding/estado`: resumen de qué falta por
       tenant (activos sin verificar / sin autorización). Decidir si aporta
       o si el frontend lo deriva de `GET /assets`.
+      **Decisión tomada: NO se implementa** — el frontend deriva todo de
+      `GET /assets` (ya trae `verificado`/`exento_de_verificacion`/
+      `instrucciones_verificacion`), no aporta lo suficiente para justificar
+      un endpoint nuevo en este alcance.
 
 ### 6c.2 Implementación — Export ejecutivo consolidado
-- [ ] 6c.2.1 Backend: componer markdown consolidado multi-activo (postura
+- [x] 6c.2.1 Backend: componer markdown consolidado multi-activo (postura
       por activo desde `findings` + KPIs vía la capa de `GET /kpis`).
-- [ ] 6c.2.2 `GET /reports/ejecutivo/download?formato=pdf|docx` reusando
+      (`construir_markdown_ejecutivo` en `tools/report_export.py`;
+      `_kpis_de_tenant`/`_postura_abierta_por_activo` en `api/main.py`.)
+- [x] 6c.2.2 `GET /reports/ejecutivo/download?formato=pdf|docx` reusando
       `markdown_to_pdf_bytes`/`markdown_to_docx_bytes`; validación de
       formato → 422; scoped por tenant.
-- [ ] 6c.2.3 `frontend/src/api.ts` + botón "Export ejecutivo" en Dashboard.
+- [x] 6c.2.3 `frontend/src/api.ts` + botón "Export ejecutivo" en Dashboard.
+      (`api.downloadEjecutivo`, tarjeta "Export ejecutivo" en
+      `Dashboard.tsx`.)
 
 ### 6c.3 Testing 6c
-- [ ] 6c.3.1 Export ejecutivo con varios activos → PDF/DOCX no vacío;
+- [x] 6c.3.1 Export ejecutivo con varios activos → PDF/DOCX no vacío;
       formato inválido → 422; aislamiento por tenant.
+      (`tests/test_reporte_ejecutivo.py`.)
 - [ ] 6c.3.2 (Manual/UI) recorrido del wizard de onboarding contra un asset
-      real de prueba.
+      real de prueba. **No ejecutado en esta sesión** (sin navegador/entorno
+      de prueba manual disponible) — queda pendiente para una verificación
+      posterior contra un asset real.
 
 ---
 

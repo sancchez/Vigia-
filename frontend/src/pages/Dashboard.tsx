@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
 import { api, ApiError, type Asset, type CumplimientoReport, type Finding, type Member, type ScanDetail, type ScanHistoryItem } from "../api";
@@ -7,6 +7,7 @@ import Equipo from "../components/Equipo";
 import FindingDetailPanel from "../components/FindingDetailPanel";
 import RemediationBoard from "../components/RemediationBoard";
 import KpiWidget from "../components/KpiWidget";
+import OnboardingWizard from "../components/OnboardingWizard";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -73,13 +74,19 @@ export default function Dashboard() {
   const [viendoScan, setViendoScan] = useState<string | null>(null);
   const [cumplimiento, setCumplimiento] = useState<CumplimientoReport | null>(null);
   const [cargandoCumpl, setCargandoCumpl] = useState(false);
-  const [assetVerificando, setAssetVerificando] = useState<string | null>(null);
-  const [assetExpandido, setAssetExpandido] = useState<string | null>(null);
-  const [metodoElegido, setMetodoElegido] = useState<Record<string, "dns_txt" | "http_file">>({});
+  // Fase 6c (openspec/changes/fase6-endurecimiento-produccion): activo cuyo
+  // wizard de onboarding de verificación está abierto (null = cerrado).
+  // Reemplaza el bloque inline de expandir/verificar que había acá antes --
+  // ver `components/OnboardingWizard.tsx`, misma lógica de backend
+  // (`GET /assets` + `POST /assets/{id}/verify`), solo UI más guiada.
+  const [wizardAsset, setWizardAsset] = useState<Asset | null>(null);
   // Fase 1 (openspec/changes/fase1-deteccion-visible): id del hallazgo cuyo
   // panel de detalle está abierto (null = cerrado). Compartido por ambas
   // tablas de hallazgos (general y detalle de scan).
   const [findingIdAbierto, setFindingIdAbierto] = useState<string | null>(null);
+  // Ancla para "Ir a activar escaneo" al cerrar el wizard con éxito -- el
+  // formulario de abajo ya trae el checkbox de autorización de pruebas.
+  const formAutorizacionRef = useRef<HTMLFormElement>(null);
 
   const cargarTodo = async () => {
     setCargando(true);
@@ -128,19 +135,9 @@ export default function Dashboard() {
     }
   };
 
-  const comprobarVerificacion = async (assetId: string) => {
-    const metodo = metodoElegido[assetId] ?? "dns_txt";
-    setAssetVerificando(assetId);
-    setMensaje(null);
-    try {
-      const resultado = await api.verifyAsset(assetId, metodo);
-      setMensaje(resultado.detalle);
-      await cargarTodo();
-    } catch (err) {
-      setMensaje(err instanceof ApiError ? err.message : "No se pudo comprobar la verificación.");
-    } finally {
-      setAssetVerificando(null);
-    }
+  const irAEscanear = () => {
+    formAutorizacionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setMensaje('Marca "Autorización de pruebas firmada" y presiona "Escanear ahora" para el análisis completo.');
   };
 
   const correrScan = async (valor: string) => {
@@ -195,6 +192,21 @@ export default function Dashboard() {
       await api.downloadCumplimiento(formato);
     } catch (err) {
       setMensaje(err instanceof ApiError ? err.message : "No se pudo descargar el reporte.");
+    } finally {
+      setDescargando(null);
+    }
+  };
+
+  // Fase 6c: export ejecutivo consolidado (postura por activo + KPIs de
+  // `GET /kpis`), mismo patrón de descarga que `descargarCumplimiento`.
+  const descargarEjecutivo = async (formato: "pdf" | "docx") => {
+    const clave = `ejecutivo-${formato}`;
+    setDescargando(clave);
+    setMensaje(null);
+    try {
+      await api.downloadEjecutivo(formato);
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo descargar el reporte ejecutivo.");
     } finally {
       setDescargando(null);
     }
@@ -381,10 +393,8 @@ export default function Dashboard() {
                       </div>
                       <div style={{ display: "flex", gap: 8 }}>
                         {!puedeEscanear && (
-                          <button
-                            onClick={() => setAssetExpandido(assetExpandido === a.id ? null : a.id)}
-                          >
-                            {assetExpandido === a.id ? "Ocultar" : "Verificar propiedad"}
+                          <button onClick={() => setWizardAsset(a)}>
+                            Verificar propiedad
                           </button>
                         )}
                         <button
@@ -431,57 +441,11 @@ export default function Dashboard() {
                       </div>
                     )}
 
-                    {assetExpandido === a.id && a.instrucciones_verificacion && (
-                      <div
-                        style={{
-                          marginTop: 10,
-                          padding: "0.75rem 0.9rem",
-                          background: "var(--bg-sunken)",
-                          borderRadius: 8,
-                          fontSize: 13,
-                        }}
-                      >
-                        <p style={{ marginBottom: 8, color: "var(--text-secondary)" }}>
-                          Demuestra que controlas <strong>{a.valor}</strong> con uno de estos dos métodos, luego
-                          confirma abajo.
-                        </p>
-                        <p style={{ marginBottom: 4 }}>
-                          <strong>Opción 1 — registro DNS TXT:</strong>
-                        </p>
-                        <p style={{ fontFamily: "var(--font-mono)", fontSize: 12, marginBottom: 8, wordBreak: "break-all" }}>
-                          Nombre: {a.instrucciones_verificacion.dns_txt.registro}
-                          <br />
-                          Valor: {a.instrucciones_verificacion.dns_txt.valor}
-                        </p>
-                        <p style={{ marginBottom: 4 }}>
-                          <strong>Opción 2 — archivo bien-conocido:</strong>
-                        </p>
-                        <p style={{ fontFamily: "var(--font-mono)", fontSize: 12, marginBottom: 10, wordBreak: "break-all" }}>
-                          URL: {a.instrucciones_verificacion.http_file.url}
-                          <br />
-                          Contenido: {a.instrucciones_verificacion.http_file.contenido}
-                        </p>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          <select
-                            value={metodoElegido[a.id] ?? "dns_txt"}
-                            onChange={(e) =>
-                              setMetodoElegido((prev) => ({ ...prev, [a.id]: e.target.value as "dns_txt" | "http_file" }))
-                            }
-                          >
-                            <option value="dns_txt">Ya publiqué el TXT</option>
-                            <option value="http_file">Ya publiqué el archivo</option>
-                          </select>
-                          <button onClick={() => comprobarVerificacion(a.id)} disabled={assetVerificando === a.id}>
-                            {assetVerificando === a.id ? "Comprobando…" : "Comprobar ahora"}
-                          </button>
-                        </div>
-                      </div>
-                    )}
                   </div>
                 );
               })}
             </div>
-            <form onSubmit={agregarDominio} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <form ref={formAutorizacionRef} onSubmit={agregarDominio} style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input
                 value={nuevoDominio}
                 onChange={(e) => setNuevoDominio(e.target.value)}
@@ -667,6 +631,22 @@ export default function Dashboard() {
               </button>
               <button onClick={() => descargarCumplimiento("docx")} disabled={descargando === "cumplimiento-docx"}>
                 {descargando === "cumplimiento-docx" ? "Generando…" : "Descargar DOCX"}
+              </button>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: "1.25rem" }}>
+            <h2 style={{ fontSize: 17, marginBottom: 4 }}>Export ejecutivo</h2>
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12 }}>
+              Postura consolidada de todos tus activos (hallazgos abiertos por severidad) más los
+              KPIs de remediación (MTTR, % dentro de SLA) en un solo documento.
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => descargarEjecutivo("pdf")} disabled={descargando === "ejecutivo-pdf"}>
+                {descargando === "ejecutivo-pdf" ? "Generando…" : "Descargar PDF"}
+              </button>
+              <button onClick={() => descargarEjecutivo("docx")} disabled={descargando === "ejecutivo-docx"}>
+                {descargando === "ejecutivo-docx" ? "Generando…" : "Descargar DOCX"}
               </button>
             </div>
           </div>
@@ -864,6 +844,15 @@ export default function Dashboard() {
       )}
 
       <FindingDetailPanel findingId={findingIdAbierto} onClose={() => setFindingIdAbierto(null)} />
+
+      {wizardAsset && (
+        <OnboardingWizard
+          asset={wizardAsset}
+          onClose={() => setWizardAsset(null)}
+          onVerificado={cargarTodo}
+          onIrAEscanear={irAEscanear}
+        />
+      )}
     </div>
   );
 }

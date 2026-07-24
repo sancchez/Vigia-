@@ -107,6 +107,83 @@ def markdown_to_pdf_bytes(markdown_text: str, titulo: str = "Reporte") -> bytes:
     return bytes(pdf.output())
 
 
+_SEVERIDADES_ORDEN: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
+_SEVERIDAD_LABEL = {
+    "critical": "Críticos",
+    "high": "Altos",
+    "medium": "Medios",
+    "low": "Bajos",
+    "info": "Info",
+}
+
+
+def construir_markdown_ejecutivo(
+    *,
+    tenant_nombre: str,
+    assets: list[dict],
+    postura_por_activo: dict[str, dict[str, int]],
+    kpis: dict,
+    generado_en: str,
+) -> str:
+    """Compone el markdown consolidado multi-activo del export ejecutivo
+    (Fase 6c, `openspec/changes/fase6-endurecimiento-produccion`).
+
+    No recalcula nada: `kpis` viene tal cual de `_kpis_de_tenant` (la misma
+    capa que sirve `GET /kpis`, ver design.md Decisión 6c.2 -- "reusar el
+    renderer") y `postura_por_activo` de `_postura_abierta_por_activo` en
+    `api/main.py`. Este módulo solo da formato -- vive junto a
+    `markdown_to_pdf_bytes`/`markdown_to_docx_bytes` porque es
+    formato/infra, no un prompt de razonamiento (no toca
+    `vigia_core_private/`).
+
+    `assets` es una lista de filas crudas de la tabla `assets` (dicts con al
+    menos `id`, `tipo`, `valor`, `verificado`, `autorizacion_activa`).
+    """
+    lineas: list[str] = []
+    lineas.append("# Reporte Ejecutivo — Vigia")
+    lineas.append("")
+    lineas.append(f"**Tenant:** {tenant_nombre}")
+    lineas.append(f"**Generado:** {generado_en}")
+    lineas.append(f"**Activos incluidos:** {len(assets)}")
+    lineas.append("")
+    lineas.append("## KPIs de remediación")
+    lineas.append("")
+    pct_sla = kpis.get("porcentaje_dentro_sla")
+    lineas.append(
+        f"- **% de hallazgos abiertos dentro de SLA:** "
+        f"{pct_sla if pct_sla is not None else 'sin hallazgos abiertos'}"
+        + ("%" if pct_sla is not None else "")
+    )
+    lineas.append("- **MTTR por severidad (días):**")
+    mttr_por_sev = {m["severidad"]: m for m in kpis.get("mttr_por_severidad", [])}
+    for sev in _SEVERIDADES_ORDEN:
+        m = mttr_por_sev.get(sev)
+        valor = m["mttr_dias"] if m and m.get("mttr_dias") is not None else "sin cierres"
+        lineas.append(f"  - {_SEVERIDAD_LABEL[sev]}: {valor}")
+    lineas.append("")
+    lineas.append("## Postura por activo")
+    lineas.append("")
+    if not assets:
+        lineas.append("Todavía no hay activos registrados para este tenant.")
+    for asset in assets:
+        estado_verif = "verificado" if asset.get("verificado") else "sin verificar"
+        estado_autor = "autorizado para escaneo activo" if asset.get("autorizacion_activa") else "solo escaneo pasivo"
+        lineas.append(f"### {asset.get('valor')} ({asset.get('tipo')})")
+        lineas.append(f"- Estado: {estado_verif}, {estado_autor}")
+        conteo = postura_por_activo.get(asset.get("id"), {sev: 0 for sev in _SEVERIDADES_ORDEN})
+        total = sum(conteo.values())
+        if total == 0:
+            lineas.append("- Sin hallazgos abiertos.")
+        else:
+            for sev in _SEVERIDADES_ORDEN:
+                n = conteo.get(sev, 0)
+                if n:
+                    lineas.append(f"- {_SEVERIDAD_LABEL[sev]}: {n}")
+        lineas.append("")
+
+    return "\n".join(lineas)
+
+
 def _add_runs(paragraph, text: str) -> None:
     """Agrega texto a un párrafo de python-docx, respetando **negrita** como runs separados."""
     pos = 0
