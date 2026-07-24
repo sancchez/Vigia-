@@ -541,22 +541,26 @@ def run_single_target_verification(
     que pudiera estar corriendo en paralelo sobre el mismo `scan_id`) y lo
     limpia siempre en `finally`.
 
-    **Sobre `access_url()` antes del `ascan`, y el porqué (Open Question #3
-    de design.md de ese change):** esta sesión de `sdd-apply` NO pudo
-    confirmarlo en vivo -- el entorno sandbox tiene el CLI de Docker
-    instalado pero el daemon de Docker Desktop no estaba corriendo
-    (`docker ps` devolvió "cannot connect to the Docker API"), así que no
-    hubo forma de levantar un contenedor ZAP real en esta sesión para
-    probar `ascan(recurse=False)` contra una URL nunca visitada por un
-    spider. Decisión tomada con el mejor entendimiento disponible leyendo
-    el código de este módulo (no se degradó a "no soportado"): se llama
-    `access_url()` incondicionalmente antes de `ascan_start(recurse=False)`
-    -- una sola llamada HTTP a la propia API de ZAP, barata, y sin efecto
-    negativo si el nodo ya estaba registrado. Si una sesión futura SÍ
-    levanta Docker Desktop y confirma que este registro previo es innecesario
-    (o insuficiente), este comentario y la llamada deben actualizarse con el
-    resultado real -- no se debe asumir "confirmado" a partir de este
-    comentario.
+    **Sobre `access_url()` antes del `ascan` (Open Question #3 de design.md
+    de ese change) -- CONFIRMADO EN VIVO en una sesión posterior con Docker
+    Desktop real:** `access_url()` NO es una mitigación opcional, es un
+    requisito duro. Se confirmó llamando `ascan_start(recurse=False)`
+    directo sobre una URL que el daemon jamás había visitado: la API de ZAP
+    respondió de inmediato `{"code":"url_not_found","message":"URL Not
+    Found in the Scan Tree"}`, sin siquiera arrancar un `scanId`. Después de
+    `access_url()` sobre esa misma URL (confirmado que queda registrada en
+    el Sites tree vía `/JSON/core/view/urls/`), el mismo `ascan_start(
+    recurse=False)` sí devuelve un `scanId` válido. Como el daemon de
+    `run_single_target_verification` siempre es efímero y recién arrancado
+    (nunca vio el endpoint antes), este NO es un caso raro -- es el caso
+    normal en producción. También se confirmó que `recurse=False` escanea
+    únicamente el nodo exacto (comparado el Sites/URL tree antes/después:
+    solo aparecen los nodos visitados explícitamente, nunca el resto del
+    sitio) y que la verificación puntual completa en decenas de segundos de
+    `ascan` (~65-70s en Juice Shop real), muy por debajo de los 20-35
+    minutos de un escaneo activo completo. Ver design.md, Open Question #3,
+    para el detalle completo y el bug real de `reaparece` que esa misma
+    corrida en vivo destapó (corregido en `api/main.py`).
 
     Raises:
         ToolNotInstalledError: si `docker` no está en PATH.

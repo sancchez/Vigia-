@@ -226,29 +226,71 @@ código).
    es un widget standalone nuevo (`KpiWidget.tsx` + sección propia en
    `Dashboard.tsx`, mismo patrón de card que el resto de la página) — no
    bloquea la entrega de este change.
-3. **Incertidumbre real sobre ZAP -- resultado de la sesión de `sdd-apply`**:
-   el plan (task 1.1 de tasks.md) era levantar Juice Shop + un daemon ZAP
-   real y confirmar en vivo si `ascan(recurse=False)` funciona sobre una
-   URL nunca visitada por el spider. **No se pudo ejecutar ese spike**: el
-   entorno sandbox de esta sesión tiene el CLI de Docker instalado
-   (`docker --version` responde) pero el daemon de Docker Desktop no
-   estaba corriendo (`docker ps` devolvió `error during connect ... the
-   system cannot find the file specified` contra el pipe de Docker
-   Desktop) -- no hay forma de levantar un contenedor real en este entorno.
-   Decisión tomada con el mejor entendimiento disponible, leyendo el código
-   de `tools/zap_api.py` (no se degradó a "no soportado" ni se dejó la
-   pregunta abierta en silencio): `run_single_target_verification` llama
-   `access_url(base_url, endpoint_url)` -- la acción real
-   `/JSON/core/action/accessUrl/` de la API de ZAP, que le pide al propio
-   ZAP que visite la URL y la registre en su Sites tree -- **antes**,
-   siempre, de `ascan_start(recurse=False)`. Es la misma mitigación barata
-   que ya preveía este documento, aplicada por defecto en vez de
-   condicionada a un spike que no se pudo correr: una sola llamada HTTP más
-   a la propia API de ZAP, sin costo si el registro no hacía falta. Si una
-   sesión futura SÍ levanta Docker Desktop y confirma que esto era
-   innecesario (o insuficiente), debe actualizar este párrafo y el
-   docstring de `run_single_target_verification` con el resultado real --
-   no asumir "confirmado" a partir de este texto.
+3. **CONFIRMADO EN VIVO (sesión posterior, Docker Desktop real disponible)**:
+   se levantó Juice Shop real (`eval/docker-compose.yml`,
+   `docker compose up -d` desde `eval/`) + un daemon ZAP real
+   (`ghcr.io/zaproxy/zaproxy:stable`, mismo mecanismo que
+   `tools/zap_api.py::start_daemon`) y se ejercitó el spike que la sesión
+   anterior no pudo correr. Resultado, con evidencia real de la API de ZAP:
+
+   - **`access_url()` antes de `ascan(recurse=False)` NO es una mitigación
+     barata "por si acaso" -- es un requisito duro.** Se confirmó llamando
+     `ascan_start(recurse=False)` directo sobre una URL que el daemon
+     jamás había visitado (sin `access_url()` previo): la API de ZAP
+     respondió inmediatamente `{"code":"url_not_found","message":"URL Not
+     Found in the Scan Tree"}` -- ni siquiera arranca un `scanId`. Después
+     de llamar `access_url()` sobre esa misma URL (queda en el Sites tree,
+     confirmado con `/JSON/core/view/urls/`), el mismo `ascan_start(recurse=
+     False)` sí devuelve un `scanId` válido y progresa normalmente. Sin
+     `access_url()` previo, `run_single_target_verification` fallaría
+     SIEMPRE para el caso real de uso (un finding cuyo endpoint el daemon
+     efímero recién arrancado nunca visitó) -- no es un caso raro, es EL
+     caso normal. La llamada ya estaba en el código; queda confirmado que
+     debe seguir ahí, incondicional, y no se debe quitar nunca ni hacerla
+     condicional a un flag.
+   - **`ascan(recurse=False)` sí escanea únicamente el endpoint exacto, no
+     recorre el resto del sitio.** Confirmado comparando el Sites/URL tree
+     de ZAP antes y después del escaneo: solo aparecen los nodos
+     explícitamente visitados vía `access_url()` (ej. 6 URLs para 2
+     endpoints registrados a mano), nunca los ~decenas de endpoints reales
+     de Juice Shop que un spider real habría descubierto. El escaneo activo
+     puntual de un solo endpoint completó en ~65-70s de fase `ascan` (más
+     ~75-100s de arranque en frío del daemon, el mismo costo ya documentado
+     en `tools/zap_api.py` y que no depende de este cambio) -- muy por
+     debajo de los 20-35 minutos que ya documentaba ese mismo archivo para
+     un escaneo activo completo con spider + AJAX spider + ascan recursivo
+     sobre el sitio entero.
+   - **La transición de estado (`verificado` -> `cerrado`) sí se refleja
+     correctamente en `estado`/`finding_transiciones`** cuando el
+     re-escaneo puntual no encuentra la alerta original -- confirmado tanto
+     con los tests mockeados existentes como con una corrida real end-to-
+     end de `POST /findings/{id}/verificar-cierre` contra Juice Shop real
+     (sin mockear `run_single_target_verification`).
+   - **Bug real encontrado durante esa corrida end-to-end (no visible con
+     mocks, corregido en esta sesión):** `verificar_cierre_finding`
+     calculaba `reaparece = len(alertas) > 0` sobre TODAS las alertas del
+     endpoint, no solo la que originó el finding. Juice Shop (como
+     cualquier sitio servido por HTTP sin TLS) dispara casi siempre alertas
+     pasivas genéricas de ZAP ("HTTP Only Site", "Cross-Domain
+     Misconfiguration") que nunca desaparecen -- con la lógica anterior,
+     NINGÚN finding de origen ZAP sobre un target HTTP podía cerrarse
+     automáticamente jamás, sin importar si su vulnerabilidad específica
+     (ej. la SQL Injection real que Juice Shop expone en
+     `/rest/products/search?q=`) ya se había arreglado. Corregido con
+     `_alertas_que_coinciden_con_finding()`/`_nombre_de_alerta()` en
+     `api/main.py`: filtra las alertas del re-escaneo a las que coinciden
+     con `finding.tipo` (mismo valor que ya usa
+     `_registrar_findings_con_ciclo_de_vida` para identificar un hallazgo
+     por `(tipo, endpoint)`) antes de decidir `reaparece`. Confirmado en
+     vivo contra Juice Shop real con dos findings sobre el mismo endpoint
+     (`tipo='SQL Injection'`, que sigue reproduciendo de verdad → sin
+     cambios; `tipo='Path Traversal'`, que NO coincide con ninguna alerta
+     real presente → cierra automáticamente pese a que el endpoint sigue
+     con las alertas CORS/HTTP-only). Regresión cubierta en
+     `tests/test_verificar_cierre.py`
+     (`test_zap_alertas_no_relacionadas_no_bloquean_cierre`,
+     `test_zap_alerta_coincidente_entre_otras_no_relacionadas_reaparece_true`,
+     `test_zap_tipo_desconocido_degrada_a_cualquier_alerta_cuenta`).
 4. **Hallazgos semgrep/trivy/grype**: quedan explícitamente fuera del
    re-escaneo automático de cierre (422 documentado) — no es un bug ni un
    TODO, es una limitación de dominio (código/imagen no tiene un

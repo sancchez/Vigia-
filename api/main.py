@@ -1028,6 +1028,44 @@ def _herramienta_de_finding(raw_json: str | None) -> str:
 _HERRAMIENTAS_SIN_ENDPOINT_REESCANEABLE = ("semgrep", "trivy", "grype")
 
 
+def _nombre_de_alerta(alerta: dict) -> str:
+    """Extrae el nombre/tipo de una alerta cruda de re-escaneo, tolerante al
+    formato -- ZAP (`get_alerts()`) trae `name`/`alert` en el nivel
+    superior; Nuclei (`run_nuclei().findings`) trae el nombre de la
+    plantilla bajo `info.name`. Nunca lanza -- degrada a cadena vacía si no
+    se reconoce ningún campo."""
+    if not isinstance(alerta, dict):
+        return ""
+    nombre = alerta.get("name") or alerta.get("alert")
+    if not nombre:
+        info = alerta.get("info")
+        if isinstance(info, dict):
+            nombre = info.get("name")
+    return str(nombre or "").strip().lower()
+
+
+def _alertas_que_coinciden_con_finding(alertas: list[dict], tipo_finding: str) -> list[dict]:
+    """Filtra las alertas de un re-escaneo puntual a solo las que coinciden
+    con `finding.tipo` -- el mismo valor que `_registrar_findings_con_ciclo_
+    de_vida` usa para identificar un hallazgo por `(tipo, endpoint)` (ver
+    ese helper, y `_correr_escaneo_activo_en_background` que puebla `tipo`
+    con `alerta.get("name")` para hallazgos de origen ZAP).
+
+    Existe porque un re-escaneo puntual de un endpoint puede legítimamente
+    devolver alertas que NO tienen nada que ver con el finding que se está
+    verificando (ej. un endpoint HTTP casi siempre dispara la alerta pasiva
+    de ZAP "HTTP Only Site" sin importar qué se arregló) -- contar
+    cualquier alerta como "reaparece" bloquearía el cierre automático para
+    siempre en esos casos. Si `tipo_finding` viene vacío o "desconocido"
+    (no hay con qué comparar de forma confiable), degrada al comportamiento
+    anterior -- cualquier alerta cuenta -- en vez de fallar silenciosamente
+    tratando todo como "no reaparece"."""
+    tipo_normalizado = (tipo_finding or "").strip().lower()
+    if not tipo_normalizado or tipo_normalizado == "desconocido":
+        return list(alertas)
+    return [a for a in alertas if _nombre_de_alerta(a) == tipo_normalizado]
+
+
 def _registrar_transicion_verificacion(
     conn, finding_id: str, tenant_id: str, changed_by: str, estado_anterior: str, estado_nuevo: str, nota: str, now: str
 ) -> None:
@@ -1126,7 +1164,22 @@ def verificar_cierre_finding(
             detail=f"No se pudo re-escanear el endpoint para verificar el cierre: {exc}",
         )
 
-    reaparece = len(alertas) > 0
+    # Bug real encontrado corriendo esta verificación en vivo contra ZAP +
+    # Juice Shop real (no visible con los mocks existentes, que nunca
+    # devolvían más de una alerta a la vez): `get_alerts()`/`run_nuclei()`
+    # devuelven TODAS las alertas presentes en ese endpoint, no solo la que
+    # originó este finding. Un endpoint sobre HTTP (no HTTPS) casi siempre
+    # tiene alertas pasivas genéricas de ZAP ("HTTP Only Site",
+    # "Cross-Domain Misconfiguration") que nunca desaparecen -- si
+    # `reaparece` se calculaba como "hay alguna alerta" (`len(alertas) > 0`),
+    # NINGÚN finding de origen ZAP sobre un target HTTP podía cerrarse jamás
+    # de forma automática, sin importar si la vulnerabilidad específica de
+    # ESE finding ya se arregló. Se filtra a las alertas cuyo nombre
+    # coincide con `finding["tipo"]` (mismo valor que ya usa
+    # `_registrar_findings_con_ciclo_de_vida` para identificar un hallazgo
+    # por `(tipo, endpoint)`) antes de decidir si reaparece.
+    alertas_coincidentes = _alertas_que_coinciden_con_finding(alertas, finding["tipo"])
+    reaparece = len(alertas_coincidentes) > 0
     now = datetime.now(timezone.utc).isoformat()
 
     if not reaparece:
@@ -1159,8 +1212,12 @@ def verificar_cierre_finding(
 
     # Reaparece: refresca `estado_verificacion`/`cves_detectados`/
     # `evidencia_exploitdb` dentro de raw_json con la alerta encontrada
-    # ahora, sin tocar `estado` (task 2.4 de tasks.md).
-    verificado = verificar_un_hallazgo(alertas[0])
+    # ahora, sin tocar `estado` (task 2.4 de tasks.md). Usa
+    # `alertas_coincidentes[0]` (no `alertas[0]`) -- de lo contrario, si el
+    # endpoint tiene además otras alertas no relacionadas, se podría
+    # refrescar el finding con evidencia de una vulnerabilidad distinta a
+    # la que este finding representa.
+    verificado = verificar_un_hallazgo(alertas_coincidentes[0])
     try:
         data = json.loads(finding.get("raw_json") or "{}")
         if not isinstance(data, dict):

@@ -42,6 +42,7 @@ def _sembrar_finding(
     estado: str = "mitigado",
     endpoint: str = "http://x.test/login",
     raw_json: dict | None = None,
+    tipo: str = "xss",
 ) -> str:
     conn = get_conn()
     try:
@@ -54,8 +55,8 @@ def _sembrar_finding(
         )
         conn.execute(
             "INSERT INTO findings (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json, estado) "
-            "VALUES (?, ?, ?, 'xss', 'high', ?, 0, ?, ?)",
-            (finding_id, scan_id, tenant_id, endpoint, json.dumps(raw_json or {}), estado),
+            "VALUES (?, ?, ?, ?, 'high', ?, 0, ?, ?)",
+            (finding_id, scan_id, tenant_id, tipo, endpoint, json.dumps(raw_json or {}), estado),
         )
         conn.commit()
     finally:
@@ -179,14 +180,14 @@ def test_zap_alertas_planas_sin_wrapper_no_reaparece_cierra(client, monkeypatch)
 def test_hallazgo_persiste_reaparece_true_y_estado_no_cambia(client, monkeypatch):
     token, tenant_id = _registrar_tenant(client, "Tenant Verif C", "verifc@verif.test")
     finding_id = _sembrar_finding(
-        tenant_id, estado="mitigado", raw_json={"herramienta": "nuclei", "raw": {}}
+        tenant_id, estado="mitigado", raw_json={"herramienta": "nuclei", "raw": {}}, tipo="xss"
     )
 
     monkeypatch.setattr(
         api_main,
         "run_nuclei",
         lambda target: ScanResult(
-            target=target, tool="nuclei", findings=[{"info": {"description": "sigue ahí"}}]
+            target=target, tool="nuclei", findings=[{"info": {"name": "xss", "description": "sigue ahí"}}]
         ),
     )
 
@@ -205,6 +206,122 @@ def test_hallazgo_persiste_reaparece_true_y_estado_no_cambia(client, monkeypatch
     raw = json.loads(fila["raw_json"])
     assert "estado_verificacion" in raw
     assert _transiciones_de(finding_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Regresión: alertas NO relacionadas en el endpoint no deben bloquear ni
+# disparar el cierre automático -- bug real encontrado corriendo esta
+# verificación en vivo contra ZAP + Juice Shop real (ver design.md, Open
+# Question #3 actualizada). Un endpoint sobre HTTP casi siempre acumula
+# alertas pasivas genéricas de ZAP ("HTTP Only Site", "Cross-Domain
+# Misconfiguration") que nunca desaparecen -- antes de este fix,
+# `reaparece = len(alertas) > 0` contaba esas alertas ajenas y el hallazgo
+# jamás podía cerrarse automáticamente, sin importar si SU vulnerabilidad
+# específica ya se había arreglado.
+# ---------------------------------------------------------------------------
+
+
+def test_zap_alertas_no_relacionadas_no_bloquean_cierre(client, monkeypatch):
+    """El endpoint sigue teniendo alertas de ZAP (ej. 'HTTP Only Site'), pero
+    NINGUNA coincide con el `tipo` del finding original ('SQL Injection') --
+    debe tratarse como cerrado, no como 'sigue reproduciendo'."""
+    token, tenant_id = _registrar_tenant(client, "Tenant Verif I", "verifi@verif.test")
+    finding_id = _sembrar_finding(
+        tenant_id, estado="mitigado", raw_json={"description": "SQLi"}, tipo="SQL Injection"
+    )
+
+    monkeypatch.setattr(
+        api_main,
+        "run_single_target_verification",
+        lambda **kwargs: ZapCheckpointedResult(
+            target=kwargs["endpoint_url"],
+            findings=[
+                {"name": "HTTP Only Site", "risk": "Medium"},
+                {"name": "Cross-Domain Misconfiguration", "risk": "Medium"},
+            ],
+        ),
+    )
+
+    resp = client.post(
+        f"/findings/{finding_id}/verificar-cierre", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["estado"] == "cerrado"
+    assert data["reaparece"] is False
+
+    fila = _finding_row(finding_id)
+    assert fila["estado"] == "cerrado"
+    # `_transiciones_de` ordena por `id` (un UUID4 aleatorio, no por orden de
+    # inserción) -- indexar por `estado_nuevo` en vez de por posición
+    # (`transiciones[-1]`) evita depender de un orden que no está
+    # garantizado (mismo patrón que ya usa
+    # test_nuclei_no_reaparece_cierra_automaticamente_y_registra_transiciones).
+    transiciones = _transiciones_de(finding_id)
+    assert len(transiciones) == 2
+    por_nuevo = {t["estado_nuevo"]: t for t in transiciones}
+    assert por_nuevo["verificado"]["estado_anterior"] == "mitigado"
+    assert por_nuevo["cerrado"]["estado_anterior"] == "verificado"
+
+
+def test_zap_alerta_coincidente_entre_otras_no_relacionadas_reaparece_true(client, monkeypatch):
+    """La alerta original SÍ sigue presente, mezclada con otras no
+    relacionadas -- debe seguir reportando `reaparece=True` y estado sin
+    cambios (comportamiento correcto, no debe romperse por el filtro nuevo)."""
+    token, tenant_id = _registrar_tenant(client, "Tenant Verif J", "verifj@verif.test")
+    finding_id = _sembrar_finding(
+        tenant_id, estado="mitigado", raw_json={"description": "SQLi"}, tipo="SQL Injection"
+    )
+
+    monkeypatch.setattr(
+        api_main,
+        "run_single_target_verification",
+        lambda **kwargs: ZapCheckpointedResult(
+            target=kwargs["endpoint_url"],
+            findings=[
+                {"name": "HTTP Only Site", "risk": "Medium"},
+                {"name": "SQL Injection", "risk": "High"},
+            ],
+        ),
+    )
+
+    resp = client.post(
+        f"/findings/{finding_id}/verificar-cierre", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["estado"] == "mitigado"
+    assert data["reaparece"] is True
+    assert _finding_row(finding_id)["estado"] == "mitigado"
+    assert _transiciones_de(finding_id) == []
+
+
+def test_zap_tipo_desconocido_degrada_a_cualquier_alerta_cuenta(client, monkeypatch):
+    """Si `finding.tipo` es 'desconocido' (no hay con qué comparar de forma
+    confiable), degrada al comportamiento anterior -- cualquier alerta en el
+    endpoint cuenta como 'reaparece' -- en vez de asumir en silencio que no
+    reaparece."""
+    token, tenant_id = _registrar_tenant(client, "Tenant Verif K", "verifk@verif.test")
+    finding_id = _sembrar_finding(
+        tenant_id, estado="mitigado", raw_json={"description": "?"}, tipo="desconocido"
+    )
+
+    monkeypatch.setattr(
+        api_main,
+        "run_single_target_verification",
+        lambda **kwargs: ZapCheckpointedResult(
+            target=kwargs["endpoint_url"],
+            findings=[{"name": "HTTP Only Site", "risk": "Medium"}],
+        ),
+    )
+
+    resp = client.post(
+        f"/findings/{finding_id}/verificar-cierre", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["reaparece"] is True
+    assert data["estado"] == "mitigado"
 
 
 # ---------------------------------------------------------------------------
