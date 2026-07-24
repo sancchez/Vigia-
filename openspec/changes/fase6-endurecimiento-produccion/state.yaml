@@ -8,7 +8,7 @@ dag:
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        partial   # solo bloque 6a aplicado -- ver nota
+  apply:        partial   # 6a y 6c aplicados y mergeados a main; 6b sigue GATED
   verify:       pending
   archive:      pending
 notes: >
@@ -19,34 +19,57 @@ notes: >
   fase6c-onboarding-y-export. spec/design/tasks vienen organizados por esos 3
   bloques.
 
-  ESTADO REAL TRAS ESTA RONDA (worktree agent-a39bce5eb88f88423, aplicado
-  sobre main con Fases 0-2c ya mergeadas -- el worktree arrancó apuntando a un
-  commit viejo sin esas fases, se corrigió con `git reset --hard main` antes
-  de implementar):
+  ESTADO REAL TRAS ESTAS DOS RONDAS (worktrees agent-a39bce5eb88f88423 para 6a
+  y agent-abe5dd536e258c700 para 6c, ambos aplicados sobre main con Fases
+  0-2c ya mergeadas, y luego mergeados a main por el orquestador resolviendo
+  conflictos en api/main.py y frontend/src/pages/Dashboard.tsx):
 
-  - Bloque 6a (fase6a-operacion-produccion): APLICADO. Ver tasks.md, sección
-    "Grupo 6a" -- todos los checkboxes marcados. Resumen: tabla `llm_usage` +
-    columnas `assets.scan_frequency_hours`/`scan_paused` (migración
-    idempotente SQLite/Postgres, mismo patrón db/connection.py de Fase 0);
-    `agents/_llm.py` registra costo vía ContextVar (`set_llm_context`) sin
-    tocar la firma de `call_claude` ni los 7 call sites; `GET /costos`;
-    `api/scheduler.py::run_scan_cycle_once` rama activo/pasivo por
-    `autorizacion_activa` persistida (nunca un booleano de request), respeta
-    `scan_paused`/`scan_frequency_hours`; `PUT /assets/{id}/schedule`;
-    UI de frecuencia/pausa por activo + widget de costo en Dashboard.tsx.
-    Tests nuevos: test_fase6a_migration.py, test_llm_usage_tracking.py,
-    test_scheduler_fase6a.py (17 tests, todos verdes). Suite completa:
-    209 passed, 1 skipped (Postgres opcional), `npm run build` limpio.
+  - Bloque 6a (fase6a-operacion-produccion): APLICADO Y MERGEADO. Ver
+    tasks.md, sección "Grupo 6a" -- todos los checkboxes marcados. Resumen:
+    tabla `llm_usage` + columnas `assets.scan_frequency_hours`/`scan_paused`
+    (migración idempotente SQLite/Postgres, mismo patrón db/connection.py de
+    Fase 0); `agents/_llm.py` registra costo vía ContextVar
+    (`set_llm_context`) sin tocar la firma de `call_claude` ni los 7 call
+    sites; `GET /costos`; `api/scheduler.py::run_scan_cycle_once` rama
+    activo/pasivo por `autorizacion_activa` persistida (nunca un booleano de
+    request), respeta `scan_paused`/`scan_frequency_hours`;
+    `PUT /assets/{id}/schedule`; UI de frecuencia/pausa por activo + widget
+    de costo en Dashboard.tsx. Tests nuevos: test_fase6a_migration.py,
+    test_llm_usage_tracking.py, test_scheduler_fase6a.py (17 tests, todos
+    verdes).
 
   - Bloque 6b (fase6b-billing-wompi): NO APLICADO -- sigue GATED, fuera de
-    alcance de esta ronda por instrucción explícita. Ningún archivo de
+    alcance por instrucción explícita. Ningún archivo de
     checkout/webhook/billing se tocó.
 
-  - Bloque 6c (fase6c-onboarding-y-export): NO APLICADO en esta ronda --
-    corresponde a otro agente en paralelo (mismo commit base). Ningún archivo
-    de onboarding/export ejecutivo se tocó desde este worktree.
+  - Bloque 6c (fase6c-onboarding-y-export): APLICADO Y MERGEADO (tasks.md
+    6c.1-6c.3):
+    - 6c.1.1: wizard de onboarding de verificación de dominio en el frontend
+      (`frontend/src/components/OnboardingWizard.tsx`), consumiendo
+      `GET /assets` (`instrucciones_verificacion`) y `POST /assets/{id}/verify`
+      -- sin reimplementar la lógica de verificación (ya vive en
+      `tools/asset_verification.py`). Reemplaza el bloque inline que había en
+      `Dashboard.tsx`, coexistiendo con los controles de frecuencia/pausa de
+      6a en la misma fila de activo. Encadena a "autorizar escaneo activo"
+      (scroll al checkbox de autorización existente, no hay endpoint nuevo de
+      autorización -- eso es 6a).
+    - 6c.1.2: NO se implementó `GET /onboarding/estado` -- el frontend deriva
+      todo de `GET /assets` (decisión tomada en tasks.md, "decidir si aporta").
+    - 6c.2.1/6c.2.2/6c.2.3: `GET /reports/ejecutivo/download?formato=pdf|docx`
+      en `api/main.py` (markdown consolidado multi-activo: postura de
+      hallazgos abiertos por activo + KPIs vía `_kpis_de_tenant`, la MISMA
+      capa que `GET /kpis`, no recalculada en paralelo -- `_kpis_de_tenant`
+      es la extracción de la lógica que antes vivía inline en `obtener_kpis`
+      desde Fase 2c). Helper de composición `construir_markdown_ejecutivo` en
+      `tools/report_export.py` (no en `vigia_core_private/`). Botón "Export
+      ejecutivo" + `api.downloadEjecutivo` en el frontend
+      (`Dashboard.tsx`/`api.ts`).
+    - 6c.3.1: `tests/test_reporte_ejecutivo.py` (PDF/DOCX no vacío con varios
+      activos, formato inválido -> 422, sin auth -> 401, aislamiento por
+      tenant).
+    - 6c.3.2: recorrido manual del wizard NO ejecutado -- queda pendiente de
+      una verificación manual/UI posterior.
 
-  Fase 6 no toca vigia_core_private/ (confirmado, 100% infra/UI). El
-  orquestador debe secuenciar el merge de 6a con los changes hermanos que
-  también tocan api/main.py/frontend (fase3a/3b/3e/4/5 y el propio 6c) para
-  evitar conflictos.
+  Fase 6 no toca vigia_core_private/ (confirmado, 100% infra/UI) en ninguno
+  de los dos bloques aplicados. Suite completa tras mergear 6a+6c: ver
+  commits del orquestador para el conteo de tests exacto post-merge.

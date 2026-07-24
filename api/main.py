@@ -73,7 +73,11 @@ from tools.asset_verification import (
     verificar_asset,
 )
 from tools.dmarc import DmarcParseError, aggregate_senders, parse_aggregate_report
-from tools.report_export import markdown_to_docx_bytes, markdown_to_pdf_bytes
+from tools.report_export import (
+    construir_markdown_ejecutivo,
+    markdown_to_docx_bytes,
+    markdown_to_pdf_bytes,
+)
 from tools.scan import run_nuclei
 from tools.zap_api import run_checkpointed_active_scan, run_single_target_verification
 from urllib.parse import urlparse
@@ -1433,41 +1437,39 @@ def _calcular_tendencia_por_activo(filas: list[dict]) -> list[KpiTendenciaAsset]
     return resultado
 
 
-@app.get("/kpis", response_model=KpiOut)
-def obtener_kpis(user: UserContext = Depends(get_current_user)) -> KpiOut:
-    """KPIs de remediación agregados sobre `findings`/`finding_transiciones`
-    (solo lectura, scoped por tenant, sin ETL ni tabla nueva): MTTR real por
-    severidad, % de hallazgos abiertos dentro de SLA, y tendencia de riesgo
-    por activo a lo largo de sus escaneos. Ver design.md para el porqué del
-    cálculo en Python (portabilidad SQLite/Postgres sin `julianday()`/
-    `EXTRACT`)."""
-    conn = get_conn()
-    try:
-        findings_rows = conn.execute(
-            "SELECT id, severidad, estado, created_at, sla_due_at FROM findings WHERE tenant_id = ?",
-            (user.tenant_id,),
-        ).fetchall()
-        cierres_rows = conn.execute(
-            """
-            SELECT finding_id, MIN(created_at) AS cerrado_en
-            FROM finding_transiciones
-            WHERE tenant_id = ? AND estado_nuevo = 'cerrado'
-            GROUP BY finding_id
-            """,
-            (user.tenant_id,),
-        ).fetchall()
-        tendencia_rows = conn.execute(
-            """
-            SELECT s.asset_id AS asset_id, s.created_at AS scan_fecha, f.severidad AS severidad
-            FROM scans s JOIN findings f ON f.scan_id = s.id
-            WHERE s.tenant_id = ? AND s.asset_id IS NOT NULL
-              AND f.estado NOT IN ('cerrado', 'aceptado_riesgo')
-            ORDER BY s.asset_id, s.created_at
-            """,
-            (user.tenant_id,),
-        ).fetchall()
-    finally:
-        conn.close()
+def _kpis_de_tenant(conn, tenant_id: str) -> KpiOut:
+    """Cálculo real de `KpiOut` para un tenant, dada una conexión ya abierta.
+
+    Extraído de `obtener_kpis` (Fase 2c) para Fase 6c
+    (`fase6c-onboarding-y-export`): el export ejecutivo consolidado
+    (`GET /reports/ejecutivo/download`) reusa esta MISMA capa en vez de
+    recalcular los KPIs en paralelo (ver design.md, Decisión 6c.2,
+    "reusar el renderer" / "no divergir de fase2c") -- una sola conexión
+    abierta por el caller, ambos endpoints comparten el cálculo puro.
+    """
+    findings_rows = conn.execute(
+        "SELECT id, severidad, estado, created_at, sla_due_at FROM findings WHERE tenant_id = ?",
+        (tenant_id,),
+    ).fetchall()
+    cierres_rows = conn.execute(
+        """
+        SELECT finding_id, MIN(created_at) AS cerrado_en
+        FROM finding_transiciones
+        WHERE tenant_id = ? AND estado_nuevo = 'cerrado'
+        GROUP BY finding_id
+        """,
+        (tenant_id,),
+    ).fetchall()
+    tendencia_rows = conn.execute(
+        """
+        SELECT s.asset_id AS asset_id, s.created_at AS scan_fecha, f.severidad AS severidad
+        FROM scans s JOIN findings f ON f.scan_id = s.id
+        WHERE s.tenant_id = ? AND s.asset_id IS NOT NULL
+          AND f.estado NOT IN ('cerrado', 'aceptado_riesgo')
+        ORDER BY s.asset_id, s.created_at
+        """,
+        (tenant_id,),
+    ).fetchall()
 
     findings = [dict_from_row(r) for r in findings_rows]
     cierres = [dict_from_row(r) for r in cierres_rows]
@@ -1704,6 +1706,102 @@ def obtener_costos(user: UserContext = Depends(get_current_user)) -> CostosOut:
         por_scan=por_scan,
         total_costo_estimado=total.get("costo_estimado"),
         total_llamadas=total.get("llamadas") or 0,
+    )
+
+
+@app.get("/kpis", response_model=KpiOut)
+def obtener_kpis(user: UserContext = Depends(get_current_user)) -> KpiOut:
+    """KPIs de remediación agregados sobre `findings`/`finding_transiciones`
+    (solo lectura, scoped por tenant, sin ETL ni tabla nueva): MTTR real por
+    severidad, % de hallazgos abiertos dentro de SLA, y tendencia de riesgo
+    por activo a lo largo de sus escaneos. Ver design.md para el porqué del
+    cálculo en Python (portabilidad SQLite/Postgres sin `julianday()`/
+    `EXTRACT`)."""
+    conn = get_conn()
+    try:
+        return _kpis_de_tenant(conn, user.tenant_id)
+    finally:
+        conn.close()
+
+
+def _postura_abierta_por_activo(conn, tenant_id: str) -> dict[str, dict[str, int]]:
+    """Conteo de hallazgos ABIERTOS (no `cerrado`/`aceptado_riesgo`) por
+    `asset_id`, agregado por severidad -- para el export ejecutivo
+    consolidado (Fase 6c). Mismo JOIN `scans`+`findings` que
+    `_calcular_tendencia_por_activo` usa para la tendencia, pero colapsado a
+    un solo snapshot (no una serie temporal) porque el export es una foto de
+    HOY, no un histórico."""
+    rows = conn.execute(
+        """
+        SELECT s.asset_id AS asset_id, f.severidad AS severidad
+        FROM scans s JOIN findings f ON f.scan_id = s.id
+        WHERE s.tenant_id = ? AND s.asset_id IS NOT NULL
+          AND f.estado NOT IN ('cerrado', 'aceptado_riesgo')
+        """,
+        (tenant_id,),
+    ).fetchall()
+    postura: dict[str, dict[str, int]] = {}
+    for r in rows:
+        d = dict_from_row(r)
+        conteo = postura.setdefault(d["asset_id"], {sev: 0 for sev in SEVERIDADES_KPI})
+        conteo[d["severidad"]] = conteo.get(d["severidad"], 0) + 1
+    return postura
+
+
+@app.get("/reports/ejecutivo/download")
+def reporte_ejecutivo_download(
+    formato: str = "pdf", user: UserContext = Depends(get_current_user)
+) -> Response:
+    """Export ejecutivo consolidado multi-activo (Fase 6c,
+    `fase6c-onboarding-y-export`): por cada activo del tenant, su postura de
+    hallazgos abiertos por severidad, más un encabezado con los KPIs de
+    remediación (`GET /kpis` -- misma capa, `_kpis_de_tenant`, no se
+    recalcula en paralelo). Mismo patrón de descarga que
+    `/reports/cumplimiento/download` y `/scans/{id}/report/download`:
+    markdown compuesto en el servidor, convertido a bytes con
+    `tools/report_export.py` (fpdf2/python-docx, sin binarios de sistema).
+    """
+    if formato not in ("pdf", "docx"):
+        raise HTTPException(status_code=422, detail="formato debe ser 'pdf' o 'docx'")
+
+    conn = get_conn()
+    try:
+        tenant_row = conn.execute(
+            "SELECT name FROM tenants WHERE id = ?", (user.tenant_id,)
+        ).fetchone()
+        asset_rows = conn.execute(
+            "SELECT * FROM assets WHERE tenant_id = ? ORDER BY created_at", (user.tenant_id,)
+        ).fetchall()
+        kpis = _kpis_de_tenant(conn, user.tenant_id)
+        postura = _postura_abierta_por_activo(conn, user.tenant_id)
+    finally:
+        conn.close()
+
+    tenant_nombre = tenant_row["name"] if tenant_row else ""
+    assets = [dict_from_row(r) for r in asset_rows]
+    generado_en = datetime.now(timezone.utc).isoformat()
+    markdown = construir_markdown_ejecutivo(
+        tenant_nombre=tenant_nombre,
+        assets=assets,
+        postura_por_activo=postura,
+        kpis=kpis.model_dump(),
+        generado_en=generado_en,
+    )
+    titulo = "Reporte Ejecutivo — Vigia"
+
+    if formato == "pdf":
+        contenido = markdown_to_pdf_bytes(markdown, titulo)
+        media_type = "application/pdf"
+        filename = "reporte-ejecutivo.pdf"
+    else:
+        contenido = markdown_to_docx_bytes(markdown, titulo)
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = "reporte-ejecutivo.docx"
+
+    return Response(
+        content=contenido,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
