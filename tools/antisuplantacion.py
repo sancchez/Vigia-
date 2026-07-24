@@ -9,7 +9,14 @@ URLs maliciosas usando el nombre/marca del cliente.
 from __future__ import annotations
 
 import json
+import os
+import socket
+import ssl
+import urllib.error
+import urllib.request
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from ._shared import ToolNotInstalledError, ToolResult, require_binary, run_command
 
@@ -279,3 +286,173 @@ def check_safe_browsing(url: str, api_key: str | None = None) -> AntiSuplantacio
         parsed=matches,
     )
     return AntiSuplantacionResult(target=url, tool="safe-browsing-api", findings=matches, raw=raw)
+
+
+# ---------------------------------------------------------------------------
+# Fase 3a (openspec/changes/fase3a-antisuplantacion-y-scoring): scoring
+# transparente 0-4 de infraestructura activa por dominio lookalike, y
+# screenshot best-effort como evidencia de contenido clonado -- ver
+# design.md, sección "Open-core routing" (esto es PÚBLICO: una cuenta plana
+# de 4 señales booleanas, sin pesos ni umbrales calibrados).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InfraScore:
+    """Puntaje transparente 0-4 de infraestructura activa de un dominio lookalike.
+
+    `score = sum([dns_a, mx, ssl, http])` -- cualquiera puede reimplementar
+    esta cuenta leyendo esta línea (ver design.md, tabla "Open-core
+    routing"). Una señal que no responde, o cuya herramienta subyacente no
+    está instalada (ej. `dnspython` para `mx`), cuenta como `False`, nunca
+    rompe el cálculo de las demás señales (spec.md, escenario "Probe MX no
+    disponible degrada, no rompe").
+    """
+
+    dns_a: bool = False
+    mx: bool = False
+    ssl: bool = False
+    http: bool = False
+    ssl_not_before: str | None = None
+    """ISO 8601 UTC del `NotBefore` del certificado SSL del clon, si el
+    handshake tuvo éxito -- insumo del cálculo de MTTD (best-effort) en
+    `api/main.py::obtener_kpis_antisuplantacion`. `None` si `ssl=False` o si
+    el certificado no trae esa fecha."""
+    score: int = 0
+
+
+def _probe_dns_a(dominio: str, timeout: int) -> bool:
+    """True si `dominio` resuelve al menos un registro A (o AAAA vía el
+    mismo `socket.gethostbyname`, que sigue el resolver del sistema)."""
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.gethostbyname(dominio)
+        return True
+    except (socket.gaierror, socket.timeout, OSError):
+        return False
+    finally:
+        socket.setdefaulttimeout(None)
+
+
+def _probe_mx(dominio: str, timeout: int) -> bool:
+    """True si `dominio` tiene al menos un registro MX -- degrada a `False`
+    sin romper si `dnspython` no está instalado (mismo espíritu que
+    `tools/asset_verification.py::verificar_dns_txt`, que sí depende de
+    `dnspython` como requisito duro; acá es opcional porque el resto del
+    scoring debe seguir funcionando sin él)."""
+    try:
+        import dns.resolver
+    except ImportError:
+        return False
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = timeout
+        resolver.lifetime = timeout
+        respuestas = resolver.resolve(dominio, "MX")
+        return len(respuestas) > 0
+    except Exception:  # noqa: BLE001 -- NXDOMAIN/NoAnswer/Timeout/lo que sea: "sin MX", no un 500
+        return False
+
+
+def _probe_ssl(dominio: str, timeout: int) -> tuple[bool, str | None]:
+    """Handshake SSL real a `dominio:443`; si tiene éxito, extrae `NotBefore`.
+
+    `verify_mode=CERT_NONE` a propósito: un dominio clon típicamente usa un
+    certificado de un CA gratuito válido igual, pero lo que importa aquí es
+    "¿responde SSL en absoluto?" (evidencia de infraestructura activa), no
+    validar la cadena de confianza -- un cert autofirmado o de un CA no
+    reconocido igual cuenta como "SSL vivo" para este propósito.
+    """
+    try:
+        contexto = ssl.create_default_context()
+        contexto.check_hostname = False
+        contexto.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((dominio, 443), timeout=timeout) as sock:
+            with contexto.wrap_socket(sock, server_hostname=dominio) as tls:
+                cert = tls.getpeercert()
+        not_before = cert.get("notBefore") if cert else None
+        not_before_iso = None
+        if not_before:
+            try:
+                segundos = ssl.cert_time_to_seconds(not_before)
+                not_before_iso = datetime.fromtimestamp(segundos, tz=timezone.utc).isoformat()
+            except (ValueError, OverflowError, OSError):
+                not_before_iso = None
+        return True, not_before_iso
+    except Exception:  # noqa: BLE001 -- timeout/refused/TLS error: "SSL no vivo", no un 500
+        return False, None
+
+
+def _probe_http(dominio: str, timeout: int) -> bool:
+    """True si el dominio responde a un GET HTTP(S) -- intenta HTTPS primero,
+    luego HTTP plano (mismo patrón de fallback que
+    `tools/asset_verification.py::verificar_http_well_known`). Cualquier
+    respuesta HTTP real (incluido un código de error como 404/500) cuenta
+    como "servidor vivo" -- lo que importa es que algo responda en ese
+    puerto, no el código de estado."""
+    for esquema in ("https", "http"):
+        url = f"{esquema}://{dominio}"
+        try:
+            peticion = urllib.request.Request(url, headers={"User-Agent": "Vigia-BrandProtection/1.0"})
+            urllib.request.urlopen(peticion, timeout=timeout)  # noqa: S310 -- URL del dominio clon detectado, GET pasivo
+            return True
+        except urllib.error.HTTPError:
+            return True  # respondió con un código de error -- igual es un servidor vivo
+        except Exception:  # noqa: BLE001 -- fallo de red esperable, se intenta el otro esquema
+            continue
+    return False
+
+
+def puntuar_infra_lookalike(dominio: str, timeout: int = 10) -> InfraScore:
+    """Cuenta cuántas de {DNS-A, MX, SSL, HTTP} responden para `dominio` -- ver `InfraScore`.
+
+    Cada probe es independiente y nunca lanza (todas degradan a `False` con
+    gracia): un dominio parqueado sin ningún servicio real da `score=0`, un
+    dominio con infraestructura activa completa da `score=4`. Ver spec.md,
+    Domain "Scoring de infraestructura activa".
+    """
+    dns_a = _probe_dns_a(dominio, timeout)
+    mx = _probe_mx(dominio, timeout)
+    ssl_ok, ssl_not_before = _probe_ssl(dominio, timeout)
+    http_ok = _probe_http(dominio, timeout)
+    return InfraScore(
+        dns_a=dns_a,
+        mx=mx,
+        ssl=ssl_ok,
+        http=http_ok,
+        ssl_not_before=ssl_not_before,
+        score=sum([dns_a, mx, ssl_ok, http_ok]),
+    )
+
+
+def capturar_screenshot(url: str, out_dir: str, timeout: int = 20) -> str | None:
+    """Captura un screenshot best-effort de `url` con Playwright/Chromium headless.
+
+    Devuelve la ruta del PNG generado, o `None` si Playwright no está
+    instalado (`ImportError`) o si la captura falla por cualquier razón
+    (timeout, DNS, TLS, navegador no descargado con
+    `playwright install chromium`) -- mismo patrón de degradación con
+    gracia que `check_certthreat`/`check_phishing_catcher`: la feature
+    (score + KPIs) funciona igual sin este enriquecimiento (spec.md,
+    escenario "Screenshot omitido cuando el navegador no está instalado").
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        ruta = os.path.join(out_dir, f"{uuid.uuid4().hex}.png")
+        objetivo = url if "://" in url else f"http://{url}"
+        with sync_playwright() as p:
+            navegador = p.chromium.launch(headless=True)
+            try:
+                pagina = navegador.new_page()
+                pagina.goto(objetivo, timeout=timeout * 1000)
+                pagina.screenshot(path=ruta)
+            finally:
+                navegador.close()
+        return ruta
+    except Exception:  # noqa: BLE001 -- best-effort: cualquier fallo de captura es "sin screenshot", no un 500
+        return None

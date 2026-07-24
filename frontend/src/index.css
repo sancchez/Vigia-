@@ -164,6 +164,25 @@ select:focus {
   color: var(--verified);
 }
 
+/* Fase 3a (openspec/changes/fase3a-antisuplantacion-y-scoring): badge de
+   score de infraestructura activa (0-4) en el panel de Protección de
+   marca -- mismo lenguaje visual/paleta reusada que `.chip.sla-*`, sin
+   color nuevo. 0-1 señales activas = bajo (dominio probablemente
+   parqueado/inactivo), 2-3 = medio, 4 = alto (infraestructura completa,
+   evidencia fuerte de suplantación activa). */
+.chip.score-bajo {
+  background: var(--bg-sunken);
+  color: var(--text-secondary);
+}
+.chip.score-medio {
+  background: var(--accent-bg);
+  color: var(--accent-ink);
+}
+.chip.score-alto {
+  background: var(--alert-bg);
+  color: var(--alert);
+}
+
 .card {
   background: var(--bg-raised);
   border: 0.5px solid var(--border);

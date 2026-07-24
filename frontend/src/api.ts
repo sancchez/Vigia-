@@ -294,6 +294,41 @@ export function filtrarFindingsCertstream(findings: Finding[]): Finding[] {
   return findings.filter((f) => f.tipo === "dominio_variante_certstream");
 }
 
+// Fase 3a (openspec/changes/fase3a-antisuplantacion-y-scoring): dominios
+// clon / perfiles falsos detectados por `agents/antisuplantacion.py`
+// (dnstwist + Sherlock), enriquecidos con un score transparente 0-4 de
+// infraestructura activa (DNS-A/MX/SSL/HTTP) y un screenshot best-effort.
+// Contrato real: `DominioClonOut` en el backend.
+export type DominioClon = {
+  finding_id: string;
+  endpoint: string;
+  severidad: "critical" | "high" | "medium" | "low" | "info";
+  estado: EstadoHallazgo | string;
+  score: number;
+  scoring: { dns_a?: boolean; mx?: boolean; ssl?: boolean; http?: boolean };
+  screenshot: string | null;
+  takedown: string | null;
+  primera_vez_visto: string | null;
+};
+
+export type AntisuplantacionRunResult = {
+  scan_id: string;
+  dominios: DominioClon[];
+  perfiles: DominioClon[];
+};
+
+// Contrato real de `AntisuplantacionKpiOut`: MTTD siempre "aproximado"
+// (vía SSL NotBefore, best-effort), TTTD siempre "exacto" (reusa
+// `finding_transiciones` de fase2a) -- mismo patrón que `KpiSummary`.
+export type AntisuplantacionKpis = {
+  tttd_dias: number | null;
+  tttd_precision: string;
+  mttd_dias: number | null;
+  mttd_precision: string;
+  total_clones: number;
+  clones_activos: number;
+};
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -497,6 +532,30 @@ export const api = {
   createWatchedBrand: (marca: string) =>
     request<WatchedBrand>("/watched-brands", { method: "POST", body: JSON.stringify({ marca }) }),
   deleteWatchedBrand: (id: string) => request<void>(`/watched-brands/${id}`, { method: "DELETE" }),
+  // Fase 3a: dispara SOLO la rama anti-suplantación sobre un asset dominio
+  // ya verificado (o exento) -- síncrono, dnstwist+Sherlock bajo demanda
+  // tardan segundos, no los minutos de un escaneo activo ZAP.
+  runAntisuplantacion: (assetId: string) =>
+    request<AntisuplantacionRunResult>("/antisuplantacion", {
+      method: "POST",
+      body: JSON.stringify({ asset_id: assetId }),
+    }),
+  getDominiosClon: () => request<DominioClon[]>("/antisuplantacion/dominios"),
+  getAntisuplantacionKpis: () => request<AntisuplantacionKpis>("/antisuplantacion/kpis"),
+  // El screenshot es una imagen binaria detrás de auth -- un <img src="...">
+  // plano no puede mandar el header Authorization, así que se descarga como
+  // blob (mismo patrón que `downloadFile`) y se devuelve un object URL listo
+  // para <img src={...}>. El llamador es responsable de revocar el URL
+  // (`URL.revokeObjectURL`) cuando el componente se desmonte.
+  getScreenshotUrl: async (findingId: string): Promise<string | null> => {
+    const token = getToken();
+    const headers: Record<string, string> = { "bypass-tunnel-reminder": "vigia" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${API_URL}/antisuplantacion/dominios/${findingId}/screenshot`, { headers });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
 };
 
 export { ApiError };
