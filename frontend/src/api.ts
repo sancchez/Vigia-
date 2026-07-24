@@ -17,6 +17,35 @@ export type Asset = {
   verified_at: string | null;
   exento_de_verificacion: boolean;
   instrucciones_verificacion: VerificationInstructions | null;
+  // Fase 6a (openspec/changes/fase6-endurecimiento-produccion): programación
+  // de escaneo por activo -- ver PUT /assets/{id}/schedule.
+  scan_frequency_hours: number | null;
+  scan_paused: boolean;
+};
+
+// Fase 6a: contrato real de `AssetScheduleIn` (backend) -- ambos campos
+// opcionales, solo los presentes en el body se actualizan.
+export type AssetScheduleBody = {
+  scan_frequency_hours?: number | null;
+  scan_paused?: boolean;
+};
+
+// Fase 6a: contrato real de `CostosOut`/`CostoPorScanOut` (backend). Ver
+// GET /costos -- `costo_estimado=null` (por-scan o total) significa que
+// todas las llamadas agregadas ahí vinieron del fallback CLI (no medible).
+export type CostoPorScan = {
+  scan_id: string | null;
+  llamadas: number;
+  tokens_in: number;
+  tokens_out: number;
+  costo_estimado: number | null;
+};
+
+export type Costos = {
+  por_scan: CostoPorScan[];
+  total_costo_estimado: number | null;
+  total_llamadas: number;
+  nota: string;
 };
 
 export type VerifyAssetResult = {
@@ -297,6 +326,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ metodo }),
     }),
+  // Fase 6a: programar/pausar el escaneo recurrente de un activo.
+  updateAssetSchedule: (assetId: string, body: AssetScheduleBody) =>
+    request<Asset>(`/assets/${assetId}/schedule`, { method: "PUT", body: JSON.stringify(body) }),
+  getCostos: () => request<Costos>("/costos"),
   listScans: () => request<ScanHistoryItem[]>("/scans"),
   listFindings: () => request<Finding[]>("/findings"),
   getFinding: (id: string) => request<FindingDetail>(`/findings/${id}`),

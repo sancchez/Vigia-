@@ -51,6 +51,7 @@ from auth.jwt_auth import (
     require_role,
     verify_password,
 )
+from agents._llm import set_llm_context
 from agents.cumplimiento import generar_reporte_cumplimiento
 from agents.verificacion import verificar_un_hallazgo
 from api.certstream_listener import start_certstream_listener, stop_certstream_listener
@@ -275,6 +276,12 @@ class AssetOut(BaseModel):
     verified_at: Optional[str] = None
     exento_de_verificacion: bool
     instrucciones_verificacion: Optional[dict] = None
+    # Fase 6a (openspec/changes/fase6-endurecimiento-produccion): programación
+    # de escaneo por activo -- ver `PUT /assets/{id}/schedule` y
+    # `api/scheduler.py`. `scan_frequency_hours=None` significa "usa el
+    # intervalo global de VIGIA_SCAN_INTERVAL_HOURS".
+    scan_frequency_hours: Optional[int] = None
+    scan_paused: bool = False
 
 
 class VerificarAssetIn(BaseModel):
@@ -473,6 +480,7 @@ def _asset_out_de_row(d: dict) -> AssetOut:
             "verificado": verificado,
             "exento_de_verificacion": exento,
             "instrucciones_verificacion": instrucciones,
+            "scan_paused": bool(d.get("scan_paused") or 0),
         }
     )
 
@@ -585,6 +593,49 @@ def verificar_asset_endpoint(
         )
     finally:
         conn.close()
+
+
+class AssetScheduleIn(BaseModel):
+    """Fase 6a (openspec/changes/fase6-endurecimiento-produccion) -- ver
+    design.md, Decisión 6a.4. Ambos campos opcionales: solo los presentes en
+    el body se actualizan (`exclude_unset`), así que un cliente puede pausar
+    sin tocar la frecuencia y viceversa."""
+
+    scan_frequency_hours: Optional[int] = Field(
+        default=None, ge=1, description="Horas entre escaneos de este activo. Omitir para usar el intervalo global."
+    )
+    scan_paused: Optional[bool] = Field(default=None, description="true para saltar este activo en el ciclo recurrente.")
+
+
+@app.put("/assets/{asset_id}/schedule", response_model=AssetOut)
+def actualizar_programacion_asset(
+    asset_id: str, payload: AssetScheduleIn, user: UserContext = Depends(get_current_user)
+) -> AssetOut:
+    """Programa (o pausa) el escaneo recurrente de un activo -- consumido por `api/scheduler.py`."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM assets WHERE id = ? AND tenant_id = ?", (asset_id, user.tenant_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Activo no encontrado para este tenant.")
+
+        actualizaciones = payload.model_dump(exclude_unset=True)
+        if "scan_frequency_hours" in actualizaciones:
+            conn.execute(
+                "UPDATE assets SET scan_frequency_hours = ? WHERE id = ?",
+                (actualizaciones["scan_frequency_hours"], asset_id),
+            )
+        if "scan_paused" in actualizaciones:
+            conn.execute(
+                "UPDATE assets SET scan_paused = ? WHERE id = ?",
+                (int(bool(actualizaciones["scan_paused"])), asset_id),
+            )
+        conn.commit()
+        row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    finally:
+        conn.close()
+    return _asset_out_de_row(dict_from_row(row))
 
 
 @app.get("/scans", response_model=list[ScanHistoryItem])
@@ -1416,6 +1467,81 @@ def obtener_kpis(user: UserContext = Depends(get_current_user)) -> KpiOut:
     )
 
 
+class CostoPorScanOut(BaseModel):
+    scan_id: Optional[str] = None
+    llamadas: int
+    tokens_in: int
+    tokens_out: int
+    costo_estimado: Optional[float] = None
+
+
+class CostosOut(BaseModel):
+    """Fase 6a (openspec/changes/fase6-endurecimiento-produccion) -- ver
+    design.md, Decisión 6a.2. `costo_estimado=None` (por-scan o total) pasa
+    cuando TODAS las llamadas agregadas ahí vinieron del fallback CLI (no
+    medible) -- nunca un número inventado."""
+
+    por_scan: list[CostoPorScanOut]
+    total_costo_estimado: Optional[float] = None
+    total_llamadas: int
+    nota: str = (
+        "Las llamadas vía CLI de Claude ('claude -p', fallback de desarrollo) no exponen "
+        "conteo de tokens -- se cuentan en 'llamadas' pero no aportan a costo_estimado. "
+        "Ver docs/despliegue.md."
+    )
+
+
+@app.get("/costos", response_model=CostosOut)
+def obtener_costos(user: UserContext = Depends(get_current_user)) -> CostosOut:
+    """Costo de LLM agregado por scan y total del tenant -- ver `agents/_llm.py::_registrar_uso`.
+
+    Mismo patrón de agregación con SQL directo que `GET /kpis`, scoped por
+    `tenant_id`. `scan_id IS NULL` agrupa llamadas que corrieron sin un scan
+    real asociado (no debería pasar hoy -- todo call site puebla el
+    contexto antes de invocar al LLM -- pero se agrupa en vez de excluirse
+    para no perder silenciosamente ninguna fila de `llm_usage`).
+    """
+    conn = get_conn()
+    try:
+        filas = conn.execute(
+            """
+            SELECT scan_id,
+                   COUNT(*) AS llamadas,
+                   COALESCE(SUM(tokens_in), 0) AS tokens_in,
+                   COALESCE(SUM(tokens_out), 0) AS tokens_out,
+                   SUM(costo_estimado) AS costo_estimado
+            FROM llm_usage
+            WHERE tenant_id = ?
+            GROUP BY scan_id
+            ORDER BY MAX(created_at) DESC
+            """,
+            (user.tenant_id,),
+        ).fetchall()
+        total_row = conn.execute(
+            "SELECT COUNT(*) AS llamadas, SUM(costo_estimado) AS costo_estimado FROM llm_usage WHERE tenant_id = ?",
+            (user.tenant_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    por_scan = [
+        CostoPorScanOut(
+            scan_id=fila["scan_id"],
+            llamadas=fila["llamadas"],
+            tokens_in=fila["tokens_in"],
+            tokens_out=fila["tokens_out"],
+            costo_estimado=fila["costo_estimado"],
+        )
+        for fila in filas
+    ]
+    total = dict_from_row(total_row) or {}
+    return CostosOut(
+        por_scan=por_scan,
+        total_costo_estimado=total.get("costo_estimado"),
+        total_llamadas=total.get("llamadas") or 0,
+    )
+
+
 class CumplimientoCategoriaOut(BaseModel):
     categoria: str
     nombre: str
@@ -1799,11 +1925,17 @@ def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) ->
         antisuplantacion_habilitado=payload.antisuplantacion_habilitado,
     )
 
+    # Fase 6a: scan_id generado ANTES de invocar el grafo (no después, como
+    # antes de esta sesión) para poder poblar `set_llm_context` con él y que
+    # cada llamada a `call_claude` dentro del grafo quede asociada al scan
+    # real que la disparó en `llm_usage` (ver agents/_llm.py).
+    scan_id = str(uuid.uuid4())
+    set_llm_context(user.tenant_id, scan_id)
+
     grafo = _get_graph()
     estado_final = grafo.invoke(estado_inicial)
 
     verified = estado_final.get("verified_findings") or []
-    scan_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     conn = get_conn()
     try:
@@ -2096,6 +2228,10 @@ def _correr_escaneo_activo_en_background(
     `tools/zap_api.py` para el razonamiento completo y la verificación en
     vivo contra Juice Shop real.
     """
+    # Fase 6a: contextvars NO se heredan de un `threading.Thread` padre --
+    # hay que poblar el contexto de costo DENTRO de este thread, no antes de
+    # arrancarlo (ver docstring de agents/_llm.py).
+    set_llm_context(tenant_id, scan_id)
     try:
         resultado = run_checkpointed_active_scan(
             payload.target_url,

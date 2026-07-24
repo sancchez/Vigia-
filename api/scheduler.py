@@ -2,12 +2,17 @@
 
 Primera pieza real de "vigilancia continua" (hoy todo es manual, botón
 "Escanear ahora"). Corre `recon_pasivo` sobre cada activo de cada tenant a
-intervalos regulares — a propósito SOLO recon pasivo, nunca Escaneo Activo
-(Nuclei/ZAP), porque `autorizacion_firmada` hoy es un booleano que llega en
-cada request, no un dato guardado por tenant/activo. Automatizar el Escaneo
-Activo de forma segura requiere primero guardar esa autorización de forma
-persistente (columna en `assets` o `tenants`, con el documento firmado
-adjunto) — ver plan-proyecto-ciberseguridad.md, sección de brechas.
+intervalos regulares.
+
+**Fase 6a** (openspec/changes/fase6-endurecimiento-produccion) cierra el
+bloqueo que este módulo documentaba: `assets.autorizacion_activa` ya existe
+de forma persistente desde Fase 0 (columna + documento firmado adjunto), así
+que este ciclo ahora SÍ puede disparar Escaneo Activo real
+(`tools.zap_api.run_checkpointed_active_scan`) para los activos que la
+tienen marcada -- nunca a partir de un booleano de request, siempre de la
+columna persistida (ver `Decisión 6a.3` en design.md). Cada activo también
+puede pausarse (`scan_paused`) u opt-out del intervalo global con su propia
+frecuencia (`scan_frequency_hours`) -- ver `Decisión 6a.4`.
 
 Uso: `start_scheduler()` desde `api/main.py::lifespan`, una sola vez por
 proceso. `run_scan_cycle_once()` expone el ciclo completo para pruebas/CLI
@@ -24,10 +29,13 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from agents._llm import set_llm_context
 from db.connection import get_conn
 from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
+from tools._shared import ToolExecutionError
 from tools.asset_verification import asset_autorizado_para_escanear
+from tools.zap_api import run_checkpointed_active_scan
 
 logger = logging.getLogger("vigia.scheduler")
 
@@ -42,18 +50,146 @@ def _get_graph():
     return _compiled_graph
 
 
-def run_scan_cycle_once() -> int:
-    """Corre un ciclo de recon pasivo sobre todos los activos activos de todos los tenants.
+def _cumple_frecuencia_programada(conn, asset_id: str, frequency_hours: int | None) -> bool:
+    """¿Ya pasó suficiente tiempo desde el último scan de este activo?
 
-    Devuelve cuántos activos se procesaron. Pensado para llamarse tanto
-    desde el scheduler como directamente (pruebas, un cron externo, un
-    comando manual) — la lógica del ciclo no depende de estar dentro de
-    APScheduler.
+    `frequency_hours is None` -> el activo no tiene frecuencia propia, usa
+    siempre el intervalo global de `VIGIA_SCAN_INTERVAL_HOURS` (comportamiento
+    IDÉNTICO al de antes de Fase 6a: due en cada tick). Si el activo nunca
+    tuvo un scan, también está due -- no hay "último scan" del que medir.
+    """
+    if frequency_hours is None:
+        return True
+    row = conn.execute(
+        "SELECT MAX(created_at) AS ultimo FROM scans WHERE asset_id = ?", (asset_id,)
+    ).fetchone()
+    ultimo = row["ultimo"] if row else None
+    if not ultimo:
+        return True
+    try:
+        # `scans.created_at` es siempre el default `CURRENT_TIMESTAMP` de
+        # ambos motores (nunca se pasa explícito en el INSERT) -- formato
+        # estable "YYYY-MM-DD HH:MM:SS" (ver db/connection.py, truncado a
+        # segundos también en Postgres vía _TimestampStrLoader).
+        ultimo_dt = datetime.strptime(str(ultimo)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        # Timestamp con forma inesperada -- degradar a "due" en vez de
+        # excluir el activo del ciclo para siempre por un parseo que falla.
+        return True
+    horas_transcurridas = (datetime.now(timezone.utc) - ultimo_dt).total_seconds() / 3600
+    return horas_transcurridas >= frequency_hours
+
+
+def _ejecutar_ciclo_pasivo(grafo, activo, scan_id: str) -> None:
+    set_llm_context(activo["tenant_id"], scan_id)
+    estado_inicial = new_state(
+        target=activo["valor"],
+        autorizacion_firmada=False,  # pasivo: nunca ejecuta Escaneo Activo
+        scope={"dominios": [activo["valor"]], "apps": [], "ips": [], "notas": ""},
+        contexto_negocio="",
+        antisuplantacion_habilitado=False,
+    )
+    try:
+        estado_final = grafo.invoke(estado_inicial)
+    except Exception:
+        logger.exception("Ciclo de escaneo recurrente (pasivo) falló para activo %s", activo["valor"])
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO scans
+                (id, tenant_id, asset_id, target, autorizacion_firmada, estado,
+                 reporte_final, trace_log_json, completed_at)
+            VALUES (?, ?, ?, ?, 0, 'completado', ?, ?, ?)
+            """,
+            (
+                scan_id,
+                activo["tenant_id"],
+                activo["id"],
+                activo["valor"],
+                estado_final.get("reporte_final"),
+                json.dumps(estado_final.get("trace_log") or []),
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _ejecutar_ciclo_activo(activo, scan_id: str) -> None:
+    """Escaneo activo real (ZAP) para un activo con `autorizacion_activa=1` verificado.
+
+    El gate real ya se aplicó en `run_scan_cycle_once` (columna persistida +
+    `asset_autorizado_para_escanear`, defensa en capas) -- esta función nunca
+    decide autorización, solo ejecuta y persiste. Cualquier error del
+    escaneo (ej. ZAP/Docker no disponible) se loguea y el ciclo continúa con
+    el resto de activos -- nunca se marca `autorizacion_firmada` a partir de
+    algo que no corrió de verdad.
+    """
+    set_llm_context(activo["tenant_id"], scan_id)
+    target_url = activo["valor"]
+    if "://" not in target_url:
+        target_url = f"http://{target_url}"
+    minutes = int(os.environ.get("VIGIA_SCAN_ACTIVE_SCHEDULED_MINUTES", "20"))
+
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO scans (id, tenant_id, asset_id, target, autorizacion_firmada, estado, trace_log_json)
+            VALUES (?, ?, ?, ?, 1, 'corriendo', '[]')
+            """,
+            (scan_id, activo["tenant_id"], activo["id"], target_url),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        resultado = run_checkpointed_active_scan(
+            target_url, minutes=minutes, bearer_token=None, ajax_spider=True, scan_id=scan_id
+        )
+        estado_final = "completado"
+        reporte = f"Escaneo activo programado completado -- {resultado.detalle_final}"
+    except ToolExecutionError as exc:
+        estado_final = "error"
+        reporte = f"Escaneo activo programado falló: {exc}"
+    except Exception as exc:  # noqa: BLE001 -- último punto de captura de este ciclo
+        logger.exception("Ciclo de escaneo recurrente (activo) falló para activo %s", target_url)
+        estado_final = "error"
+        reporte = f"Escaneo activo programado falló con un error inesperado: {exc}"
+
+    completed_at = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE scans SET estado = ?, reporte_final = ?, completed_at = ? WHERE id = ?",
+            (estado_final, reporte, completed_at, scan_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def run_scan_cycle_once() -> int:
+    """Corre un ciclo de escaneo sobre todos los activos activos de todos los tenants.
+
+    Por activo, decide pasivo vs. activo según `autorizacion_activa`
+    (columna persistida, ver docstring del módulo) -- nunca a partir de un
+    booleano de request. Devuelve cuántos activos se procesaron. Pensado
+    para llamarse tanto desde el scheduler como directamente (pruebas, un
+    cron externo, un comando manual) — la lógica del ciclo no depende de
+    estar dentro de APScheduler.
     """
     conn = get_conn()
     try:
         activos = conn.execute(
-            "SELECT id, tenant_id, tipo, valor, verificado FROM assets WHERE is_active = 1"
+            "SELECT id, tenant_id, tipo, valor, verificado, autorizacion_activa, "
+            "scan_frequency_hours, scan_paused FROM assets WHERE is_active = 1"
         ).fetchall()
     finally:
         conn.close()
@@ -61,6 +197,9 @@ def run_scan_cycle_once() -> int:
     grafo = _get_graph()
     procesados = 0
     for activo in activos:
+        if activo["scan_paused"]:
+            logger.info("Activo %s omitido del ciclo recurrente -- pausado", activo["valor"])
+            continue
         # Mismo gate que POST /scan/POST /scan/activo/CertStream (ver
         # tools/asset_verification.py): un activo registrado pero no
         # verificado (y no exento por ser localhost/IP privada) no debe
@@ -74,47 +213,29 @@ def run_scan_cycle_once() -> int:
                 activo["valor"],
             )
             continue
-        procesados += 1
-        estado_inicial = new_state(
-            target=activo["valor"],
-            autorizacion_firmada=False,  # recurrente = siempre pasivo, ver docstring del módulo
-            scope={"dominios": [activo["valor"]], "apps": [], "ips": [], "notas": ""},
-            contexto_negocio="",
-            antisuplantacion_habilitado=False,
-        )
+
+        conn_frecuencia = get_conn()
         try:
-            estado_final = grafo.invoke(estado_inicial)
-        except Exception:
-            logger.exception("Ciclo de escaneo recurrente falló para activo %s", activo["valor"])
+            due = _cumple_frecuencia_programada(conn_frecuencia, activo["id"], activo["scan_frequency_hours"])
+        finally:
+            conn_frecuencia.close()
+        if not due:
+            logger.info(
+                "Activo %s omitido del ciclo recurrente -- aún no cumple su frecuencia programada (%sh)",
+                activo["valor"],
+                activo["scan_frequency_hours"],
+            )
             continue
 
+        procesados += 1
         scan_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        conn = get_conn()
-        try:
-            conn.execute(
-                """
-                INSERT INTO scans
-                    (id, tenant_id, asset_id, target, autorizacion_firmada, estado,
-                     reporte_final, trace_log_json, completed_at)
-                VALUES (?, ?, ?, ?, 0, 'completado', ?, ?, ?)
-                """,
-                (
-                    scan_id,
-                    activo["tenant_id"],
-                    activo["id"],
-                    activo["valor"],
-                    estado_final.get("reporte_final"),
-                    json.dumps(estado_final.get("trace_log") or []),
-                    now,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        if activo["autorizacion_activa"]:
+            _ejecutar_ciclo_activo(activo, scan_id)
+        else:
+            _ejecutar_ciclo_pasivo(grafo, activo, scan_id)
 
     logger.info(
-        "Ciclo de escaneo recurrente completado: %d/%d activo(s) procesados (resto omitido por verificación)",
+        "Ciclo de escaneo recurrente completado: %d/%d activo(s) procesados (resto omitido por verificación/pausa/frecuencia)",
         procesados,
         len(activos),
     )
