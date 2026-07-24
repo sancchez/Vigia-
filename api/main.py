@@ -51,6 +51,7 @@ from auth.jwt_auth import (
     require_role,
     verify_password,
 )
+from agents.antisuplantacion import node as antisuplantacion_node
 from agents.cumplimiento import generar_reporte_cumplimiento
 from agents.verificacion import verificar_un_hallazgo
 from api.certstream_listener import start_certstream_listener, stop_certstream_listener
@@ -59,7 +60,7 @@ from db.connection import dict_from_row, get_conn
 from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
 from tools._shared import ToolExecutionError, normalize_severity
-from tools.antisuplantacion import registrable_domain
+from tools.antisuplantacion import capturar_screenshot, puntuar_infra_lookalike, registrable_domain
 from tools.asset_verification import (
     METODOS_VALIDOS,
     asset_autorizado_para_escanear,
@@ -2195,6 +2196,345 @@ def escaneo_activo_async(
     hilo.start()
 
     return ActiveScanAccepted(scan_id=scan_id, estado="corriendo")
+
+
+# ---------------------------------------------------------------------------
+# Protección de marca / Anti-suplantación bajo demanda
+# (openspec/changes/fase3a-antisuplantacion-y-scoring): dispara SOLO la rama
+# anti-suplantación (`agents/antisuplantacion.py`, dnstwist+Sherlock+IA), la
+# enriquece con scoring de infraestructura activa 0-4 + screenshot
+# best-effort, y persiste los hallazgos vía el ciclo de vida existente de
+# Fase 2a. Cero tabla/columna nueva: score/scoring/screenshot/ssl_not_before
+# viajan dentro de `findings.raw_json["señal"]` (ver design.md, Data Flow).
+# ---------------------------------------------------------------------------
+
+VIGIA_SCREENSHOT_DIR = os.environ.get("VIGIA_SCREENSHOT_DIR", "data/screenshots")
+
+
+def _enriquecer_dominios_clon(antisuplantacion_findings: list[dict], out_dir: str) -> None:
+    """Enriquece cada señal `dominio_variante` con scoring + screenshot, mutando `señal` in place.
+
+    `antisuplantacion_findings` es la salida cruda de
+    `agents/antisuplantacion.py::node()` (`state["antisuplantacion_findings"]`
+    -- una lista de `{"señales_crudas": [...], "analisis_claude": ...}`).
+    `_extraer_findings_antisuplantacion` (más arriba) ya empaqueta cada
+    `señal` completa dentro de `raw_json["señal"]` al persistir, así que
+    agregar aquí las claves `scoring`/`score`/`ssl_not_before`/`screenshot`
+    a la señal misma es suficiente para que viajen a `findings.raw_json`
+    sin ninguna columna SQL nueva (ver design.md, Architecture Decisions).
+
+    Solo se enriquecen señales `tipo == "dominio_variante"` -- un
+    `perfil_red_social` no tiene un dominio del que hacer scoring de
+    infraestructura ni una URL apta para un screenshot representativo del
+    "sitio clon" (spec.md no lo exige para ese tipo).
+    """
+    for hallazgo in antisuplantacion_findings or []:
+        for señal in hallazgo.get("señales_crudas") or []:
+            if señal.get("tipo") != "dominio_variante":
+                continue
+            dominio = (señal.get("dominio") or "").strip()
+            if not dominio:
+                continue
+            infra = puntuar_infra_lookalike(dominio)
+            señal["scoring"] = {
+                "dns_a": infra.dns_a,
+                "mx": infra.mx,
+                "ssl": infra.ssl,
+                "http": infra.http,
+            }
+            señal["score"] = infra.score
+            señal["ssl_not_before"] = infra.ssl_not_before
+            señal["screenshot"] = capturar_screenshot(dominio, out_dir)
+
+
+class AntisuplantacionRunIn(BaseModel):
+    asset_id: str = Field(..., description="Asset tipo 'dominio', registrado y verificado (o exento) por este tenant")
+
+
+class DominioClonOut(BaseModel):
+    finding_id: str
+    endpoint: str
+    severidad: str
+    estado: str
+    score: int = 0
+    scoring: dict = Field(default_factory=dict)
+    screenshot: Optional[str] = None
+    takedown: Optional[str] = None
+    primera_vez_visto: Optional[str] = None
+
+
+class AntisuplantacionRunOut(BaseModel):
+    scan_id: str
+    dominios: list[DominioClonOut] = Field(default_factory=list)
+    perfiles: list[DominioClonOut] = Field(default_factory=list)
+
+
+class AntisuplantacionKpiOut(BaseModel):
+    tttd_dias: Optional[float] = None
+    tttd_precision: str = "exacto"
+    mttd_dias: Optional[float] = None
+    mttd_precision: str = "aproximado"
+    total_clones: int = 0
+    clones_activos: int = 0
+
+
+def _dominio_clon_out_de_row(d: dict) -> DominioClonOut:
+    """Proyecta una fila `findings` (`tipo` `dominio_variante`/`perfil_red_social`)
+    a `DominioClonOut`, leyendo scoring/screenshot/takedown desde
+    `raw_json["señal"]`/`raw_json["analisis_claude"]` -- tolerante por
+    diseño (mismo espíritu que `_detalle_desde_raw_json`): `raw_json`
+    ausente/corrupto o de un finding sin las claves nuevas nunca rompe,
+    solo devuelve defaults vacíos."""
+    try:
+        raw = json.loads(d.get("raw_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    señal = raw.get("señal") if isinstance(raw.get("señal"), dict) else {}
+    scoring = señal.get("scoring") if isinstance(señal.get("scoring"), dict) else {}
+    score = señal.get("score") if isinstance(señal.get("score"), int) else 0
+    screenshot_path = señal.get("screenshot")
+    screenshot_url = f"/antisuplantacion/dominios/{d['id']}/screenshot" if screenshot_path else None
+    return DominioClonOut(
+        finding_id=d["id"],
+        endpoint=d["endpoint"],
+        severidad=d["severidad"],
+        estado=d["estado"],
+        score=score,
+        scoring=scoring,
+        screenshot=screenshot_url,
+        takedown=raw.get("analisis_claude"),
+        primera_vez_visto=d.get("primera_vez_visto"),
+    )
+
+
+@app.post("/antisuplantacion", response_model=AntisuplantacionRunOut)
+def ejecutar_antisuplantacion(
+    payload: AntisuplantacionRunIn, user: UserContext = Depends(get_current_user)
+) -> AntisuplantacionRunOut:
+    """Dispara SOLO la rama anti-suplantación sobre un asset dominio ya
+    verificado (o exento) del tenant -- ver design.md, Data Flow.
+
+    A diferencia de `POST /scan` (que corre el pipeline completo con
+    `antisuplantacion_habilitado=true`), esto llama
+    `agents.antisuplantacion.node()` directo con un estado mínimo, sin
+    recon/escaneo técnico/verificación/priorización/remediación -- más
+    barato y permite disparar la protección de marca por sí sola.
+
+    Síncrono a propósito (spec.md exige 200 con la lista de dominios ya
+    resuelta en la misma respuesta, no un `scan_id` para hacer polling) --
+    dnstwist+Sherlock bajo demanda tardan segundos, no los 20-180 minutos de
+    un escaneo activo ZAP que sí justifica el patrón background de
+    `POST /scan/activo`.
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM assets WHERE id = ? AND tenant_id = ?",
+            (payload.asset_id, user.tenant_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Activo no encontrado para este tenant.")
+        asset = dict_from_row(row)
+
+        if asset["tipo"] != "dominio":
+            raise HTTPException(
+                status_code=422,
+                detail="La protección de marca solo aplica a activos tipo 'dominio'.",
+            )
+        if not asset_autorizado_para_escanear(asset["tipo"], asset["valor"], bool(asset["verificado"])):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"El activo '{asset['valor']}' (id={asset['id']}) está registrado pero NO "
+                    "verificado. Verifícalo primero con POST /assets/{id}/verify."
+                ),
+            )
+
+        estado_inicial = new_state(target=asset["valor"], antisuplantacion_habilitado=True)
+        resultado_nodo = antisuplantacion_node(estado_inicial)
+        señales_crudas = resultado_nodo.get("antisuplantacion_findings") or []
+
+        _enriquecer_dominios_clon(señales_crudas, VIGIA_SCREENSHOT_DIR)
+
+        scan_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO scans
+                (id, tenant_id, asset_id, target, autorizacion_firmada, estado, completed_at)
+            VALUES (?, ?, ?, ?, 1, 'completado', ?)
+            """,
+            (scan_id, user.tenant_id, asset["id"], asset["valor"], now),
+        )
+
+        filas = _extraer_findings_antisuplantacion(asset["valor"], señales_crudas)
+        hallazgos_normalizados = [
+            {
+                "tipo": fila["tipo"],
+                "severidad": fila["severidad"],
+                "endpoint": fila["endpoint"],
+                "confirmado": False,
+                "raw_json": json.dumps(fila["raw_json"], default=str),
+            }
+            for fila in filas
+        ]
+        _registrar_findings_con_ciclo_de_vida(
+            conn, user.tenant_id, scan_id, asset["id"], hallazgos_normalizados, now
+        )
+        conn.commit()
+
+        # `_registrar_findings_con_ciclo_de_vida` no reasigna `scan_id` a un
+        # hallazgo que ya existía de una corrida anterior (drift) -- por eso
+        # la respuesta se arma buscando por (tenant, tipo, endpoint), no por
+        # `scan_id`, igual que hace `GET /antisuplantacion/dominios` (scoped
+        # a todo el tenant, no a un solo scan).
+        dominios: list[DominioClonOut] = []
+        perfiles: list[DominioClonOut] = []
+        for fila in filas:
+            fila_row = conn.execute(
+                "SELECT * FROM findings WHERE tenant_id = ? AND tipo = ? AND endpoint = ?",
+                (user.tenant_id, fila["tipo"], fila["endpoint"]),
+            ).fetchone()
+            if fila_row is None:
+                continue
+            proyeccion = _dominio_clon_out_de_row(dict_from_row(fila_row))
+            if fila["tipo"] == "dominio_variante":
+                dominios.append(proyeccion)
+            else:
+                perfiles.append(proyeccion)
+    finally:
+        conn.close()
+
+    return AntisuplantacionRunOut(scan_id=scan_id, dominios=dominios, perfiles=perfiles)
+
+
+@app.get("/antisuplantacion/dominios", response_model=list[DominioClonOut])
+def listar_dominios_clon(user: UserContext = Depends(get_current_user)) -> list[DominioClonOut]:
+    """Todos los dominios clon / perfiles falsos del tenant, con score,
+    evidencia y borrador de takedown -- scoped a `tenant_id`, sin filtrar
+    por scan (ver docstring de `ejecutar_antisuplantacion`: un hallazgo
+    reincidente conserva su `scan_id` original)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM findings
+            WHERE tenant_id = ? AND tipo IN ('dominio_variante', 'perfil_red_social')
+            ORDER BY created_at DESC
+            """,
+            (user.tenant_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_dominio_clon_out_de_row(dict_from_row(r)) for r in rows]
+
+
+@app.get("/antisuplantacion/dominios/{finding_id}/screenshot")
+def obtener_screenshot_clon(finding_id: str, user: UserContext = Depends(get_current_user)) -> FileResponse:
+    """Sirve el screenshot binario de un dominio clon -- tenant-scoped, 404
+    si el hallazgo no existe, es de otro tenant, o no tiene screenshot
+    capturado (ej. Playwright no instalado, ver `capturar_screenshot`)."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM findings WHERE id = ? AND tenant_id = ?", (finding_id, user.tenant_id)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Hallazgo no encontrado")
+
+    d = dict_from_row(row)
+    try:
+        raw = json.loads(d.get("raw_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        raw = {}
+    señal = raw.get("señal") if isinstance(raw, dict) and isinstance(raw.get("señal"), dict) else {}
+    ruta = señal.get("screenshot")
+    if not ruta or not os.path.isfile(ruta):
+        raise HTTPException(status_code=404, detail="Sin screenshot disponible para este hallazgo")
+    return FileResponse(ruta, media_type="image/png")
+
+
+@app.get("/antisuplantacion/kpis", response_model=AntisuplantacionKpiOut)
+def obtener_kpis_antisuplantacion(user: UserContext = Depends(get_current_user)) -> AntisuplantacionKpiOut:
+    """KPIs de marca: MTTD (best-effort, vía SSL `NotBefore`) y TTTD (exacto,
+    reusa `finding_transiciones` de Fase 2a) -- mismo patrón de cálculo en
+    Python que `GET /kpis` (Fase 2c), portable SQLite/Postgres sin
+    `julianday()`/`EXTRACT`. Ver spec.md, Domain "KPIs de marca".
+    """
+    conn = get_conn()
+    try:
+        findings_rows = conn.execute(
+            """
+            SELECT * FROM findings
+            WHERE tenant_id = ? AND tipo IN ('dominio_variante', 'perfil_red_social')
+            """,
+            (user.tenant_id,),
+        ).fetchall()
+        cierres_rows = conn.execute(
+            """
+            SELECT finding_id, MIN(created_at) AS cerrado_en
+            FROM finding_transiciones
+            WHERE tenant_id = ? AND estado_nuevo = 'cerrado'
+            GROUP BY finding_id
+            """,
+            (user.tenant_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    primer_cierre = {r["finding_id"]: r["cerrado_en"] for r in cierres_rows}
+
+    tttd_valores: list[float] = []
+    mttd_valores: list[float] = []
+    total_clones = 0
+    clones_activos = 0
+
+    for row in findings_rows:
+        d = dict_from_row(row)
+        total_clones += 1
+        try:
+            raw = json.loads(d.get("raw_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            raw = {}
+        señal = raw.get("señal") if isinstance(raw, dict) and isinstance(raw.get("señal"), dict) else {}
+        score = señal.get("score") if isinstance(señal.get("score"), int) else 0
+        if score >= 2:
+            clones_activos += 1
+
+        cerrado_en = primer_cierre.get(d["id"])
+        primera_vez_visto = d.get("primera_vez_visto")
+        if cerrado_en and primera_vez_visto:
+            try:
+                delta_dias = (
+                    _parse_dt_utc_naive(cerrado_en) - _parse_dt_utc_naive(primera_vez_visto)
+                ).total_seconds() / 86400.0
+                tttd_valores.append(max(delta_dias, 0.0))
+            except (TypeError, ValueError):
+                pass
+
+        ssl_not_before = señal.get("ssl_not_before")
+        if ssl_not_before and primera_vez_visto:
+            try:
+                delta_mttd = (
+                    _parse_dt_utc_naive(primera_vez_visto) - _parse_dt_utc_naive(ssl_not_before)
+                ).total_seconds() / 86400.0
+                mttd_valores.append(max(delta_mttd, 0.0))
+            except (TypeError, ValueError):
+                pass
+
+    tttd_dias = (sum(tttd_valores) / len(tttd_valores)) if tttd_valores else None
+    mttd_dias = (sum(mttd_valores) / len(mttd_valores)) if mttd_valores else None
+
+    return AntisuplantacionKpiOut(
+        tttd_dias=tttd_dias,
+        mttd_dias=mttd_dias,
+        total_clones=total_clones,
+        clones_activos=clones_activos,
+    )
 
 
 class ScanDetail(BaseModel):

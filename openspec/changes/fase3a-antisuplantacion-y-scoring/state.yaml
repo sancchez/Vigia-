@@ -8,6 +8,6 @@ dag:
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        pending
+  apply:        complete
   verify:       pending
   archive:      pending

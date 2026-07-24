@@ -7,6 +7,7 @@ import Equipo from "../components/Equipo";
 import FindingDetailPanel from "../components/FindingDetailPanel";
 import RemediationBoard from "../components/RemediationBoard";
 import KpiWidget from "../components/KpiWidget";
+import BrandProtectionPanel from "../components/BrandProtectionPanel";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -80,6 +81,13 @@ export default function Dashboard() {
   // panel de detalle está abierto (null = cerrado). Compartido por ambas
   // tablas de hallazgos (general y detalle de scan).
   const [findingIdAbierto, setFindingIdAbierto] = useState<string | null>(null);
+  // Fase 3a (openspec/changes/fase3a-antisuplantacion-y-scoring): estado del
+  // botón "Proteger marca" por asset (`valor` del asset corriendo, o null),
+  // y un contador que fuerza a `BrandProtectionPanel` a refrescar sus datos
+  // tras una corrida nueva (mismo patrón que `onChanged` de RemediationBoard,
+  // pero como prop simple en vez de callback porque el panel se auto-alimenta).
+  const [protegiendoMarca, setProtegiendoMarca] = useState<string | null>(null);
+  const [refrescarProteccion, setRefrescarProteccion] = useState(0);
 
   const cargarTodo = async () => {
     setCargando(true);
@@ -178,6 +186,27 @@ export default function Dashboard() {
     } finally {
       setEscaneando(null);
       setProgreso(null);
+    }
+  };
+
+  // Fase 3a: dispara SOLO la rama anti-suplantación sobre un asset dominio
+  // ya verificado (o exento) -- síncrono (segundos, no los minutos de un
+  // escaneo activo ZAP), así que no hace falta el patrón de polling de
+  // `correrScan` de arriba.
+  const protegerMarca = async (asset: Asset) => {
+    setProtegiendoMarca(asset.valor);
+    setMensaje(null);
+    try {
+      const resultado = await api.runAntisuplantacion(asset.id);
+      setMensaje(
+        `${asset.valor}: protección de marca ejecutada — ${resultado.dominios.length} dominio(s) clon y ` +
+          `${resultado.perfiles.length} perfil(es) detectados.`
+      );
+      setRefrescarProteccion((n) => n + 1);
+    } catch (err) {
+      setMensaje(err instanceof ApiError ? err.message : "No se pudo ejecutar la protección de marca.");
+    } finally {
+      setProtegiendoMarca(null);
     }
   };
 
@@ -394,6 +423,19 @@ export default function Dashboard() {
                         >
                           {escaneando === a.valor ? "Escaneando…" : "Escanear ahora"}
                         </button>
+                        {a.tipo === "dominio" && (
+                          <button
+                            onClick={() => protegerMarca(a)}
+                            disabled={protegiendoMarca === a.valor || !puedeEscanear}
+                            title={
+                              puedeEscanear
+                                ? "Busca dominios clon (dnstwist) y perfiles falsos (Sherlock) de este dominio"
+                                : "Verifica la propiedad del dominio antes de proteger la marca"
+                            }
+                          >
+                            {protegiendoMarca === a.valor ? "Protegiendo…" : "Proteger marca"}
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -592,6 +634,8 @@ export default function Dashboard() {
           {findings.length > 0 && (
             <RemediationBoard findings={findings} members={members} onChanged={cargarTodo} />
           )}
+
+          <BrandProtectionPanel refreshKey={refrescarProteccion} />
 
           <div className="card">
             <h2 style={{ fontSize: 17, marginBottom: 12 }}>Actividad reciente</h2>
