@@ -99,6 +99,21 @@ export type Finding = {
   created_at: string;
 };
 
+// Fase 1 (openspec/changes/fase1-deteccion-visible): superset de `Finding`
+// con el detalle curado que ya calculaba `agents/verificacion.py` pero
+// nunca se exponía -- descripción/solución/CWE nativos de la herramienta,
+// y el estado de verificación explicado (3 estados, no binario). Backend:
+// GET /findings/{id} (api/main.py::FindingDetailOut).
+export type FindingDetail = Finding & {
+  descripcion: string;
+  solucion: string;
+  referencia: string;
+  cwe: string | null;
+  estado_verificacion: string | null;
+  cves_detectados: string[];
+  evidencia_exploitdb: { cve: string; edb_id: string; descripcion: string }[];
+};
+
 export type Invitation = {
   id: string;
   email: string;
@@ -219,6 +234,7 @@ export const api = {
     }),
   listScans: () => request<ScanHistoryItem[]>("/scans"),
   listFindings: () => request<Finding[]>("/findings"),
+  getFinding: (id: string) => request<FindingDetail>(`/findings/${id}`),
   runScan: (target: string, autorizacion_firmada: boolean) =>
     request<ScanResult>("/scan", {
       method: "POST",

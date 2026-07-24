@@ -52,6 +52,7 @@ from auth.jwt_auth import (
     verify_password,
 )
 from agents.cumplimiento import generar_reporte_cumplimiento
+from agents.verificacion import verificar_un_hallazgo
 from api.certstream_listener import start_certstream_listener, stop_certstream_listener
 from api.scheduler import start_scheduler, stop_scheduler
 from db.connection import dict_from_row, get_conn
@@ -626,6 +627,191 @@ def listar_findings(user: UserContext = Depends(get_current_user)) -> list[Findi
     ]
 
 
+def _texto_desde_lista_o_string(valor: Any) -> str:
+    """Normaliza un campo que, según la herramienta, puede venir como un
+    string simple, una lista de strings, o ausente -- a un único string
+    legible (join con "; "). Ej.: `info.reference` de nuclei y
+    `metadata.references`/`metadata.cwe` de semgrep son listas; `reference`
+    de ZAP y `cweid` son strings simples."""
+    if valor is None:
+        return ""
+    if isinstance(valor, str):
+        return valor
+    if isinstance(valor, (list, tuple)):
+        return "; ".join(str(v) for v in valor if v)
+    return str(valor)
+
+
+def _detalle_desde_raw_json(raw_json: str | None) -> dict:
+    """Deriva los campos curados de `FindingDetailOut` a partir de
+    `findings.raw_json` -- cero columna SQL nueva (ver design.md, Nota de
+    DB: `estado_verificacion` como columna dedicada es responsabilidad de
+    fase0-fundaciones-datos, corriendo en paralelo).
+
+    Tolerante por diseño: `raw_json` ausente/vacío, JSON corrupto, o de un
+    finding insertado antes de esta fase (sin las claves nuevas) siempre
+    devuelve 200 con defaults vacíos -- nunca 500 (ver
+    design.md::"Decision: parser tolerante").
+
+    Mapeo de `descripcion`/`solucion`/`referencia`/`cwe` POR HERRAMIENTA --
+    shape real confirmado leyendo `tools/scan.py` y `tools/_shared.py` en
+    esta sesión de `sdd-apply` (ver design.md, sección "Open Questions"
+    actualizada, que documenta el nivel de confianza exacto de cada mapeo:
+    el de ZAP fue confirmado en una sesión anterior contra datos reales
+    capturados; los de nuclei/semgrep/trivy/grype se basan en el schema
+    JSON documentado y estable de cada herramienta, no en una recaptura
+    en vivo de esta sesión puntual -- riesgo residual bajo, todo con
+    `.get(...)` tolerante).
+
+    Dispatch por `data["herramienta"]` (presente para hallazgos de
+    `POST /scan`, ver `agents/escaneo.py`: `{"objetivo","herramienta","raw"}`
+    más los campos de verificación al mismo nivel). Cuando `herramienta`
+    está ausente -- alertas planas de escaneo activo
+    (`tools/zap_api.py::get_alerts()`, sin wrapper) o findings legados/de
+    otro origen (ej. `antisuplantacion_findings`) -- se usa el shape plano
+    de ZAP como fallback seguro: si las claves `description`/`solution`/
+    `reference`/`cweid` no existen, simplemente no aparecen (`.get()`
+    devuelve default), no se inventa nada.
+    """
+    defaults = {
+        "descripcion": "",
+        "solucion": "",
+        "referencia": "",
+        "cwe": None,
+        "estado_verificacion": None,
+        "cves_detectados": [],
+        "evidencia_exploitdb": [],
+    }
+    if not raw_json:
+        return defaults
+    try:
+        data = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return defaults
+    if not isinstance(data, dict):
+        return defaults
+
+    resultado = dict(defaults)
+    resultado["estado_verificacion"] = data.get("estado_verificacion")
+    resultado["cves_detectados"] = data.get("cves_detectados") or []
+    resultado["evidencia_exploitdb"] = data.get("evidencia_exploitdb") or []
+
+    herramienta = str(data.get("herramienta") or "").strip().lower()
+    raw = data.get("raw") if isinstance(data.get("raw"), dict) else None
+
+    if herramienta == "nuclei":
+        raw = raw or {}
+        info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+        resultado["descripcion"] = info.get("description") or ""
+        resultado["referencia"] = _texto_desde_lista_o_string(info.get("reference"))
+        clasificacion = info.get("classification") if isinstance(info.get("classification"), dict) else {}
+        resultado["cwe"] = _texto_desde_lista_o_string(clasificacion.get("cwe-id")) or None
+        # Nuclei no tiene un campo de "solución" dedicado en su schema JSONL
+        # -- la remediación (si la hay) viaja dentro de `description`, no en
+        # una clave propia. Se deja vacío a propósito, no inventado.
+
+    elif herramienta == "semgrep":
+        raw = raw or {}
+        extra = raw.get("extra") if isinstance(raw.get("extra"), dict) else {}
+        resultado["descripcion"] = extra.get("message") or ""
+        metadata = extra.get("metadata") if isinstance(extra.get("metadata"), dict) else {}
+        resultado["referencia"] = _texto_desde_lista_o_string(metadata.get("references"))
+        resultado["cwe"] = _texto_desde_lista_o_string(metadata.get("cwe")) or None
+        fix = metadata.get("fix") if isinstance(metadata.get("fix"), str) else None
+        resultado["solucion"] = fix or ""
+
+    elif herramienta == "trivy":
+        raw = raw or {}
+        resultado["descripcion"] = raw.get("Description") or raw.get("Title") or ""
+        resultado["referencia"] = _texto_desde_lista_o_string(raw.get("References"))
+        resultado["cwe"] = _texto_desde_lista_o_string(raw.get("CweIDs")) or None
+        fixed_version = raw.get("FixedVersion")
+        resultado["solucion"] = f"Actualizar a la versión corregida: {fixed_version}" if fixed_version else ""
+
+    elif herramienta == "grype":
+        raw = raw or {}
+        vuln = raw.get("vulnerability") if isinstance(raw.get("vulnerability"), dict) else {}
+        resultado["descripcion"] = vuln.get("description") or ""
+        resultado["referencia"] = _texto_desde_lista_o_string(vuln.get("urls"))
+        fix = vuln.get("fix") if isinstance(vuln.get("fix"), dict) else {}
+        versiones = fix.get("versions") or []
+        resultado["solucion"] = f"Actualizar a: {', '.join(versiones)}" if versiones else ""
+        # Grype no expone CWE en el schema de `matches[].vulnerability` (a
+        # diferencia de Trivy) -- queda None a propósito, no inventado.
+
+    else:
+        # ZAP (`zap-baseline`/`zap-full-scan` con wrapper "herramienta", y
+        # alertas planas de escaneo activo checkpointed sin wrapper) comparten
+        # el mismo shape confirmado: description/solution/reference/cweid a
+        # nivel superior del propio hallazgo (design.md, decisión confirmada
+        # antes de esta sesión). Este mismo bloque es también el fallback
+        # seguro para "herramienta" ausente/desconocida (antisuplantacion,
+        # datos legados): esas claves simplemente no existen ahí y quedan en
+        # default vacío, sin error.
+        raw_plano = raw if raw is not None else data
+        resultado["descripcion"] = raw_plano.get("description") or ""
+        resultado["solucion"] = raw_plano.get("solution") or ""
+        resultado["referencia"] = _texto_desde_lista_o_string(raw_plano.get("reference"))
+        cweid = raw_plano.get("cweid")
+        resultado["cwe"] = str(cweid) if cweid not in (None, "") else None
+
+    return resultado
+
+
+class FindingDetailOut(BaseModel):
+    id: str
+    scan_id: str
+    tipo: str
+    severidad: str
+    endpoint: str
+    confirmado: bool
+    created_at: str
+    descripcion: str = ""
+    solucion: str = ""
+    referencia: str = ""
+    cwe: Optional[str] = None
+    estado_verificacion: Optional[str] = None
+    cves_detectados: list[str] = Field(default_factory=list)
+    evidencia_exploitdb: list[dict] = Field(default_factory=list)
+
+
+@app.get("/findings/{finding_id}", response_model=FindingDetailOut)
+def detalle_finding(finding_id: str, user: UserContext = Depends(get_current_user)) -> FindingDetailOut:
+    """Detalle curado de un hallazgo -- descripción/solución/CWE nativos de
+    la herramienta más los campos que ya calcula `agents/verificacion.py`
+    (`estado_verificacion`, `cves_detectados`, `evidencia_exploitdb`), todo
+    derivado de `findings.raw_json` (sin columna SQL nueva, ver design.md).
+
+    Mismo scoping por tenant que `GET /scans/{scan_id}`: si el hallazgo no
+    existe o pertenece a otro tenant, 404 (no 403) -- no confirmar la
+    existencia del recurso a quien no es su dueño.
+
+    NO devuelve `raw_json` crudo como campo de nivel superior del
+    contrato HTTP -- solo los campos curados de `FindingDetailOut`.
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM findings WHERE id = ? AND tenant_id = ?", (finding_id, user.tenant_id)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Hallazgo no encontrado")
+
+    detalle = _detalle_desde_raw_json(row["raw_json"])
+    return FindingDetailOut(
+        id=row["id"],
+        scan_id=row["scan_id"],
+        tipo=row["tipo"],
+        severidad=row["severidad"],
+        endpoint=row["endpoint"],
+        confirmado=bool(row["confirmado"]),
+        created_at=row["created_at"],
+        **detalle,
+    )
+
+
 class CumplimientoCategoriaOut(BaseModel):
     categoria: str
     nombre: str
@@ -1184,16 +1370,28 @@ def _correr_escaneo_activo_en_background(
             (estado_final, reporte, now, scan_id),
         )
         for hallazgo in hallazgos:
+            # Fase 1 (openspec/changes/fase1-deteccion-visible): antes de este
+            # cambio, cada alerta se insertaba con `confirmado=0` fijo -- el
+            # escaneo activo nunca corría `agents/verificacion.py`. Ahora se
+            # aplica la misma verificación determinista (Exploit-DB offline)
+            # que ya corre implícitamente en el escaneo pasivo dentro del
+            # grafo, ANTES del INSERT. El resultado (confirmado real +
+            # estado_verificacion + cves_detectados + evidencia_exploitdb) se
+            # persiste completo en `raw_json` -- `verificar_un_hallazgo` hace
+            # `{**hallazgo, ...}`, así que ninguna clave original (`name`,
+            # `risk`/`riskdesc`, `url`, etc.) se pierde para las lecturas de
+            # abajo (`normalize_severity`, endpoint).
+            hallazgo_verificado = verificar_un_hallazgo(hallazgo)
             conn.execute(
                 """
                 INSERT INTO findings (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
                     scan_id,
                     tenant_id,
-                    hallazgo.get("name", "desconocido"),
+                    hallazgo_verificado.get("name", "desconocido"),
                     # Bug real cerrado esta sesión (ver tools/_shared.py::normalize_severity):
                     # estos hallazgos vienen de tools/zap_api.py::get_alerts()
                     # (`core/view/alerts/`, formato de la API real de ZAP), que
@@ -1203,15 +1401,18 @@ def _correr_escaneo_activo_en_background(
                     # `.get("riskdesc", "info")` de antes caía siempre al default
                     # literal para el 100% de estos hallazgos (1280/1280
                     # verificado en ciberseguridad.db).
-                    normalize_severity(hallazgo, "zap"),
+                    normalize_severity(hallazgo_verificado, "zap"),
                     # Mismo bug de forma, en el campo endpoint: get_alerts()
                     # devuelve una fila POR INSTANCIA con su propio `url` de
                     # nivel superior -- nunca trae `instances` (eso es del
                     # formato de reporte JSON, no de la API). El `.get("instances")`
                     # de antes también caía siempre a "" para estos hallazgos
                     # (confirmado: 1280/1280 con endpoint vacío en la DB real).
-                    hallazgo.get("url") or (hallazgo.get("instances") or [{}])[0].get("uri", ""),
-                    json.dumps(hallazgo),
+                    hallazgo_verificado.get("url") or (hallazgo_verificado.get("instances") or [{}])[0].get("uri", ""),
+                    # Fase 1: `confirmado` real (0 o 1 según Exploit-DB), ya no
+                    # el 0 fijo de antes.
+                    int(bool(hallazgo_verificado["confirmado"])),
+                    json.dumps(hallazgo_verificado),
                 ),
             )
         conn.commit()

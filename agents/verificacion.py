@@ -105,6 +105,20 @@ def _verificar_un_hallazgo(hallazgo: dict) -> dict:
     }
 
 
+def verificar_un_hallazgo(hallazgo: dict) -> dict:
+    """Wrapper público de `_verificar_un_hallazgo` -- mismo contrato exacto,
+    pensado para reutilizarse fuera del grafo LangGraph (ver
+    `api/main.py::_correr_escaneo_activo_en_background`, que aplica esta
+    misma verificación determinista sobre cada alerta de ZAP antes de
+    persistirla en `findings`, cerrando la brecha de "todo se inserta con
+    confirmado=0 fijo" -- ver openspec/changes/fase1-deteccion-visible).
+
+    `node()` sigue llamando a `_verificar_un_hallazgo` directamente -- este
+    wrapper no cambia el comportamiento del grafo (`POST /scan`) en nada.
+    """
+    return _verificar_un_hallazgo(hallazgo)
+
+
 def node(state: PipelineState) -> dict:
     hallazgos_crudos = state.get("scan_findings") or []
     verificados = [_verificar_un_hallazgo(h) for h in hallazgos_crudos]

@@ -4,6 +4,7 @@ import { useAuth } from "../AuthContext";
 import { api, ApiError, type Asset, type CumplimientoReport, type Finding, type ScanDetail, type ScanHistoryItem } from "../api";
 import ScanHistoryChart from "../components/ScanHistoryChart";
 import Equipo from "../components/Equipo";
+import FindingDetailPanel from "../components/FindingDetailPanel";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -68,6 +69,10 @@ export default function Dashboard() {
   const [assetVerificando, setAssetVerificando] = useState<string | null>(null);
   const [assetExpandido, setAssetExpandido] = useState<string | null>(null);
   const [metodoElegido, setMetodoElegido] = useState<Record<string, "dns_txt" | "http_file">>({});
+  // Fase 1 (openspec/changes/fase1-deteccion-visible): id del hallazgo cuyo
+  // panel de detalle está abierto (null = cerrado). Compartido por ambas
+  // tablas de hallazgos (general y detalle de scan).
+  const [findingIdAbierto, setFindingIdAbierto] = useState<string | null>(null);
 
   const cargarTodo = async () => {
     setCargando(true);
@@ -521,7 +526,12 @@ export default function Dashboard() {
                   </thead>
                   <tbody>
                     {findingsFiltrados.slice(0, 100).map((f) => (
-                      <tr key={f.id} style={{ borderTop: "0.5px solid var(--border)" }}>
+                      <tr
+                        key={f.id}
+                        onClick={() => setFindingIdAbierto(f.id)}
+                        style={{ borderTop: "0.5px solid var(--border)", cursor: "pointer" }}
+                        title="Ver detalle del hallazgo"
+                      >
                         <td style={{ padding: "0.5rem 0.5rem" }}>
                           <span className={`chip ${f.severidad}`}>{SEV_LABEL[f.severidad] ?? f.severidad}</span>
                         </td>
@@ -530,8 +540,18 @@ export default function Dashboard() {
                           {f.endpoint || "—"}
                         </td>
                         <td style={{ padding: "0.5rem 0.5rem" }}>
+                          {/* GET /findings (esta tabla) sólo trae `confirmado` --
+                              expuesto a propósito para no inflar el payload de la
+                              lista con estado_verificacion/evidencia (ver design.md,
+                              Decision "FindingDetailOut como modelo nuevo"). Cuando
+                              confirmado=true SIEMPRE es porque estado_verificacion
+                              == confirmado_via_exploitdb (ver agents/verificacion.py),
+                              así que ese texto es exacto sin necesitar el detalle. El
+                              caso false invita a abrir el panel para ver CUÁL de los
+                              otros 2 estados aplica -- 3 estados explicados en vivo
+                              en el panel (GET /findings/{id}), no aquí. */}
                           <span className={`chip ${f.confirmado ? "verificado" : "info"}`}>
-                            {f.confirmado ? "confirmado" : "sin confirmar"}
+                            {f.confirmado ? "confirmado vía Exploit-DB" : "sin confirmar — ver detalle"}
                           </span>
                         </td>
                       </tr>
@@ -671,7 +691,12 @@ export default function Dashboard() {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                   <tbody>
                     {ordenarPorSev(scanVisto.findings).map((f) => (
-                      <tr key={f.id} style={{ borderTop: "0.5px solid var(--border)" }}>
+                      <tr
+                        key={f.id}
+                        onClick={() => setFindingIdAbierto(f.id)}
+                        style={{ borderTop: "0.5px solid var(--border)", cursor: "pointer" }}
+                        title="Ver detalle del hallazgo"
+                      >
                         <td style={{ padding: "0.45rem 0.5rem" }}>
                           <span className={`chip ${f.severidad}`}>{SEV_LABEL[f.severidad] ?? f.severidad}</span>
                         </td>
@@ -811,6 +836,8 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      <FindingDetailPanel findingId={findingIdAbierto} onClose={() => setFindingIdAbierto(null)} />
     </div>
   );
 }

@@ -136,6 +136,17 @@ select:focus {
   background: var(--verified-bg);
   color: var(--verified);
 }
+/* Fase 1 (openspec/changes/fase1-deteccion-visible), Task 0.3: tercer
+   estado del chip de verificación explicado -- "CVE real referenciado,
+   pero sin PoC pública indexada en Exploit-DB". Reusa `.chip.info` para
+   "no verificable (sin CVE)" y `.chip.verificado` para "confirmado vía
+   Exploit-DB"; este es el único visual nuevo, deliberadamente distinto de
+   ambos (borde marcado en vez de solo relleno). */
+.chip.sin-poc {
+  background: var(--bg-sunken);
+  color: var(--accent-ink);
+  border: 1px solid var(--border-strong);
+}
 
 .card {
   background: var(--bg-raised);
