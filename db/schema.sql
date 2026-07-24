@@ -133,6 +133,40 @@ CREATE TABLE IF NOT EXISTS findings (
 CREATE INDEX IF NOT EXISTS idx_findings_tenant_id ON findings(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id);
 
+-- Historial de auditoría de cada cambio de `estado`/`owner_user_id` de un
+-- finding (openspec/changes/fase2a-ciclo-vida-hallazgo) -- una fila por
+-- cambio, no un campo "última nota" en `findings`: se necesita el
+-- historial completo (quién, cuándo, qué cambió) para que
+-- `fase2c-verificacion-cierre-y-kpis` calcule MTTR real a partir de
+-- timestamps reales entre transiciones, no aproximados. `changed_by NULL`
+-- significa que el cambio lo hizo el sistema (detección de reincidencia al
+-- insertar findings de un scan nuevo), no un usuario vía `PATCH /findings/{id}`.
+CREATE TABLE IF NOT EXISTS finding_transiciones (
+    id              TEXT PRIMARY KEY,
+    finding_id      TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    estado_anterior TEXT,
+    estado_nuevo    TEXT,
+    owner_anterior  TEXT,
+    owner_nuevo     TEXT,
+    nota            TEXT NOT NULL DEFAULT '',
+    changed_by      TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_finding_transiciones_finding_id ON finding_transiciones(finding_id);
+
+-- Config de SLA por tenant (opcional, 1:1 con tenants) -- si un tenant no
+-- tiene fila aquí, `_calcular_sla_due_at` usa el default embebido
+-- (`DEFAULT_SLA_DIAS` en api/main.py). `dias_low` puede quedar NULL a
+-- propósito (best-effort, sin plazo) -- ver design.md.
+CREATE TABLE IF NOT EXISTS tenant_sla_config (
+    tenant_id     TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    dias_critical INTEGER NOT NULL DEFAULT 7,
+    dias_high     INTEGER NOT NULL DEFAULT 30,
+    dias_medium   INTEGER NOT NULL DEFAULT 90,
+    dias_low      INTEGER
+);
+
 -- Invitaciones a un tenant existente — item transversal de HANDOFF.md
 -- ("invitar más usuarios al mismo tenant"). `users.email` es UNIQUE global
 -- (una cuenta = un tenant), así que una invitación aceptada NO crea un

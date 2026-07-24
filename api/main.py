@@ -298,6 +298,11 @@ class ScanHistoryItem(BaseModel):
 
 
 class FindingOut(BaseModel):
+    """Contrato exacto fijado en design.md de `fase2a-ciclo-vida-hallazgo` --
+    `fase2b-tablero-remediacion` (frontend, en paralelo) construye contra
+    estos 6 campos nuevos sin ver código; no cambiar sin nueva ronda de diseño.
+    """
+
     id: str
     scan_id: str
     tipo: str
@@ -305,6 +310,12 @@ class FindingOut(BaseModel):
     endpoint: str
     confirmado: bool
     created_at: str
+    estado: str
+    owner_user_id: Optional[str] = None
+    owner_email: Optional[str] = None
+    sla_due_at: Optional[str] = None
+    primera_vez_visto: Optional[str] = None
+    ultima_vez_visto: Optional[str] = None
 
 
 def _slugify(nombre: str) -> str:
@@ -603,28 +614,44 @@ def listar_scans(user: UserContext = Depends(get_current_user)) -> list[ScanHist
     ]
 
 
+def _finding_out_de_row(d: dict) -> FindingOut:
+    """Proyecta una fila de `findings` (opcionalmente con `owner_email` ya
+    resuelto vía LEFT JOIN a `users`) a `FindingOut` -- centraliza el mapeo
+    de los 6 campos de ciclo de vida usados por `listar_findings`,
+    `detalle_scan`, y `PATCH /findings/{id}` (ver design.md, contrato fijo)."""
+    return FindingOut(
+        id=d["id"],
+        scan_id=d["scan_id"],
+        tipo=d["tipo"],
+        severidad=d["severidad"],
+        endpoint=d["endpoint"],
+        confirmado=bool(d["confirmado"]),
+        created_at=d["created_at"],
+        estado=d["estado"],
+        owner_user_id=d.get("owner_user_id"),
+        owner_email=d.get("owner_email"),
+        sla_due_at=d.get("sla_due_at"),
+        primera_vez_visto=d.get("primera_vez_visto"),
+        ultima_vez_visto=d.get("ultima_vez_visto"),
+    )
+
+
 @app.get("/findings", response_model=list[FindingOut])
 def listar_findings(user: UserContext = Depends(get_current_user)) -> list[FindingOut]:
     """Todos los hallazgos del tenant, más recientes primero — usado por el panel para el resumen de riesgo."""
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT * FROM findings WHERE tenant_id = ? ORDER BY created_at DESC", (user.tenant_id,)
+            """
+            SELECT f.*, u.email AS owner_email
+            FROM findings f LEFT JOIN users u ON u.id = f.owner_user_id
+            WHERE f.tenant_id = ? ORDER BY f.created_at DESC
+            """,
+            (user.tenant_id,),
         ).fetchall()
     finally:
         conn.close()
-    return [
-        FindingOut(
-            id=r["id"],
-            scan_id=r["scan_id"],
-            tipo=r["tipo"],
-            severidad=r["severidad"],
-            endpoint=r["endpoint"],
-            confirmado=bool(r["confirmado"]),
-            created_at=r["created_at"],
-        )
-        for r in rows
-    ]
+    return [_finding_out_de_row(dict_from_row(r)) for r in rows]
 
 
 def _texto_desde_lista_o_string(valor: Any) -> str:
@@ -773,6 +800,14 @@ class FindingDetailOut(BaseModel):
     estado_verificacion: Optional[str] = None
     cves_detectados: list[str] = Field(default_factory=list)
     evidencia_exploitdb: list[dict] = Field(default_factory=list)
+    # Mismos 6 campos de ciclo de vida que `FindingOut` (ver design.md,
+    # fase2a-ciclo-vida-hallazgo) -- mismos nombres/tipos, contrato fijo.
+    estado: str = "descubierto"
+    owner_user_id: Optional[str] = None
+    owner_email: Optional[str] = None
+    sla_due_at: Optional[str] = None
+    primera_vez_visto: Optional[str] = None
+    ultima_vez_visto: Optional[str] = None
 
 
 @app.get("/findings/{finding_id}", response_model=FindingDetailOut)
@@ -792,7 +827,12 @@ def detalle_finding(finding_id: str, user: UserContext = Depends(get_current_use
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT * FROM findings WHERE id = ? AND tenant_id = ?", (finding_id, user.tenant_id)
+            """
+            SELECT f.*, u.email AS owner_email
+            FROM findings f LEFT JOIN users u ON u.id = f.owner_user_id
+            WHERE f.id = ? AND f.tenant_id = ?
+            """,
+            (finding_id, user.tenant_id),
         ).fetchone()
     finally:
         conn.close()
@@ -808,8 +848,142 @@ def detalle_finding(finding_id: str, user: UserContext = Depends(get_current_use
         endpoint=row["endpoint"],
         confirmado=bool(row["confirmado"]),
         created_at=row["created_at"],
+        estado=row["estado"],
+        owner_user_id=row["owner_user_id"],
+        owner_email=row["owner_email"],
+        sla_due_at=row["sla_due_at"],
+        primera_vez_visto=row["primera_vez_visto"],
+        ultima_vez_visto=row["ultima_vez_visto"],
         **detalle,
     )
+
+
+class FindingPatchIn(BaseModel):
+    """Payload de `PATCH /findings/{id}` -- ver design.md, contrato fijo para
+    `fase2b-tablero-remediacion`. `estado` debe ser uno de los 8 valores del
+    enum de `findings.estado`; `nota` es obligatoria (no vacía) cuando se
+    envía `estado` -- se valida en el endpoint, no aquí, porque el 409 de
+    transición inválida debe evaluarse ANTES que la falta de nota (ver
+    spec.md, escenario "Transición inválida": pide 409 con un body que
+    tampoco trae `nota`)."""
+
+    estado: Optional[str] = None
+    owner_user_id: Optional[str] = None
+    nota: Optional[str] = Field(default=None, min_length=1)
+
+
+@app.patch("/findings/{finding_id}", response_model=FindingOut)
+def actualizar_finding(
+    finding_id: str, payload: FindingPatchIn, user: UserContext = Depends(get_current_user)
+) -> FindingOut:
+    """Ciclo de vida del hallazgo (Fase 2a): transición de `estado` validada
+    contra `TRANSICIONES_VALIDAS`, reasignación de `owner_user_id` (debe
+    pertenecer al mismo tenant), y auditoría obligatoria -- cada cambio
+    aplicado registra una fila nueva en `finding_transiciones` con timestamp
+    real (`created_at` por DEFAULT CURRENT_TIMESTAMP), no aproximado --
+    `fase2c-verificacion-cierre-y-kpis` (futura) calculará MTTR a partir de
+    esas filas.
+
+    Mismo scoping por tenant y mismo criterio 404-no-403 que
+    `GET /findings/{id}` -- ver ese docstring: no se confirma la existencia
+    del recurso a quien no es su dueño.
+    """
+    if payload.estado is None and payload.owner_user_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Debe enviarse 'estado' y/o 'owner_user_id'.",
+        )
+
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM findings WHERE id = ? AND tenant_id = ?", (finding_id, user.tenant_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Hallazgo no encontrado")
+        finding = dict_from_row(row)
+        estado_actual = finding["estado"]
+
+        estado_nuevo: Optional[str] = None
+        if payload.estado is not None:
+            if payload.estado not in TRANSICIONES_VALIDAS:
+                raise HTTPException(
+                    status_code=422, detail=f"'{payload.estado}' no es un estado válido."
+                )
+            # Chequeo de la máquina de estados ANTES que el de nota
+            # obligatoria a propósito -- ver spec.md, escenario "Transición
+            # inválida": un salto no permitido (ej. descubierto->cerrado)
+            # debe responder 409 aunque tampoco traiga `nota`.
+            if payload.estado not in TRANSICIONES_VALIDAS.get(estado_actual, set()):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Transición inválida: '{estado_actual}' -> '{payload.estado}'.",
+                )
+            if not payload.nota:
+                raise HTTPException(
+                    status_code=422,
+                    detail="'nota' es obligatoria cuando se envía 'estado'.",
+                )
+            estado_nuevo = payload.estado
+
+        owner_nuevo: Optional[str] = None
+        if payload.owner_user_id is not None:
+            pertenece_al_tenant = conn.execute(
+                "SELECT 1 FROM users WHERE id = ? AND tenant_id = ?",
+                (payload.owner_user_id, user.tenant_id),
+            ).fetchone()
+            if pertenece_al_tenant is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="owner_user_id no pertenece a este tenant.",
+                )
+            owner_nuevo = payload.owner_user_id
+
+        set_clauses: list[str] = []
+        params: list[Any] = []
+        if estado_nuevo is not None:
+            set_clauses.append("estado = ?")
+            params.append(estado_nuevo)
+        if owner_nuevo is not None:
+            set_clauses.append("owner_user_id = ?")
+            params.append(owner_nuevo)
+        if set_clauses:
+            params.append(finding_id)
+            conn.execute(f"UPDATE findings SET {', '.join(set_clauses)} WHERE id = ?", params)
+
+        conn.execute(
+            """
+            INSERT INTO finding_transiciones
+                (id, finding_id, tenant_id, estado_anterior, estado_nuevo,
+                 owner_anterior, owner_nuevo, nota, changed_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                finding_id,
+                user.tenant_id,
+                estado_actual if estado_nuevo is not None else None,
+                estado_nuevo,
+                finding["owner_user_id"] if owner_nuevo is not None else None,
+                owner_nuevo,
+                payload.nota or "",
+                user.user_id,
+            ),
+        )
+        conn.commit()
+
+        row_actualizado = conn.execute(
+            """
+            SELECT f.*, u.email AS owner_email
+            FROM findings f LEFT JOIN users u ON u.id = f.owner_user_id
+            WHERE f.id = ?
+            """,
+            (finding_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return _finding_out_de_row(dict_from_row(row_actualizado))
 
 
 class CumplimientoCategoriaOut(BaseModel):
@@ -1006,6 +1180,160 @@ def _extraer_findings_antisuplantacion(target: str, antisuplantacion_findings: l
     return filas
 
 
+# ---------------------------------------------------------------------------
+# Ciclo de vida del hallazgo (openspec/changes/fase2a-ciclo-vida-hallazgo):
+# máquina de estados de `PATCH /findings/{id}`, cálculo de `sla_due_at` por
+# severidad al insertar, y detección de reincidencia (drift) contra
+# hallazgos existentes del mismo asset. Ver design.md, Data Flow.
+# ---------------------------------------------------------------------------
+
+# Contrato exacto fijado en design.md -- no cambia sin nueva ronda de diseño
+# porque `fase2b-tablero-remediacion` (frontend, en paralelo) construye
+# contra este contrato de PATCH sin ver código.
+TRANSICIONES_VALIDAS: dict[str, set[str]] = {
+    "descubierto": {"triage", "aceptado_riesgo"},
+    "triage": {"asignado", "aceptado_riesgo"},
+    "asignado": {"en_progreso", "aceptado_riesgo"},
+    "en_progreso": {"mitigado", "aceptado_riesgo"},
+    "mitigado": {"verificado", "aceptado_riesgo"},
+    "verificado": {"cerrado", "aceptado_riesgo"},
+    "cerrado": set(),
+    "aceptado_riesgo": set(),
+}
+
+# Días de plazo por severidad -- default embebido, usado cuando el tenant no
+# tiene una fila propia en `tenant_sla_config`. `None` = sin plazo (best-effort).
+DEFAULT_SLA_DIAS: dict[str, int | None] = {
+    "critical": 7,
+    "high": 30,
+    "medium": 90,
+    "low": None,
+    "info": None,
+}
+
+
+def _calcular_sla_due_at(conn, tenant_id: str, severidad: str, created_at: str) -> str | None:
+    """`sla_due_at = created_at + N días` según `severidad`, usando la config
+    propia del tenant (`tenant_sla_config`) si existe, si no `DEFAULT_SLA_DIAS`.
+
+    `created_at` es un string ISO 8601 (mismo formato que ya produce el resto
+    de este archivo, `datetime.now(timezone.utc).isoformat()`).
+    """
+    dias_por_severidad = dict(DEFAULT_SLA_DIAS)
+    config_row = conn.execute(
+        "SELECT * FROM tenant_sla_config WHERE tenant_id = ?", (tenant_id,)
+    ).fetchone()
+    if config_row is not None:
+        config = dict_from_row(config_row)
+        dias_por_severidad["critical"] = config["dias_critical"]
+        dias_por_severidad["high"] = config["dias_high"]
+        dias_por_severidad["medium"] = config["dias_medium"]
+        dias_por_severidad["low"] = config["dias_low"]
+
+    dias = dias_por_severidad.get(severidad)
+    if dias is None:
+        return None
+    return (datetime.fromisoformat(created_at) + timedelta(days=dias)).isoformat()
+
+
+def _registrar_findings_con_ciclo_de_vida(
+    conn,
+    tenant_id: str,
+    scan_id: str,
+    asset_id: Optional[str],
+    hallazgos: list[dict],
+    now: str,
+) -> None:
+    """Inserta o actualiza findings aplicando SLA (por severidad) y detección
+    de reincidencia (drift) contra hallazgos previos del mismo asset -- ver
+    design.md, Data Flow. Compartida por ambos paths de inserción (`scan()` y
+    `_correr_escaneo_activo_en_background`) para que esta lógica viva en un
+    solo lugar.
+
+    `hallazgos` ya viene normalizado por el llamador: cada dict trae `tipo`,
+    `severidad`, `endpoint`, `confirmado` (bool/int), `raw_json` (string JSON
+    ya serializado) -- exactamente los mismos valores que antes se pasaban
+    directo al `INSERT INTO findings` en cada call site.
+
+    `asset_id` puede ser `None` (scan sin asset resoluble) -- la subquery de
+    abajo (`scans.asset_id = ? AND asset_id IS NOT NULL`) nunca matchea con
+    parámetro `None` (comparación con NULL en SQL), así que todo hallazgo se
+    trata como nuevo, nunca como reincidencia falsa (ver spec.md, escenario
+    "Scan sin asset resoluble no participa del drift").
+    """
+    for hallazgo in hallazgos:
+        tipo = hallazgo["tipo"]
+        endpoint = hallazgo["endpoint"]
+        match = conn.execute(
+            """
+            SELECT id, estado FROM findings
+            WHERE tenant_id = ? AND tipo = ? AND endpoint = ?
+              AND scan_id IN (
+                  SELECT id FROM scans WHERE asset_id = ? AND asset_id IS NOT NULL
+              )
+            """,
+            (tenant_id, tipo, endpoint, asset_id),
+        ).fetchone()
+
+        if match is not None:
+            match = dict_from_row(match)
+            if match["estado"] in ("cerrado", "verificado", "aceptado_riesgo"):
+                # Reincidencia: el hallazgo había sido cerrado/verificado/
+                # aceptado y volvió a aparecer -- se reabre y se deja rastro
+                # en finding_transiciones (changed_by=NULL -- lo hizo el
+                # sistema, no un usuario vía PATCH).
+                conn.execute(
+                    "UPDATE findings SET estado = 'descubierto', ultima_vez_visto = ? WHERE id = ?",
+                    (now, match["id"]),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO finding_transiciones
+                        (id, finding_id, tenant_id, estado_anterior, estado_nuevo,
+                         owner_anterior, owner_nuevo, nota, changed_by, created_at)
+                    VALUES (?, ?, ?, ?, 'descubierto', NULL, NULL, ?, NULL, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        match["id"],
+                        tenant_id,
+                        match["estado"],
+                        "reincidencia detectada automáticamente",
+                        now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE findings SET ultima_vez_visto = ? WHERE id = ?",
+                    (now, match["id"]),
+                )
+            continue
+
+        sla_due_at = _calcular_sla_due_at(conn, tenant_id, hallazgo["severidad"], now)
+        conn.execute(
+            """
+            INSERT INTO findings
+                (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json,
+                 created_at, sla_due_at, primera_vez_visto, ultima_vez_visto)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                scan_id,
+                tenant_id,
+                tipo,
+                hallazgo["severidad"],
+                endpoint,
+                int(bool(hallazgo["confirmado"])),
+                hallazgo["raw_json"],
+                now,
+                sla_due_at,
+                now,
+                now,
+            ),
+        )
+
+
 @app.post("/scan", response_model=ScanResponse)
 def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) -> ScanResponse:
     """Dispara el pipeline completo (`orchestrator.graph`) para `target`, para el tenant autenticado.
@@ -1027,7 +1355,7 @@ def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) ->
     """
     conn_check = get_conn()
     try:
-        autorizado, motivo, _asset = _asset_verificado_para_target(conn_check, user.tenant_id, payload.target)
+        autorizado, motivo, asset = _asset_verificado_para_target(conn_check, user.tenant_id, payload.target)
     finally:
         conn_check.close()
     if not autorizado:
@@ -1052,12 +1380,19 @@ def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) ->
         conn.execute(
             """
             INSERT INTO scans
-                (id, tenant_id, target, autorizacion_firmada, estado, reporte_final, trace_log_json, completed_at)
-            VALUES (?, ?, ?, ?, 'completado', ?, ?, ?)
+                (id, tenant_id, asset_id, target, autorizacion_firmada, estado, reporte_final, trace_log_json, completed_at)
+            VALUES (?, ?, ?, ?, ?, 'completado', ?, ?, ?)
             """,
             (
                 scan_id,
                 user.tenant_id,
+                # `asset` ya viene resuelto por `_asset_verificado_para_target` de
+                # arriba (garantizado no-None a esta altura -- si fuera None,
+                # `autorizado` habría sido False y ya se habría lanzado el 403) --
+                # antes de esta sesión se descartaba (`_asset`) y `scans.asset_id`
+                # nunca se poblaba, dejando el drift de fase2a sin llave de scoping
+                # (ver design.md, "Poblar scans.asset_id").
+                asset["id"] if asset else None,
                 estado_final.get("target", payload.target),
                 int(bool(estado_final.get("autorizacion_firmada", payload.autorizacion_firmada))),
                 estado_final.get("reporte_final"),
@@ -1065,31 +1400,23 @@ def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) ->
                 now,
             ),
         )
-        for hallazgo in verified:
-            conn.execute(
-                """
-                INSERT INTO findings (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    scan_id,
-                    user.tenant_id,
-                    hallazgo.get("tipo") or hallazgo.get("type") or "desconocido",
-                    # Bug real cerrado esta sesión (ver tools/_shared.py::normalize_severity):
-                    # `hallazgo.get("severidad")`/`("severity")` NUNCA existen a nivel
-                    # superior -- `agents/verificacion.py` solo agrega metadata de
-                    # verificación sobre `{"objetivo","herramienta","raw"}`
-                    # (`agents/escaneo.py`), la severidad real vive dentro de `raw`
-                    # con vocabulario propio de cada herramienta. Este `.get()` viejo
-                    # siempre caía en "info" -- causa raíz confirmada de que
-                    # findings.severidad valiera "info" para ~99% de las filas reales.
-                    normalize_severity(hallazgo.get("raw"), hallazgo.get("herramienta", "")),
-                    hallazgo.get("endpoint") or hallazgo.get("objetivo") or "",
-                    int(bool(hallazgo.get("confirmado"))),
-                    json.dumps(hallazgo),
-                ),
-            )
+
+        # Normaliza cada hallazgo verificado a la forma que espera
+        # `_registrar_findings_con_ciclo_de_vida` -- mismo cálculo de
+        # tipo/severidad/endpoint/confirmado que antes se pasaba directo al
+        # INSERT (ver comentario histórico sobre el bug de severidad/endpoint
+        # en tools/_shared.py::normalize_severity), ahora centralizado para
+        # aplicar también SLA + drift antes de tocar `findings`.
+        hallazgos_normalizados = [
+            {
+                "tipo": hallazgo.get("tipo") or hallazgo.get("type") or "desconocido",
+                "severidad": normalize_severity(hallazgo.get("raw"), hallazgo.get("herramienta", "")),
+                "endpoint": hallazgo.get("endpoint") or hallazgo.get("objetivo") or "",
+                "confirmado": bool(hallazgo.get("confirmado")),
+                "raw_json": json.dumps(hallazgo),
+            }
+            for hallazgo in verified
+        ]
 
         # Cierra la brecha documentada en docs/cumplimiento.md / HANDOFF.md
         # (Item 6): las señales reales de dnstwist/Sherlock bajo demanda
@@ -1098,22 +1425,20 @@ def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) ->
             estado_final.get("target", payload.target),
             estado_final.get("antisuplantacion_findings") or [],
         )
-        for fila in antisuplantacion_rows:
-            conn.execute(
-                """
-                INSERT INTO findings (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    scan_id,
-                    user.tenant_id,
-                    fila["tipo"],
-                    fila["severidad"],
-                    fila["endpoint"],
-                    json.dumps(fila["raw_json"], default=str),
-                ),
-            )
+        hallazgos_normalizados.extend(
+            {
+                "tipo": fila["tipo"],
+                "severidad": fila["severidad"],
+                "endpoint": fila["endpoint"],
+                "confirmado": False,
+                "raw_json": json.dumps(fila["raw_json"], default=str),
+            }
+            for fila in antisuplantacion_rows
+        )
+
+        _registrar_findings_con_ciclo_de_vida(
+            conn, user.tenant_id, scan_id, asset["id"] if asset else None, hallazgos_normalizados, now
+        )
 
         conn.commit()
     finally:
@@ -1326,7 +1651,7 @@ def _persistir_progreso_checkpoint(scan_id: str, progreso) -> None:
 
 
 def _correr_escaneo_activo_en_background(
-    scan_id: str, tenant_id: str, payload: ActiveScanRequest
+    scan_id: str, tenant_id: str, asset_id: Optional[str], payload: ActiveScanRequest
 ) -> None:
     """Ejecuta el escaneo activo en un thread separado y actualiza la fila `scans` al terminar.
 
@@ -1369,52 +1694,37 @@ def _correr_escaneo_activo_en_background(
             "UPDATE scans SET estado = ?, reporte_final = ?, completed_at = ? WHERE id = ?",
             (estado_final, reporte, now, scan_id),
         )
+
+        # Fase 1 (openspec/changes/fase1-deteccion-visible): antes de ese
+        # cambio, cada alerta se insertaba con `confirmado=0` fijo -- el
+        # escaneo activo nunca corría `agents/verificacion.py`. Ahora se
+        # aplica la misma verificación determinista (Exploit-DB offline) que
+        # ya corre implícitamente en el escaneo pasivo dentro del grafo, ANTES
+        # de normalizar para `_registrar_findings_con_ciclo_de_vida`.
+        hallazgos_normalizados = []
         for hallazgo in hallazgos:
-            # Fase 1 (openspec/changes/fase1-deteccion-visible): antes de este
-            # cambio, cada alerta se insertaba con `confirmado=0` fijo -- el
-            # escaneo activo nunca corría `agents/verificacion.py`. Ahora se
-            # aplica la misma verificación determinista (Exploit-DB offline)
-            # que ya corre implícitamente en el escaneo pasivo dentro del
-            # grafo, ANTES del INSERT. El resultado (confirmado real +
-            # estado_verificacion + cves_detectados + evidencia_exploitdb) se
-            # persiste completo en `raw_json` -- `verificar_un_hallazgo` hace
-            # `{**hallazgo, ...}`, así que ninguna clave original (`name`,
-            # `risk`/`riskdesc`, `url`, etc.) se pierde para las lecturas de
-            # abajo (`normalize_severity`, endpoint).
             hallazgo_verificado = verificar_un_hallazgo(hallazgo)
-            conn.execute(
-                """
-                INSERT INTO findings (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    scan_id,
-                    tenant_id,
-                    hallazgo_verificado.get("name", "desconocido"),
-                    # Bug real cerrado esta sesión (ver tools/_shared.py::normalize_severity):
-                    # estos hallazgos vienen de tools/zap_api.py::get_alerts()
-                    # (`core/view/alerts/`, formato de la API real de ZAP), que
-                    # NUNCA trae `riskdesc` -- solo `run_zap_baseline`/
-                    # `run_zap_active_scan` (tools/scan.py, reporte JSON de
-                    # zap-baseline.py/zap-full-scan.py) traen esa clave. El
-                    # `.get("riskdesc", "info")` de antes caía siempre al default
-                    # literal para el 100% de estos hallazgos (1280/1280
-                    # verificado en ciberseguridad.db).
-                    normalize_severity(hallazgo_verificado, "zap"),
-                    # Mismo bug de forma, en el campo endpoint: get_alerts()
+            hallazgos_normalizados.append(
+                {
+                    "tipo": hallazgo_verificado.get("name", "desconocido"),
+                    # Bug real cerrado en una sesión anterior (ver
+                    # tools/_shared.py::normalize_severity): estos hallazgos
+                    # vienen de tools/zap_api.py::get_alerts() (formato de la
+                    # API real de ZAP), que nunca trae `riskdesc`.
+                    "severidad": normalize_severity(hallazgo_verificado, "zap"),
+                    # Mismo bug de forma en el campo endpoint: get_alerts()
                     # devuelve una fila POR INSTANCIA con su propio `url` de
-                    # nivel superior -- nunca trae `instances` (eso es del
-                    # formato de reporte JSON, no de la API). El `.get("instances")`
-                    # de antes también caía siempre a "" para estos hallazgos
-                    # (confirmado: 1280/1280 con endpoint vacío en la DB real).
-                    hallazgo_verificado.get("url") or (hallazgo_verificado.get("instances") or [{}])[0].get("uri", ""),
-                    # Fase 1: `confirmado` real (0 o 1 según Exploit-DB), ya no
-                    # el 0 fijo de antes.
-                    int(bool(hallazgo_verificado["confirmado"])),
-                    json.dumps(hallazgo_verificado),
-                ),
+                    # nivel superior, nunca `instances`.
+                    "endpoint": hallazgo_verificado.get("url")
+                    or (hallazgo_verificado.get("instances") or [{}])[0].get("uri", ""),
+                    "confirmado": bool(hallazgo_verificado["confirmado"]),
+                    "raw_json": json.dumps(hallazgo_verificado),
+                }
             )
+
+        _registrar_findings_con_ciclo_de_vida(
+            conn, tenant_id, scan_id, asset_id, hallazgos_normalizados, now
+        )
         conn.commit()
     finally:
         conn.close()
@@ -1433,15 +1743,15 @@ def escaneo_activo_async(
     scan_id = str(uuid.uuid4())
     conn = get_conn()
     try:
-        autorizado, motivo, _asset = _asset_verificado_para_target(conn, user.tenant_id, payload.target_url)
+        autorizado, motivo, asset = _asset_verificado_para_target(conn, user.tenant_id, payload.target_url)
         if not autorizado:
             raise HTTPException(status_code=403, detail=motivo)
         conn.execute(
             """
-            INSERT INTO scans (id, tenant_id, target, autorizacion_firmada, estado, trace_log_json)
-            VALUES (?, ?, ?, 1, 'corriendo', '[]')
+            INSERT INTO scans (id, tenant_id, asset_id, target, autorizacion_firmada, estado, trace_log_json)
+            VALUES (?, ?, ?, ?, 1, 'corriendo', '[]')
             """,
-            (scan_id, user.tenant_id, payload.target_url),
+            (scan_id, user.tenant_id, asset["id"] if asset else None, payload.target_url),
         )
         conn.commit()
     finally:
@@ -1449,7 +1759,7 @@ def escaneo_activo_async(
 
     hilo = threading.Thread(
         target=_correr_escaneo_activo_en_background,
-        args=(scan_id, user.tenant_id, payload),
+        args=(scan_id, user.tenant_id, asset["id"] if asset else None, payload),
         daemon=True,
     )
     hilo.start()
@@ -1491,18 +1801,7 @@ def detalle_scan(scan_id: str, user: UserContext = Depends(get_current_user)) ->
         reporte_final=row["reporte_final"],
         created_at=row["created_at"],
         completed_at=row["completed_at"],
-        findings=[
-            FindingOut(
-                id=f["id"],
-                scan_id=f["scan_id"],
-                tipo=f["tipo"],
-                severidad=f["severidad"],
-                endpoint=f["endpoint"],
-                confirmado=bool(f["confirmado"]),
-                created_at=f["created_at"],
-            )
-            for f in hallazgos
-        ],
+        findings=[_finding_out_de_row(dict_from_row(f)) for f in hallazgos],
     )
 
 

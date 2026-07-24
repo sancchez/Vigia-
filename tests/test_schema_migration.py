@@ -36,6 +36,7 @@ _ASSETS_NUEVAS = {
     "autorizacion_activa", "autorizacion_doc_url", "autorizado_por", "autorizado_en",
 }
 _TABLAS_NUEVAS = ("watched_brands", "notifications", "notification_rules", "dmarc_reports")
+_TABLAS_NUEVAS_FASE2A = ("finding_transiciones", "tenant_sla_config")
 
 
 def _crear_db_pre_fase0(path) -> None:
@@ -250,6 +251,36 @@ def test_db_nueva_crea_las_4_tablas_nuevas(tmp_path, monkeypatch):
         assert "idx_notifications_tenant_id" in indices
         assert "idx_notification_rules_tenant_id" in indices
         assert "idx_dmarc_reports_tenant_id" in indices
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 4b. Fase 2a -- `finding_transiciones`/`tenant_sla_config` sobre DB nueva
+# ---------------------------------------------------------------------------
+
+
+def test_db_nueva_crea_las_tablas_de_fase2a(tmp_path, monkeypatch):
+    db_path = tmp_path / "fase2a.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    conn = get_conn()
+    try:
+        tablas_existentes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for tabla in _TABLAS_NUEVAS_FASE2A:
+            assert tabla in tablas_existentes
+
+        indices = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        assert "idx_finding_transiciones_finding_id" in indices
     finally:
         conn.close()
 

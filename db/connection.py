@@ -115,6 +115,19 @@ _ASSETS_AUTORIZACION_COLUMNS: list[tuple[str, str]] = [
     ("autorizado_en", "TIMESTAMP"),
 ]
 
+# `finding_transiciones`/`tenant_sla_config` (fase2a-ciclo-vida-hallazgo) NO
+# necesitan una lista de reconciliación como las de arriba: a diferencia de
+# `_ASSET_VERIFICATION_COLUMNS`/`_FINDINGS_LIFECYCLE_COLUMNS`/
+# `_ASSETS_AUTORIZACION_COLUMNS` (columnas nuevas agregadas a una tabla que
+# YA EXISTÍA de una sesión anterior, lo único que `CREATE TABLE IF NOT
+# EXISTS` no puede resolver por sí solo), estas son dos TABLAS enteramente
+# nuevas. `CREATE TABLE IF NOT EXISTS` sí es suficiente para eso en ambos
+# motores -- una `ciberseguridad.db`/Postgres de una sesión anterior
+# simplemente no tenía la tabla, y `executescript()`/`_get_pg_conn()` (que ya
+# corren `schema.sql` completo en cada conexión/primera vez, ver más abajo)
+# la crean sin ningún paso adicional. Verificado en
+# `tests/test_schema_migration.py`.
+
 
 def _sqlite_path_from_url(url: str) -> str:
     # "sqlite:///./ciberseguridad.db" -> "./ciberseguridad.db"
