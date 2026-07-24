@@ -8,13 +8,35 @@ dag:
   spec:         complete
   design:       complete
   tasks:        complete
-  apply:        pending
+  apply:        complete
   verify:       pending
   archive:      pending
 notes: |
-  Planificación solamente (no sdd-apply). Cubre Fase 3b (panel de vigilancia +
-  config watched_brands) y 3c (feed certstream-server-go self-hosted) del
-  plan-entregable. Changes hermanos en planificación paralela: fase3a, fase3e,
-  fase4, fase5, fase6, fase7 — el orquestador debe secuenciar por archivos
-  compartidos (api/main.py, frontend/src/api.ts, Dashboard.tsx). Ver design.md
-  sección "Coordinación con changes hermanos".
+  sdd-apply completo en worktree aislado (agent-ac6d4eda174217603). Backend:
+  CRUD `/watched-brands` en `api/main.py` (3 endpoints + 2 modelos, insertados
+  antes del catch-all SPA) + `FindingOut.raw_json` (campo aditivo, deviation
+  documentada abajo) + `_build_variant_map()` en `api/certstream_listener.py`
+  extendido con un segundo bucle sobre `watched_brands` activas
+  (`asset_id=None` para esas entradas, `scans.asset_id` ya es nullable).
+  Frontend: `VigilanciaPanel.tsx` + `WatchedBrandsConfig.tsx` nuevos, montados
+  en `Dashboard.tsx`, tipos/funcs nuevos en `api.ts` -- reusa `.chip`/badges de
+  Fase 2b, cero CSS nuevo. Infra: `deploy/certstream/docker-compose.yml` +
+  README (subdirectorio propio, NO root -- ver design.md "Coordinación").
+  Tests nuevos: `tests/test_watched_brands_crud.py` (6) y
+  `tests/test_certstream_variant_map.py` (5), suite completa 203 passed/1
+  skipped, `ruff check .` limpio, `npm run build` limpio. Docker CLI presente
+  pero el daemon no corre en esta máquina -- el compose se validó con
+  `docker compose config` (sintaxis OK) pero el levantamiento real
+  (imagen/websocket/finding real) queda PENDIENTE de un host con Docker
+  activo (documentado en tasks.md 5.4 y en el README del compose).
+  Deviation de design.md: `FindingOut` no exponía `raw_json` (design.md
+  asumía "Todo ya disponible en FindingOut" -- no era cierto, `raw_json` se
+  fetchea pero no se proyectaba). Se agregó como campo opcional aditivo
+  (`Optional[str] = None`) para no romper contratos existentes; el frontend
+  lo parsea con `dominioBaseCertstream()` (tolerante, nunca lanza).
+  Zero cambios en `vigia_core_private/`. Zero cambios en el root del repo
+  para el compose (deploy/certstream/, no colisiona con fase6/7).
+  Pendiente para el orquestador: re-verificar merges sobre `api/main.py`,
+  `frontend/src/api.ts`, `Dashboard.tsx` tras aplicar los changes hermanos
+  (fase3a, fase3e, fase4, fase5, fase6, fase7) -- ver design.md "Coordinación
+  con changes hermanos".

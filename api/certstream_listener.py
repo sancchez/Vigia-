@@ -82,7 +82,7 @@ logger = logging.getLogger("vigia.certstream")
 
 _listener_thread: threading.Thread | None = None
 _stop_event = threading.Event()
-_variant_map: dict[str, tuple[str, str, str]] = {}
+_variant_map: dict[str, tuple[str, str | None, str]] = {}
 _variant_map_lock = threading.Lock()
 _variant_map_built_at: float = 0.0
 
@@ -93,7 +93,25 @@ def _refresh_seconds() -> float:
     return float(os.environ.get("VIGIA_CERTSTREAM_REFRESH_MINUTES", "30")) * 60
 
 
-def _build_variant_map() -> dict[str, tuple[str, str, str]]:
+def _normalizar_marca_a_dominio(marca: str) -> str:
+    """Normaliza una `watched_brands.marca` a un dominio candidato para dnstwist.
+
+    Fase 3b (openspec/changes/fase3b-vigilancia-continua-certstream), ver
+    design.md "Semántica de generación desde watched_brands": una marca ya
+    puede venir con TLD ("bancoacme.com") -- se usa tal cual -- o ser solo
+    un nombre/keyword ("bancoacme") -- se le anexa el TLD default `.com`
+    antes de pasarla a `generate_domain_variants` (que espera un dominio,
+    no una keyword suelta). Empezar con un único TLD default es una
+    decisión explícita del design (Open Question: "ampliar es trivial y
+    aislado" -- no se hace en este change).
+    """
+    marca = marca.strip().lower()
+    if "." in marca:
+        return marca
+    return f"{marca}.com"
+
+
+def _build_variant_map() -> dict[str, tuple[str, str | None, str]]:
     """dominio_variante -> (tenant_id, asset_id, dominio_base), para todos los tenants.
 
     Solo considera activos verificados (o exentos por ser localhost/IP
@@ -105,16 +123,30 @@ def _build_variant_map() -> dict[str, tuple[str, str, str]]:
     tercero real y CertStream habría vigilado activamente variantes de ese
     dominio ajeno en su nombre -- monitoreo continuo no autorizado, el
     mismo tipo de gap que el resto de esta sesión cierra para el escaneo.
+
+    Fase 3b agrega un segundo bucle sobre `watched_brands` activas de cada
+    tenant (ver design.md "Semántica de generación desde watched_brands").
+    A diferencia de los activos de dominio, el gate
+    `asset_autorizado_para_escanear` NO aplica aquí a propósito: una marca
+    no es un activo con prueba de propiedad, es la marca/nombre del propio
+    tenant -- vigilar quién registra un dominio parecido a TU marca es
+    legítimo por definición (a diferencia de escanear activamente el
+    dominio de un tercero). `asset_id` queda en `None` para las entradas
+    derivadas de marca (no hay un activo detrás, la columna es nullable en
+    `scans.asset_id`, ver db/schema.sql).
     """
     conn = get_conn()
     try:
         activos = conn.execute(
             "SELECT id, tenant_id, valor, verificado FROM assets WHERE tipo = 'dominio' AND is_active = 1"
         ).fetchall()
+        marcas = conn.execute(
+            "SELECT tenant_id, marca FROM watched_brands WHERE is_active = 1"
+        ).fetchall()
     finally:
         conn.close()
 
-    mapa: dict[str, tuple[str, str, str]] = {}
+    mapa: dict[str, tuple[str, str | None, str]] = {}
     omitidos = 0
     for activo in activos:
         base = activo["valor"]
@@ -133,10 +165,28 @@ def _build_variant_map() -> dict[str, tuple[str, str, str]]:
             "%d activo(s) de dominio omitidos del mapa de CertStream por no estar verificados ni exentos",
             omitidos,
         )
+
+    marcas_omitidas = 0
+    for fila in marcas:
+        marca = fila["marca"]
+        try:
+            base = _normalizar_marca_a_dominio(marca)
+            variantes = generate_domain_variants(base)
+        except Exception:
+            logger.exception("No se pudieron generar variantes dnstwist para la marca vigilada %r", marca)
+            marcas_omitidas += 1
+            continue
+        for variante in variantes:
+            mapa.setdefault(variante, (fila["tenant_id"], None, base))
+    if marcas_omitidas:
+        logger.info(
+            "%d marca(s) vigilada(s) omitida(s) del mapa de CertStream por error al generar variantes",
+            marcas_omitidas,
+        )
     return mapa
 
 
-def _ensure_variant_map(force: bool = False) -> dict[str, tuple[str, str, str]]:
+def _ensure_variant_map(force: bool = False) -> dict[str, tuple[str, str | None, str]]:
     global _variant_map, _variant_map_built_at
     with _variant_map_lock:
         if force or (time.time() - _variant_map_built_at) > _refresh_seconds():
@@ -153,12 +203,18 @@ def _ensure_variant_map(force: bool = False) -> dict[str, tuple[str, str, str]]:
 
 def registrar_finding_certstream(
     tenant_id: str,
-    asset_id: str,
+    asset_id: str | None,
     dominio_base: str,
     dominio_observado: str,
     cert_info: dict,
 ) -> str:
     """Escribe una fila `scans` sintética + una fila `findings` real para un match de CertStream.
+
+    Fase 3b (openspec/changes/fase3b-vigilancia-continua-certstream):
+    `asset_id` es `None` cuando el match viene de una `watched_brands`
+    (marca vigilada) en vez de un activo de dominio -- `scans.asset_id` es
+    nullable (`ON DELETE SET NULL`, ver db/schema.sql), así que insertar
+    `NULL` ahí es válido y no requiere cambios de schema.
 
     Sigue exactamente el patrón de inserción de `findings` usado en
     `api/main.py` (`scan()` / `_correr_escaneo_activo_en_background`):

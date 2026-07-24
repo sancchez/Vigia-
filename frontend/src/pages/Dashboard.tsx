@@ -1,7 +1,17 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
-import { api, ApiError, type Asset, type CumplimientoReport, type Finding, type Member, type ScanDetail, type ScanHistoryItem } from "../api";
+import {
+  api,
+  ApiError,
+  type Asset,
+  type CumplimientoReport,
+  type Finding,
+  type Member,
+  type ScanDetail,
+  type ScanHistoryItem,
+  type WatchedBrand,
+} from "../api";
 import ScanHistoryChart from "../components/ScanHistoryChart";
 import Equipo from "../components/Equipo";
 import FindingDetailPanel from "../components/FindingDetailPanel";
@@ -9,6 +19,8 @@ import RemediationBoard from "../components/RemediationBoard";
 import KpiWidget from "../components/KpiWidget";
 import RevisionIA from "../components/RevisionIA";
 import DmarcPanel from "../components/DmarcPanel";
+import VigilanciaPanel from "../components/VigilanciaPanel";
+import WatchedBrandsConfig from "../components/WatchedBrandsConfig";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -63,6 +75,11 @@ export default function Dashboard() {
   // crítico de abajo (ver `cargarTodo`) para no tumbar el resto del
   // dashboard si `/tenant/members` responde 403 a un rol sin acceso.
   const [members, setMembers] = useState<Member[]>([]);
+  // Fase 3b (openspec/changes/fase3b-vigilancia-continua-certstream): marcas
+  // vigiladas del tenant, mismo patrón que `members` -- se piden por fuera
+  // del `Promise.all` crítico para no tumbar el resto del dashboard si el
+  // endpoint no está disponible en un despliegue parcial.
+  const [watchedBrands, setWatchedBrands] = useState<WatchedBrand[]>([]);
   const [cargando, setCargando] = useState(true);
   const [nuevoDominio, setNuevoDominio] = useState("");
   const [autorizado, setAutorizado] = useState(false);
@@ -109,6 +126,11 @@ export default function Dashboard() {
         setMembers(await api.listMembers());
       } catch {
         setMembers([]);
+      }
+      try {
+        setWatchedBrands(await api.listWatchedBrands());
+      } catch {
+        setWatchedBrands([]);
       }
     }
   };
@@ -596,6 +618,9 @@ export default function Dashboard() {
           {findings.length > 0 && (
             <RemediationBoard findings={findings} members={members} onChanged={cargarTodo} />
           )}
+
+          <VigilanciaPanel findings={findings} members={members} onChanged={cargarTodo} />
+          <WatchedBrandsConfig brands={watchedBrands} onChanged={cargarTodo} />
 
           {/* Fase 4 (openspec/changes/fase4-revision-codigo-ia): sección
               independiente, sin acople con el resto del dashboard -- no

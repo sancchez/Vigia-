@@ -126,6 +126,13 @@ export type Finding = {
   sla_due_at?: string | null;
   primera_vez_visto?: string | null;
   ultima_vez_visto?: string | null;
+  // Fase 3b (openspec/changes/fase3b-vigilancia-continua-certstream):
+  // agregado al contrato de `FindingOut` (no estaba en fase2a/2b). Trae el
+  // JSON crudo del hallazgo tal cual lo escribió la herramienta de origen
+  // -- para findings `tipo === "dominio_variante_certstream"` incluye
+  // `dominio_base` (ver `api/certstream_listener.py::registrar_finding_certstream`),
+  // que `VigilanciaPanel.tsx` necesita mostrar y que no tiene columna propia.
+  raw_json?: string | null;
 };
 
 // Fase 2b: contrato REAL de `FindingPatchIn` (fase2a) -- `nota` es
@@ -255,6 +262,37 @@ export type InvitationPreview = {
   role?: string | null;
   motivo?: string | null;
 };
+
+// Fase 3b (openspec/changes/fase3b-vigilancia-continua-certstream):
+// contrato real de `WatchedBrandOut` en el backend.
+export type WatchedBrand = {
+  id: string;
+  marca: string;
+  is_active: boolean;
+  created_at: string;
+};
+
+// Findings CertStream (`tipo === "dominio_variante_certstream"`) traen su
+// `dominio_base` en `raw_json`, no en una columna propia (ver `Finding.raw_json`
+// arriba y `certstream_listener.py::registrar_finding_certstream`).
+// Tolerante por diseño: JSON ausente/corrupto o sin la clave -> `null`,
+// nunca lanza.
+export function dominioBaseCertstream(finding: Finding): string | null {
+  if (!finding.raw_json) return null;
+  try {
+    const data = JSON.parse(finding.raw_json);
+    return typeof data?.dominio_base === "string" ? data.dominio_base : null;
+  } catch {
+    return null;
+  }
+}
+
+// Filtra los findings de vigilancia continua (CertStream) del resto --
+// usado por `VigilanciaPanel.tsx` (ver spec.md, "Se muestran solo findings
+// de CertStream").
+export function filtrarFindingsCertstream(findings: Finding[]): Finding[] {
+  return findings.filter((f) => f.tipo === "dominio_variante_certstream");
+}
 
 class ApiError extends Error {
   status: number;
@@ -454,6 +492,11 @@ export const api = {
   getDmarcReports: () => request<DmarcReport[]>("/dmarc/reports"),
   getDmarcSummary: (dominio?: string) =>
     request<DmarcSender[]>(`/dmarc/summary${dominio ? `?dominio=${encodeURIComponent(dominio)}` : ""}`),
+  // Fase 3b: CRUD de `watched_brands` (`WatchedBrandsConfig.tsx`).
+  listWatchedBrands: () => request<WatchedBrand[]>("/watched-brands"),
+  createWatchedBrand: (marca: string) =>
+    request<WatchedBrand>("/watched-brands", { method: "POST", body: JSON.stringify({ marca }) }),
+  deleteWatchedBrand: (id: string) => request<void>(`/watched-brands/${id}`, { method: "DELETE" }),
 };
 
 export { ApiError };
