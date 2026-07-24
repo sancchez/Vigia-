@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS assets (
     verification_token      TEXT,
     verification_method     TEXT CHECK(verification_method IN ('dns_txt','http_file') OR verification_method IS NULL),
     verified_at             TIMESTAMP,
+    autorizacion_activa     INTEGER NOT NULL DEFAULT 0,
+    autorizacion_doc_url    TEXT,
+    autorizado_por          TEXT,
+    autorizado_en           TIMESTAMP,
     UNIQUE(tenant_id, tipo, valor)
 );
 CREATE INDEX IF NOT EXISTS idx_assets_tenant_id ON assets(tenant_id);
@@ -99,17 +103,32 @@ CREATE INDEX IF NOT EXISTS idx_scans_tenant_id ON scans(tenant_id);
 -- Hallazgos verificados/priorizados de un scan (proyección de verified_findings
 -- + prioritized_findings del PipelineState). Denormaliza tenant_id a propósito
 -- para no depender de un JOIN para aislar por tenant.
+-- Columnas de ciclo de vida (`estado`/`owner_user_id`/`sla_due_at`/
+-- `estado_verificacion`/`primera_vez_visto`/`ultima_vez_visto`) agregadas en
+-- Fase 0 (`openspec/changes/fase0-fundaciones-datos`) -- mismo caso que
+-- `assets`/verificación de propiedad más arriba: este CREATE TABLE ya trae
+-- las columnas nuevas para cualquier base de datos creada desde cero a
+-- partir de ahora, pero una `ciberseguridad.db`/Postgres ya existente de una
+-- sesión anterior necesita la reconciliación de `db/connection.py`
+-- (`_ensure_sqlite_findings_columns()`/`_FINDINGS_LIFECYCLE_COLUMNS`).
 CREATE TABLE IF NOT EXISTS findings (
-    id              TEXT PRIMARY KEY,
-    scan_id         TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
-    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    tipo            TEXT NOT NULL,
-    severidad       TEXT NOT NULL DEFAULT 'info'
-                        CHECK(severidad IN ('critical','high','medium','low','info')),
-    endpoint        TEXT DEFAULT '',
-    confirmado      INTEGER NOT NULL DEFAULT 0,
-    raw_json        TEXT NOT NULL DEFAULT '{}',
-    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id                      TEXT PRIMARY KEY,
+    scan_id                 TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    tenant_id               TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tipo                    TEXT NOT NULL,
+    severidad               TEXT NOT NULL DEFAULT 'info'
+                                CHECK(severidad IN ('critical','high','medium','low','info')),
+    endpoint                TEXT DEFAULT '',
+    confirmado              INTEGER NOT NULL DEFAULT 0,
+    raw_json                TEXT NOT NULL DEFAULT '{}',
+    created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    estado                  TEXT NOT NULL DEFAULT 'descubierto'
+                                CHECK(estado IN ('descubierto','triage','asignado','en_progreso','mitigado','verificado','cerrado','aceptado_riesgo')),
+    owner_user_id           TEXT,
+    sla_due_at              TIMESTAMP,
+    estado_verificacion     TEXT,
+    primera_vez_visto       TIMESTAMP,
+    ultima_vez_visto        TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_findings_tenant_id ON findings(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id);
@@ -147,3 +166,55 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Marcas/keywords que un tenant quiere vigilar (fuera de scope de este
+-- change la lógica de CertStream que las consume -- Fase 3b de
+-- docs/plan-entregable.md -- acá solo el schema).
+CREATE TABLE IF NOT EXISTS watched_brands (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    marca           TEXT NOT NULL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_watched_brands_tenant_id ON watched_brands(tenant_id);
+
+-- Notificaciones ya enviadas a un tenant (fuera de scope de este change el
+-- envío real -- Fase 5 -- acá solo el schema para registrar lo enviado).
+CREATE TABLE IF NOT EXISTS notifications (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    canal           TEXT NOT NULL,
+    destino         TEXT NOT NULL,
+    evento          TEXT NOT NULL,
+    enviado_en      TIMESTAMP,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant_id ON notifications(tenant_id);
+
+-- Reglas de notificación configuradas por un tenant (qué evento dispara qué
+-- canal/destino). Fuera de scope de este change la evaluación de reglas.
+CREATE TABLE IF NOT EXISTS notification_rules (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    evento          TEXT NOT NULL,
+    canal           TEXT NOT NULL,
+    destino         TEXT NOT NULL,
+    is_active       INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_notification_rules_tenant_id ON notification_rules(tenant_id);
+
+-- Reportes DMARC agregados recibidos para un dominio de un tenant. `dominio`
+-- es directo (no FK a `assets`) porque la ingesta (Fase 3e, fuera de scope
+-- de este change) llega por email/API externa antes de que el tenant
+-- necesariamente haya registrado ese dominio como asset -- ver design.md.
+CREATE TABLE IF NOT EXISTS dmarc_reports (
+    id              TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    dominio         TEXT NOT NULL,
+    rango_inicio    TIMESTAMP,
+    rango_fin       TIMESTAMP,
+    raw_json        TEXT NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_dmarc_reports_tenant_id ON dmarc_reports(tenant_id);

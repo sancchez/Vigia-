@@ -89,6 +89,32 @@ _ASSET_VERIFICATION_COLUMNS: list[tuple[str, str]] = [
     ("verified_at", "TIMESTAMP"),
 ]
 
+# Columnas de ciclo de vida agregadas a `findings` en Fase 0
+# (openspec/changes/fase0-fundaciones-datos) -- mismo motivo que
+# _ASSET_VERIFICATION_COLUMNS de arriba: reconciliación explícita para una
+# base de datos SQLite o Postgres que ya existía de una sesión anterior.
+# Nombre y tipo deben coincidir con el CREATE TABLE de `findings` en
+# schema.sql (incluyendo el CHECK inline de `estado`, ver design.md).
+_FINDINGS_LIFECYCLE_COLUMNS: list[tuple[str, str]] = [
+    ("estado", "TEXT NOT NULL DEFAULT 'descubierto' CHECK(estado IN "
+               "('descubierto','triage','asignado','en_progreso','mitigado',"
+               "'verificado','cerrado','aceptado_riesgo'))"),
+    ("owner_user_id", "TEXT"),
+    ("sla_due_at", "TIMESTAMP"),
+    ("estado_verificacion", "TEXT"),
+    ("primera_vez_visto", "TIMESTAMP"),
+    ("ultima_vez_visto", "TIMESTAMP"),
+]
+
+# Columnas de autorización persistente agregadas a `assets` en Fase 0 --
+# mismo motivo/patrón que _FINDINGS_LIFECYCLE_COLUMNS de arriba.
+_ASSETS_AUTORIZACION_COLUMNS: list[tuple[str, str]] = [
+    ("autorizacion_activa", "INTEGER NOT NULL DEFAULT 0"),
+    ("autorizacion_doc_url", "TEXT"),
+    ("autorizado_por", "TEXT"),
+    ("autorizado_en", "TIMESTAMP"),
+]
+
 
 def _sqlite_path_from_url(url: str) -> str:
     # "sqlite:///./ciberseguridad.db" -> "./ciberseguridad.db"
@@ -167,6 +193,18 @@ def _get_pg_conn(url: str) -> _PgConnection:
                     conn.execute(
                         f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {column} {coltype}"
                     )
+                # Reconciliación análoga para las columnas de ciclo de vida de
+                # `findings` y autorización persistente de `assets`
+                # agregadas en Fase 0 -- ver _FINDINGS_LIFECYCLE_COLUMNS/
+                # _ASSETS_AUTORIZACION_COLUMNS más arriba.
+                for column, coltype in _FINDINGS_LIFECYCLE_COLUMNS:
+                    conn.execute(
+                        f"ALTER TABLE findings ADD COLUMN IF NOT EXISTS {column} {coltype}"
+                    )
+                for column, coltype in _ASSETS_AUTORIZACION_COLUMNS:
+                    conn.execute(
+                        f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {column} {coltype}"
+                    )
                 conn.commit()
                 _pg_schema_ready.add(url)
     return _PgConnection(conn)
@@ -192,6 +230,34 @@ def _ensure_sqlite_asset_verification_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
 
 
+def _ensure_sqlite_findings_columns(conn: sqlite3.Connection) -> None:
+    """Agrega a `findings` las columnas de ciclo de vida si la tabla es de antes de Fase 0.
+
+    Mismo patrón que `_ensure_sqlite_asset_verification_columns` -- ver ese
+    docstring y el comentario en db/schema.sql para el porqué (SQLite no
+    soporta `ADD COLUMN IF NOT EXISTS`).
+    """
+    columnas_existentes = {
+        row[1] for row in conn.execute("PRAGMA table_info(findings)").fetchall()
+    }
+    for column, coltype in _FINDINGS_LIFECYCLE_COLUMNS:
+        if column not in columnas_existentes:
+            conn.execute(f"ALTER TABLE findings ADD COLUMN {column} {coltype}")
+
+
+def _ensure_sqlite_assets_autorizacion_columns(conn: sqlite3.Connection) -> None:
+    """Agrega a `assets` las columnas de autorización persistente si la tabla es de antes de Fase 0.
+
+    Mismo patrón que `_ensure_sqlite_asset_verification_columns`.
+    """
+    columnas_existentes = {
+        row[1] for row in conn.execute("PRAGMA table_info(assets)").fetchall()
+    }
+    for column, coltype in _ASSETS_AUTORIZACION_COLUMNS:
+        if column not in columnas_existentes:
+            conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
+
+
 def get_conn() -> sqlite3.Connection | _PgConnection:
     """Abre una conexión nueva con el schema ya aplicado (idempotente).
 
@@ -213,6 +279,8 @@ def get_conn() -> sqlite3.Connection | _PgConnection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
     _ensure_sqlite_asset_verification_columns(conn)
+    _ensure_sqlite_findings_columns(conn)
+    _ensure_sqlite_assets_autorizacion_columns(conn)
     conn.commit()
     return conn
 

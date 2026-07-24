@@ -1,0 +1,34 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  Tech stack: Python 3.12 FastAPI + LangGraph 0.3 (agentes), SQLite/Postgres (psycopg3)
+  Frontend: React 19 + Vite 8 + TypeScript, react-router-dom 7
+  Testing: pytest (tests/), sin tests de frontend aun
+  Style: ruff (backend), oxlint (frontend)
+  Split open-core: agents/*_prompts, cumplimiento y mapeo ISO/Ley viven en vigia_core_private/
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Identify affected modules/packages
+    - Flag if change touches vigia_core_private (open-core split, ver docs/open-core.md)
+  specs:
+    - Use Given/When/Then format for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+    - DB changes must specify SQLite+Postgres portable dialect (ver db/connection.py)
+  tasks:
+    - Group tasks by phase (infrastructure, implementation, testing)
+    - Use hierarchical numbering (1.1, 1.2, etc.)
+    - Keep tasks small enough to complete in one session
+  apply:
+    - Follow existing code patterns and conventions
+    - Load relevant coding skills for the project stack (fastapi-advanced, langgraph-patterns, react-19, pytest)
+  verify:
+    - Run tests if test infrastructure exists (pytest tests/)
+    - Compare implementation against every spec scenario
+  archive:
+    - Warn before merging destructive deltas (large removals)
