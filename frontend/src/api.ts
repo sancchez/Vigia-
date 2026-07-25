@@ -168,6 +168,23 @@ export type VerificarCierreResult = {
   detalle: string;
 };
 
+// Fase 7 (openspec/changes/fase7-confianza-calidad): forma de `TraceEventOut`
+// / `AuditEventOut` en el backend -- proyección de solo lectura de
+// `scans.trace_log_json` (ya poblado por cada nodo del grafo desde antes de
+// esta fase). Sin ningún campo de mutación/edición: la UI que los consume
+// (`AuditLog.tsx`) es una línea de tiempo de solo lectura.
+export type TraceEvent = {
+  timestamp: string;
+  agente: string;
+  accion: string;
+  resultado: string;
+};
+
+export type AuditEvent = TraceEvent & {
+  scan_id: string;
+  target: string;
+};
+
 // Contrato real de `GET /kpis` (`KpiOut` en el backend). `precision` en
 // `mttr_por_severidad` es "exacto" hoy (fase2a persiste
 // `finding_transiciones.created_at` real) -- se tipa como `string`, no un
@@ -322,6 +339,10 @@ export const api = {
       body: JSON.stringify({ target_url, minutes, ajax_spider, autorizacion_firmada: true }),
     }),
   getScan: (scanId: string) => request<ScanDetail>(`/scans/${scanId}`),
+  // Fase 7: registro de auditoría de solo lectura sobre `trace_log`.
+  getScanTrace: (scanId: string) => request<TraceEvent[]>(`/scans/${scanId}/trace`),
+  getAudit: (limit?: number) =>
+    request<AuditEvent[]>(`/audit${limit != null ? `?limit=${limit}` : ""}`),
   getCumplimiento: () => request<CumplimientoReport>("/reports/cumplimiento"),
   downloadCumplimiento: (formato: "pdf" | "docx") =>
     downloadFile(`/reports/cumplimiento/download?formato=${formato}`, `reporte-cumplimiento.${formato}`),

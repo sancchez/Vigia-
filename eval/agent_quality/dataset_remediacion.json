@@ -1,0 +1,19 @@
+{
+  "_comentario": "Fase 7 -- hallazgos priorizados (mismo contrato que agents/remediacion.py::node() espera en state['prioritized_findings']).",
+  "prioritized_findings": [
+    {
+      "id": "F-003",
+      "tipo": "broken_access_control",
+      "objetivo": "juice-shop",
+      "urgencia_negocio": "alta",
+      "cves_confirmados": []
+    },
+    {
+      "id": "F-001",
+      "tipo": "sql_injection",
+      "objetivo": "juice-shop",
+      "urgencia_negocio": "alta",
+      "cves_confirmados": ["CVE-2019-0000"]
+    }
+  ]
+}

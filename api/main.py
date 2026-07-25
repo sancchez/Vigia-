@@ -2235,6 +2235,80 @@ def detalle_scan(scan_id: str, user: UserContext = Depends(get_current_user)) ->
     )
 
 
+class TraceEventOut(BaseModel):
+    """Forma de `orchestrator/state.py::TraceEvent`, proyectada tal cual
+    desde `scans.trace_log_json` — ver Fase 7 (`fase7-confianza-calidad`)."""
+
+    timestamp: str
+    agente: str
+    accion: str
+    resultado: str
+
+
+class AuditEventOut(TraceEventOut):
+    """`TraceEventOut` + el scan que lo originó — forma de `GET /audit`,
+    que agrega eventos de varios scans del tenant."""
+
+    scan_id: str
+    target: str
+
+
+@app.get("/scans/{scan_id}/trace", response_model=list[TraceEventOut])
+def traza_scan(scan_id: str, user: UserContext = Depends(get_current_user)) -> list[TraceEventOut]:
+    """Registro de auditoría de solo lectura de UN scan (Fase 7): expone el
+    `trace_log` ya persistido en `scans.trace_log_json` (poblado por cada
+    nodo del grafo vía `make_trace_event`, ver `orchestrator/state.py`) --
+    nunca escrito ni mutado desde acá. Mismo criterio de aislamiento por
+    tenant que `detalle_scan` (404 si el scan es de otro tenant o no
+    existe); `trace_log_json` vacío (`'[]'`) devuelve lista vacía con 200,
+    nunca error."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT trace_log_json FROM scans WHERE id = ? AND tenant_id = ?",
+            (scan_id, user.tenant_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Scan no encontrado")
+
+    eventos = json.loads(row["trace_log_json"] or "[]")
+    return [TraceEventOut(**evento) for evento in eventos]
+
+
+@app.get("/audit", response_model=list[AuditEventOut])
+def auditoria(
+    limit: int = 200, user: UserContext = Depends(get_current_user)
+) -> list[AuditEventOut]:
+    """Registro de auditoría agregado de TODOS los scans del tenant (Fase 7):
+    expande `trace_log_json` de cada scan a eventos individuales anotados
+    con `scan_id`/`target`, ordenados del más reciente al más antiguo. Se
+    agrega en Python (no con funciones JSON de SQLite) por el mismo motivo
+    que `GET /kpis` (ver design.md de `fase2c`): mantener paridad exacta
+    entre el backend SQLite y el fallback Postgres sin depender de
+    funciones divergentes entre motores. Solo lectura, scoped por
+    `tenant_id` -- nunca expone scans de otro tenant."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, target, created_at, trace_log_json FROM scans "
+            "WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user.tenant_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    eventos: list[AuditEventOut] = []
+    for row in rows:
+        d = dict_from_row(row)
+        for evento in json.loads(d["trace_log_json"] or "[]"):
+            eventos.append(AuditEventOut(**evento, scan_id=d["id"], target=d["target"]))
+
+    eventos.sort(key=lambda e: e.timestamp, reverse=True)
+    return eventos
+
+
 @app.get("/scans/{scan_id}/report/download")
 def reporte_scan_download(
     scan_id: str, formato: str = "pdf", user: UserContext = Depends(get_current_user)

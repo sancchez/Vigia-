@@ -1,0 +1,15 @@
+{
+  "_comentario": "Respuesta canned que simula un LLM CUMPLIENDO el SYSTEM_PROMPT de fallback (reordena únicamente por severidad técnica) -- usada para mockear agents._llm.call_claude en el eval determinista. hallazgo_id es el índice en dataset_priorizacion.json::verified_findings.",
+  "respuesta_conforme": [
+    {"hallazgo_id": 2, "urgencia_negocio": "alta", "justificacion": "Severidad critical reportada por la herramienta."},
+    {"hallazgo_id": 0, "urgencia_negocio": "alta", "justificacion": "Severidad high reportada por la herramienta."},
+    {"hallazgo_id": 3, "urgencia_negocio": "media", "justificacion": "Severidad medium reportada por la herramienta."},
+    {"hallazgo_id": 1, "urgencia_negocio": "baja", "justificacion": "Severidad low reportada por la herramienta."}
+  ],
+  "respuesta_no_conforme": [
+    {"hallazgo_id": 1, "urgencia_negocio": "alta", "justificacion": "Severidad low reportada por la herramienta."},
+    {"hallazgo_id": 2, "urgencia_negocio": "alta", "justificacion": "Severidad critical reportada por la herramienta."},
+    {"hallazgo_id": 0, "urgencia_negocio": "alta", "justificacion": "Severidad high reportada por la herramienta."},
+    {"hallazgo_id": 3, "urgencia_negocio": "media", "justificacion": "Severidad medium reportada por la herramienta."}
+  ]
+}

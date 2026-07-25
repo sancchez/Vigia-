@@ -7,6 +7,7 @@ import Equipo from "../components/Equipo";
 import FindingDetailPanel from "../components/FindingDetailPanel";
 import RemediationBoard from "../components/RemediationBoard";
 import KpiWidget from "../components/KpiWidget";
+import AuditLog from "../components/AuditLog";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -670,6 +671,8 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
+
+          <AuditLog />
 
           <div className="card" style={{ marginTop: "1.25rem" }}>
             <h2 style={{ fontSize: 17, marginBottom: 12 }}>Equipo</h2>

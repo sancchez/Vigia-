@@ -1,0 +1,5 @@
+{
+  "_comentario": "Textos canned de remediación -- uno conforme al SYSTEM_PROMPT de fallback (recomienda re-escanear, sin prometer infalibilidad) y uno no conforme (con la frase de sobre-promesa que el prompt prohíbe explícitamente), usados para mockear agents._llm.call_claude.",
+  "respuesta_conforme": "Restringe el acceso al recurso validando el rol del usuario en el servidor antes de responder. Re-escanea el endpoint después de aplicar el cambio para confirmar que la corrección funcionó.",
+  "respuesta_no_conforme": "Aplica este parche y tu sistema queda 100% infalible, no hace falta volver a revisar nada."
+}

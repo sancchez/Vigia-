@@ -1,0 +1,13 @@
+{
+  "recall": 0.5454545454545454,
+  "fp_rate": 0.14285714285714285,
+  "precision": 0.8571428571428571,
+  "f1": 0.6666666666666665,
+  "tp": 6,
+  "fp": 1,
+  "fn": 5,
+  "generado_desde": {
+    "ground_truth": "ground_truth.yaml",
+    "findings": "sample_findings.json"
+  }
+}
