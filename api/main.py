@@ -65,6 +65,13 @@ from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
 from tools._shared import ToolExecutionError, normalize_severity
 from tools.antisuplantacion import capturar_screenshot, puntuar_infra_lookalike, registrable_domain
+from tools.clasificacion import (
+    CLASE_HIGIENE,
+    CLASE_INFORMATIVO,
+    CLASES,
+    CLASES_RIESGO_REAL,
+    clasificar_fila_finding,
+)
 from tools.asset_verification import (
     METODOS_VALIDOS,
     asset_autorizado_para_escanear,
@@ -342,6 +349,12 @@ class FindingOut(BaseModel):
     # `certstream_listener.py::registrar_finding_certstream`). Opcional con
     # default `None`: aditivo, no rompe ningún consumidor existente.
     raw_json: Optional[str] = None
+    # Fase 7: segundo eje, ORTOGONAL a `severidad` -- uno de los 4 valores de
+    # `tools/clasificacion.py::CLASES`. Siempre viene poblado aunque la fila
+    # tenga `clase IS NULL` en la base (hallazgo histórico): se deriva en
+    # lectura con el mismo criterio determinista. El panel lidera con las
+    # clases de riesgo real y agrupa la higiene aparte.
+    clase: str
 
 
 def _slugify(nombre: str) -> str:
@@ -704,6 +717,7 @@ def _finding_out_de_row(d: dict) -> FindingOut:
         primera_vez_visto=d.get("primera_vez_visto"),
         ultima_vez_visto=d.get("ultima_vez_visto"),
         raw_json=d.get("raw_json"),
+        clase=clasificar_fila_finding(d),
     )
 
 
@@ -879,6 +893,8 @@ class FindingDetailOut(BaseModel):
     sla_due_at: Optional[str] = None
     primera_vez_visto: Optional[str] = None
     ultima_vez_visto: Optional[str] = None
+    # Fase 7 -- mismo campo/criterio que `FindingOut.clase` (ver ahí).
+    clase: str = CLASE_INFORMATIVO
 
 
 @app.get("/findings/{finding_id}", response_model=FindingDetailOut)
@@ -925,6 +941,7 @@ def detalle_finding(finding_id: str, user: UserContext = Depends(get_current_use
         sla_due_at=row["sla_due_at"],
         primera_vez_visto=row["primera_vez_visto"],
         ultima_vez_visto=row["ultima_vez_visto"],
+        clase=clasificar_fila_finding(dict_from_row(row) or {}),
         **detalle,
     )
 
@@ -1336,10 +1353,24 @@ class KpiTendenciaAsset(BaseModel):
     puntos: list[dict]
 
 
+class KpiClase(BaseModel):
+    """Conteo de hallazgos ABIERTOS por clase (Fase 7, `tools/clasificacion.py`)."""
+
+    clase: str
+    total: int
+
+
 class KpiOut(BaseModel):
     mttr_por_severidad: list[KpiSeveridad]
     porcentaje_dentro_sla: Optional[float] = None
     tendencia_por_activo: list[KpiTendenciaAsset]
+    # Fase 7: campo aditivo con default, no rompe consumidores existentes.
+    # `porcentaje_dentro_sla` de arriba cambia de significado de forma
+    # implícita y deseada por el mismo cambio: como la higiene de
+    # configuración ya no hereda plazos de 7/30 días (ver
+    # `_calcular_sla_due_at`), el porcentaje deja de estar dominado por
+    # cabeceras faltantes vencidas y vuelve a medir lo que dice medir.
+    hallazgos_abiertos_por_clase: list[KpiClase] = Field(default_factory=list)
 
 
 def _parse_dt_utc_naive(valor: str) -> datetime:
@@ -1416,6 +1447,22 @@ def _calcular_porcentaje_sla(findings: list[dict]) -> Optional[float]:
     return round(100.0 * dentro / len(abiertos), 2)
 
 
+def _contar_abiertos_por_clase(findings: list[dict]) -> list[KpiClase]:
+    """Hallazgos abiertos por clase, en el orden de importancia de `CLASES`.
+
+    Siempre emite las 4 clases (con `total=0` si no hay ninguna), mismo
+    criterio que `_calcular_mttr_por_severidad`: una clase ausente del payload
+    obligaría al frontend a distinguir "no hay" de "no vino", que es
+    exactamente el tipo de ambigüedad que este cambio existe para eliminar.
+    """
+    conteo = {clase: 0 for clase in CLASES}
+    for finding in findings:
+        if finding["estado"] in ("cerrado", "aceptado_riesgo"):
+            continue
+        conteo[clasificar_fila_finding(finding)] += 1
+    return [KpiClase(clase=clase, total=total) for clase, total in conteo.items()]
+
+
 def _calcular_tendencia_por_activo(filas: list[dict]) -> list[KpiTendenciaAsset]:
     """Serie temporal de conteo de hallazgos ABIERTOS por severidad, un
     punto por scan (fecha) de cada asset -- `filas` ya viene de un JOIN
@@ -1448,8 +1495,19 @@ def _kpis_de_tenant(conn, tenant_id: str) -> KpiOut:
     "reusar el renderer" / "no divergir de fase2c") -- una sola conexión
     abierta por el caller, ambos endpoints comparten el cálculo puro.
     """
+    # `tipo`/`confirmado`/`clase` se traen para poder contar por clase (Fase
+    # 7). `raw_json` NO se trae a propósito: en un tenant con miles de
+    # hallazgos sería el grueso del payload de esta query, y para las filas
+    # históricas (`clase IS NULL`) el `tipo` -- que es literalmente el nombre
+    # de alerta de ZAP/Nuclei -- ya alcanza para que
+    # `clasificar_fila_finding` decida. Los endpoints que SÍ muestran el
+    # hallazgo (`GET /findings`, `GET /findings/{id}`) sí leen `raw_json` y
+    # por lo tanto pueden dar una clasificación aún más precisa.
     findings_rows = conn.execute(
-        "SELECT id, severidad, estado, created_at, sla_due_at FROM findings WHERE tenant_id = ?",
+        """
+        SELECT id, tipo, severidad, estado, created_at, sla_due_at, confirmado, clase
+        FROM findings WHERE tenant_id = ?
+        """,
         (tenant_id,),
     ).fetchall()
     cierres_rows = conn.execute(
@@ -1481,6 +1539,7 @@ def _kpis_de_tenant(conn, tenant_id: str) -> KpiOut:
         mttr_por_severidad=_calcular_mttr_por_severidad(findings, primer_cierre),
         porcentaje_dentro_sla=_calcular_porcentaje_sla(findings),
         tendencia_por_activo=_calcular_tendencia_por_activo(tendencia_filas),
+        hallazgos_abiertos_por_clase=_contar_abiertos_por_clase(findings),
     )
 
 
@@ -2291,13 +2350,43 @@ DEFAULT_SLA_DIAS: dict[str, int | None] = {
 }
 
 
-def _calcular_sla_due_at(conn, tenant_id: str, severidad: str, created_at: str) -> str | None:
+def _calcular_sla_due_at(
+    conn, tenant_id: str, severidad: str, created_at: str, clase: str | None = None
+) -> str | None:
     """`sla_due_at = created_at + N días` según `severidad`, usando la config
     propia del tenant (`tenant_sla_config`) si existe, si no `DEFAULT_SLA_DIAS`.
 
     `created_at` es un string ISO 8601 (mismo formato que ya produce el resto
     de este archivo, `datetime.now(timezone.utc).isoformat()`).
+
+    Fase 7 — la `clase` (ver `tools/clasificacion.py`) MODERA el plazo, no lo
+    reemplaza. Un SLA de 7 días "crítico" para una cabecera `X-Frame-Options`
+    faltante no es un compromiso serio, es una fábrica de vencimientos: llena
+    el tablero de rojo por trabajo que ningún equipo va a priorizar sobre un
+    SQLi, y termina entrenando al cliente a ignorar los vencidos de verdad.
+    Concretamente:
+
+    * `informativo` -> sin plazo (`None`). No hay nada que remediar; es
+      información de contexto.
+    * `higiene_configuracion` -> el plazo se calcula como si la severidad
+      fuera a lo sumo `medium`. Un "critical"/"high" de higiene deja de
+      heredar los 7/30 días y pasa a los 90 de `medium`; un `low`/`info` de
+      higiene sigue sin plazo. Sigue teniendo fecha (auditable, medible), solo
+      que una realista.
+    * `vulnerabilidad_explotable` / `amenaza_externa` -> plazo estricto por
+      severidad, exactamente igual que antes de este cambio.
+
+    `clase=None` (llamador que no la calculó) conserva el comportamiento
+    histórico: plazo estricto por severidad.
     """
+    if clase == CLASE_INFORMATIVO:
+        return None
+    if clase == CLASE_HIGIENE:
+        # "a lo sumo medium": si la severidad es más grave que medium, se usa
+        # medium en su lugar; `medium`/`low`/`info` quedan como estaban.
+        if severidad in ("critical", "high"):
+            severidad = "medium"
+
     dias_por_severidad = dict(DEFAULT_SLA_DIAS)
     config_row = conn.execute(
         "SELECT * FROM tenant_sla_config WHERE tenant_id = ?", (tenant_id,)
@@ -2389,13 +2478,26 @@ def _registrar_findings_con_ciclo_de_vida(
             continue
 
         finding_id = str(uuid.uuid4())
-        sla_due_at = _calcular_sla_due_at(conn, tenant_id, hallazgo["severidad"], now)
+        # Fase 7: la clase se calcula UNA vez, acá, con el hallazgo crudo
+        # todavía a mano (`raw_json` recién serializado) -- ver
+        # `tools/clasificacion.py`. Determinista y sin LLM a propósito: tiene
+        # que poder explicársele a un cliente por qué su "CSP Header Not Set"
+        # no está contado como una puerta abierta.
+        clase = clasificar_fila_finding(
+            {
+                "tipo": tipo,
+                "severidad": hallazgo["severidad"],
+                "confirmado": hallazgo["confirmado"],
+                "raw_json": hallazgo["raw_json"],
+            }
+        )
+        sla_due_at = _calcular_sla_due_at(conn, tenant_id, hallazgo["severidad"], now, clase)
         conn.execute(
             """
             INSERT INTO findings
                 (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json,
-                 created_at, sla_due_at, primera_vez_visto, ultima_vez_visto)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, sla_due_at, primera_vez_visto, ultima_vez_visto, clase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 finding_id,
@@ -2410,6 +2512,7 @@ def _registrar_findings_con_ciclo_de_vida(
                 sla_due_at,
                 now,
                 now,
+                clase,
             ),
         )
 
@@ -2419,7 +2522,14 @@ def _registrar_findings_con_ciclo_de_vida(
         # Best-effort real -- `enviar_notificacion` atrapa toda excepción y
         # nunca propaga, así que este hook no puede tumbar la persistencia de
         # findings ni el resto del ciclo de vida de arriba.
-        if hallazgo["severidad"] == "critical":
+        #
+        # Fase 7: además de ser nuevo y crítico, tiene que ser de una clase de
+        # RIESGO REAL (`vulnerabilidad_explotable`/`amenaza_externa`). Mandarle
+        # un correo urgente a un dueño de pyme porque falta una cabecera
+        # `Permissions-Policy` es exactamente cómo un producto de seguridad se
+        # gana que le pongan filtro a sus notificaciones -- y a partir de ahí
+        # el aviso del SQLi real tampoco se lee.
+        if hallazgo["severidad"] == "critical" and clase in CLASES_RIESGO_REAL:
             enviar_notificacion(
                 conn,
                 tenant_id,

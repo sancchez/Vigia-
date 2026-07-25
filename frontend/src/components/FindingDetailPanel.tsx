@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { api, ApiError, type FindingDetail } from "../api";
+import {
+  api,
+  ApiError,
+  claseDeFinding,
+  CLASE_EXPLICACION,
+  CLASE_LABEL,
+  type FindingDetail,
+} from "../api";
 
 // Fase 1 (openspec/changes/fase1-deteccion-visible), Task 0.3 (confirmado
 // con el usuario antes de sdd-apply): reusa `.chip.info` (no verificable) y
@@ -126,6 +133,28 @@ export default function FindingDetailPanel({ findingId, onClose }: Props) {
             >
               {detalle.endpoint || "—"}
             </p>
+
+            {/* Fase 7 (señal vs. ruido): el panel de detalle es donde el
+                cliente viene a entender POR QUÉ un hallazgo está donde está.
+                La explicación va en lenguaje de dueño de negocio y siempre se
+                muestra -- también para las vulnerabilidades explotables, para
+                que la separación no se lea como una excusa que solo aparece
+                cuando conviene minimizar algo. */}
+            <div
+              style={{
+                background: "var(--bg-sunken)",
+                borderRadius: 8,
+                padding: "0.7rem 0.85rem",
+                marginBottom: 14,
+              }}
+            >
+              <p style={{ fontSize: 12.5, color: "var(--text-muted)", margin: "0 0 4px" }}>
+                {CLASE_LABEL[claseDeFinding(detalle)]}
+              </p>
+              <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6, margin: 0 }}>
+                {CLASE_EXPLICACION[claseDeFinding(detalle)]}
+              </p>
+            </div>
 
             {detalle.descripcion && (
               <div style={{ marginBottom: 14 }}>

@@ -106,6 +106,17 @@ _FINDINGS_LIFECYCLE_COLUMNS: list[tuple[str, str]] = [
     ("ultima_vez_visto", "TIMESTAMP"),
 ]
 
+# Columna `clase` agregada a `findings` en Fase 7 (señal vs. ruido, ver
+# tools/clasificacion.py y el comentario largo en db/schema.sql) -- mismo
+# motivo/patrón que _FINDINGS_LIFECYCLE_COLUMNS de arriba. Se declara en su
+# propia lista (en vez de sumarse a _FINDINGS_LIFECYCLE_COLUMNS) para que
+# quede explícito que es una migración posterior e independiente: una base de
+# datos que ya pasó por Fase 0 tiene las de ciclo de vida pero no esta.
+# NULLABLE y sin DEFAULT a propósito -- ver db/schema.sql.
+_FINDINGS_CLASE_COLUMNS: list[tuple[str, str]] = [
+    ("clase", "TEXT"),
+]
+
 # Columnas de autorización persistente agregadas a `assets` en Fase 0 --
 # mismo motivo/patrón que _FINDINGS_LIFECYCLE_COLUMNS de arriba.
 _ASSETS_AUTORIZACION_COLUMNS: list[tuple[str, str]] = [
@@ -222,6 +233,10 @@ def _get_pg_conn(url: str) -> _PgConnection:
                     conn.execute(
                         f"ALTER TABLE findings ADD COLUMN IF NOT EXISTS {column} {coltype}"
                     )
+                for column, coltype in _FINDINGS_CLASE_COLUMNS:
+                    conn.execute(
+                        f"ALTER TABLE findings ADD COLUMN IF NOT EXISTS {column} {coltype}"
+                    )
                 for column, coltype in _ASSETS_AUTORIZACION_COLUMNS:
                     conn.execute(
                         f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {column} {coltype}"
@@ -262,7 +277,7 @@ def _ensure_sqlite_asset_verification_columns(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_sqlite_findings_columns(conn: sqlite3.Connection) -> None:
-    """Agrega a `findings` las columnas de ciclo de vida si la tabla es de antes de Fase 0.
+    """Agrega a `findings` las columnas de ciclo de vida (Fase 0) y `clase` (Fase 7) si faltan.
 
     Mismo patrón que `_ensure_sqlite_asset_verification_columns` -- ver ese
     docstring y el comentario en db/schema.sql para el porqué (SQLite no
@@ -271,7 +286,7 @@ def _ensure_sqlite_findings_columns(conn: sqlite3.Connection) -> None:
     columnas_existentes = {
         row[1] for row in conn.execute("PRAGMA table_info(findings)").fetchall()
     }
-    for column, coltype in _FINDINGS_LIFECYCLE_COLUMNS:
+    for column, coltype in _FINDINGS_LIFECYCLE_COLUMNS + _FINDINGS_CLASE_COLUMNS:
         if column not in columnas_existentes:
             conn.execute(f"ALTER TABLE findings ADD COLUMN {column} {coltype}")
 

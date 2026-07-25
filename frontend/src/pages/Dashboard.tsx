@@ -4,7 +4,12 @@ import { useAuth } from "../AuthContext";
 import {
   api,
   ApiError,
+  claseDeFinding,
+  CLASE_EXPLICACION,
+  CLASE_LABEL,
+  esRiesgoReal,
   type Asset,
+  type ClaseHallazgo,
   type Costos,
   type CumplimientoReport,
   type Finding,
@@ -34,13 +39,47 @@ const PLAN_LABEL: Record<string, string> = {
   armada: "Armada",
 };
 
+/** Nivel de riesgo del panel.
+ *
+ * Fase 7 — antes de este cambio contaba críticos/altos SIN distinguir clase,
+ * y por eso un escaneo baseline de ZAP contra una app normal pintaba el panel
+ * de rojo con cabeceras faltantes. Ahora solo mira las clases de RIESGO REAL
+ * (`vulnerabilidad_explotable`/`amenaza_externa`): la higiene de
+ * configuración sigue completamente visible más abajo (agrupada y colapsada,
+ * nunca borrada), pero no infla la cifra que el cliente lee primero.
+ *
+ * `findings` ya llega filtrado a hallazgos abiertos por el llamador.
+ */
 function nivelDeRiesgo(findings: Finding[]): { nivel: "verde" | "amarillo" | "rojo"; texto: string } {
-  const criticos = findings.filter((f) => f.severidad === "critical").length;
-  const altos = findings.filter((f) => f.severidad === "high").length;
-  if (criticos > 0) return { nivel: "rojo", texto: "Atención inmediata: hay hallazgos críticos abiertos." };
-  if (altos > 0) return { nivel: "amarillo", texto: "Hay hallazgos de severidad alta por revisar." };
-  return { nivel: "verde", texto: "Sin hallazgos críticos ni altos en este momento." };
+  const reales = findings.filter(esRiesgoReal);
+  const criticos = reales.filter((f) => f.severidad === "critical").length;
+  const altos = reales.filter((f) => f.severidad === "high").length;
+  const higiene = findings.length - reales.length;
+  const colaHigiene =
+    higiene > 0 ? ` Además hay ${higiene} punto(s) de higiene de configuración, listados abajo.` : "";
+  if (criticos > 0)
+    return {
+      nivel: "rojo",
+      texto: `Atención inmediata: hay ${criticos} vulnerabilidad(es) crítica(s) explotable(s).${colaHigiene}`,
+    };
+  if (altos > 0)
+    return {
+      nivel: "amarillo",
+      texto: `Hay ${altos} vulnerabilidad(es) de severidad alta por revisar.${colaHigiene}`,
+    };
+  if (reales.length > 0)
+    return {
+      nivel: "amarillo",
+      texto: `Sin nada crítico ni alto. Quedan ${reales.length} hallazgo(s) de riesgo real de menor severidad.${colaHigiene}`,
+    };
+  return {
+    nivel: "verde",
+    texto: `No encontramos ninguna vulnerabilidad explotable en este momento.${colaHigiene}`,
+  };
 }
+
+// Fase 7: orden en que se muestran los grupos del bloque colapsado.
+const CLASES_SECUNDARIAS: ClaseHallazgo[] = ["higiene_configuracion", "informativo"];
 
 const NIVEL_COLOR: Record<string, string> = {
   verde: "var(--verified)",
@@ -344,14 +383,27 @@ export default function Dashboard() {
   if (!me) return null;
 
   const riesgo = nivelDeRiesgo(findings);
-  const porSeveridad = (sev: string) => findings.filter((f) => f.severidad === sev).length;
+  // Fase 7: el eje principal del panel pasa a ser la CLASE. `findingsReales`
+  // es lo que lidera (vulnerabilidades explotables + suplantación de marca);
+  // `findingsSecundarios` es higiene/informativo, que sigue estando entero y
+  // auditable pero agrupado y colapsado más abajo.
+  const findingsReales = findings.filter(esRiesgoReal);
+  const findingsSecundarios = findings.filter((f) => !esRiesgoReal(f));
+  // Los conteos de severidad de la cabecera y de la barra de distribución se
+  // calculan SOBRE `findingsReales`, no sobre el total -- ese era exactamente
+  // el número que inflaba la higiene de configuración.
+  const porSeveridad = (sev: string) => findingsReales.filter((f) => f.severidad === sev).length;
   const ordenarPorSev = (lista: Finding[]) =>
     [...lista].sort(
       (a, b) => SEV_ORDEN.indexOf(a.severidad as (typeof SEV_ORDEN)[number]) - SEV_ORDEN.indexOf(b.severidad as (typeof SEV_ORDEN)[number])
     );
   const findingsFiltrados = ordenarPorSev(
-    findings.filter((f) => filtroSev === "todos" || f.severidad === filtroSev)
+    findingsReales.filter((f) => filtroSev === "todos" || f.severidad === filtroSev)
   );
+  const secundariosPorClase = CLASES_SECUNDARIAS.map((clase) => ({
+    clase,
+    lista: ordenarPorSev(findingsSecundarios.filter((f) => claseDeFinding(f) === clase)),
+  })).filter((grupo) => grupo.lista.length > 0);
 
   return (
     <div style={{ maxWidth: 960, margin: "0 auto", padding: "2rem 1.5rem" }}>
@@ -411,18 +463,29 @@ export default function Dashboard() {
               <h2 style={{ fontSize: 17, marginBottom: 4 }}>Nivel de riesgo actual</h2>
               <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>{riesgo.texto}</p>
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <span className="chip critical">{porSeveridad("critical")} críticos</span>
-              <span className="chip high">{porSeveridad("high")} altos</span>
-              <span className="chip low">{porSeveridad("medium") + porSeveridad("low")} otros</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <span className="chip critical">{porSeveridad("critical")} críticos</span>
+                <span className="chip high">{porSeveridad("high")} altos</span>
+                <span className="chip low">{porSeveridad("medium") + porSeveridad("low")} otros</span>
+              </div>
+              {/* Fase 7: la cifra de higiene se muestra, pero deliberadamente
+                  en segundo plano y por separado -- nunca sumada a los chips
+                  de arriba. Es la diferencia entre "tenés 97 problemas" y
+                  "tenés 2 problemas y 95 mejoras pendientes". */}
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                {findingsReales.length} de riesgo real · {findingsSecundarios.length} de higiene/informativos
+              </span>
             </div>
           </div>
 
-          {findings.length > 0 && (
+          {findingsReales.length > 0 && (
             <div className="card" style={{ marginBottom: "1.25rem" }}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
                 <h2 style={{ fontSize: 17 }}>Distribución por severidad</h2>
-                <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{findings.length} hallazgo(s)</span>
+                <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                  {findingsReales.length} hallazgo(s) de riesgo real
+                </span>
               </div>
               <div style={{ display: "flex", height: 14, borderRadius: 99, overflow: "hidden", background: "var(--bg-sunken)" }}>
                 {SEV_ORDEN.map((sev) => {
@@ -432,7 +495,7 @@ export default function Dashboard() {
                     <div
                       key={sev}
                       title={`${SEV_LABEL[sev]}: ${n}`}
-                      style={{ width: `${(n / findings.length) * 100}%`, background: SEV_BAR_COLOR[sev] }}
+                      style={{ width: `${(n / findingsReales.length) * 100}%`, background: SEV_BAR_COLOR[sev] }}
                     />
                   );
                 })}
@@ -595,16 +658,24 @@ export default function Dashboard() {
 
           <div className="card" style={{ marginBottom: "1.25rem" }}>
             <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-              <h2 style={{ fontSize: 17 }}>Hallazgos detectados</h2>
+              <h2 style={{ fontSize: 17 }}>Lo que hay que arreglar</h2>
               <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                {findings.length} en total · {porSeveridad("critical")} críticos · {porSeveridad("high")} altos
+                {findingsReales.length} de riesgo real · {porSeveridad("critical")} críticos · {porSeveridad("high")} altos
               </span>
             </div>
+            {/* Fase 7: la explicación va acá arriba, antes de la tabla, en
+                lenguaje de dueño de negocio -- es lo que hace que la separación
+                se lea como honestidad y no como que escondimos hallazgos. */}
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 12, lineHeight: 1.6 }}>
+              Esta tabla muestra solo lo que alguien podría usar para entrar a tus sistemas o para hacerse
+              pasar por tu negocio. Los avisos de buenas prácticas que faltan están completos más abajo, en
+              su propio bloque — no borramos nada, solo dejamos de mezclarlos con lo urgente.
+            </p>
 
             <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
               {(["todos", ...SEV_ORDEN] as const).map((sev) => {
                 const activo = filtroSev === sev;
-                const n = sev === "todos" ? findings.length : porSeveridad(sev);
+                const n = sev === "todos" ? findingsReales.length : porSeveridad(sev);
                 return (
                   <button
                     key={sev}
@@ -628,7 +699,9 @@ export default function Dashboard() {
               <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>
                 {findings.length === 0
                   ? "Todavía no hay hallazgos. Corré un escaneo para poblar esta tabla."
-                  : "No hay hallazgos con esa severidad."}
+                  : findingsReales.length === 0
+                    ? "No encontramos ninguna vulnerabilidad explotable ni suplantación de marca. Lo que detectamos es higiene de configuración: está listado abajo."
+                    : "No hay hallazgos de riesgo real con esa severidad."}
               </p>
             ) : (
               <div style={{ overflowX: "auto" }}>
@@ -652,7 +725,16 @@ export default function Dashboard() {
                         <td style={{ padding: "0.5rem 0.5rem" }}>
                           <span className={`chip ${f.severidad}`}>{SEV_LABEL[f.severidad] ?? f.severidad}</span>
                         </td>
-                        <td style={{ padding: "0.5rem 0.5rem" }}>{f.tipo}</td>
+                        <td style={{ padding: "0.5rem 0.5rem" }}>
+                          {f.tipo}
+                          {/* Fase 7: dentro del bloque de riesgo real todavía
+                              conviven dos cosas distintas (una falla EN tus
+                              sistemas vs. alguien de afuera imitándote), así
+                              que la clase se nombra fila por fila. */}
+                          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                            {CLASE_LABEL[claseDeFinding(f)]}
+                          </div>
+                        </td>
                         <td style={{ padding: "0.5rem 0.5rem", fontFamily: "var(--font-mono)", fontSize: 12.5, color: "var(--text-secondary)", wordBreak: "break-all" }}>
                           {f.endpoint || "—"}
                         </td>
@@ -683,6 +765,85 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+
+          {/* Fase 7 -- bloque de higiene/informativos: COLAPSADO por default,
+              pero completo y auditable al abrirlo. La decisión de producto es
+              deliberada: nada se borra ni se filtra del backend (GET /findings
+              sigue devolviendo todo), simplemente deja de competir por la
+              atención con lo que sí es una puerta abierta. Un `<details>`
+              nativo en vez de estado en React: es un bloque de solo lectura,
+              no necesita re-render ni sincronización. */}
+          {secundariosPorClase.length > 0 && (
+            <details className="card" style={{ marginBottom: "1.25rem" }}>
+              <summary style={{ cursor: "pointer", listStyle: "revert" }}>
+                <span style={{ fontSize: 17, fontWeight: 600 }}>
+                  Higiene de configuración y avisos informativos
+                </span>
+                <span style={{ fontSize: 13, color: "var(--text-secondary)", marginLeft: 8 }}>
+                  ({findingsSecundarios.length})
+                </span>
+              </summary>
+              <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "12px 0", lineHeight: 1.6 }}>
+                Esto no son puertas abiertas: son buenas prácticas que faltan. Vale la pena arreglarlas
+                — suman defensa y suelen pedirlas las auditorías — pero nadie entra a tu sistema
+                solo por esto, así que no cuentan para tu nivel de riesgo. Las dejamos acá completas
+                para que puedas revisarlas y para que quede constancia de que las detectamos.
+              </p>
+              {secundariosPorClase.map((grupo) => (
+                <div key={grupo.clase} style={{ marginTop: 16 }}>
+                  <h3 style={{ fontSize: 14, marginBottom: 4 }}>
+                    {CLASE_LABEL[grupo.clase]}{" "}
+                    <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>({grupo.lista.length})</span>
+                  </h3>
+                  <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 8, lineHeight: 1.5 }}>
+                    {CLASE_EXPLICACION[grupo.clase]}
+                  </p>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ textAlign: "left", color: "var(--text-muted)", fontSize: 12 }}>
+                          <th style={{ padding: "0.35rem 0.5rem" }}>Severidad</th>
+                          <th style={{ padding: "0.35rem 0.5rem" }}>Tipo</th>
+                          <th style={{ padding: "0.35rem 0.5rem" }}>Endpoint / Objetivo</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {grupo.lista.slice(0, 100).map((f) => (
+                          <tr
+                            key={f.id}
+                            onClick={() => setFindingIdAbierto(f.id)}
+                            style={{ borderTop: "0.5px solid var(--border)", cursor: "pointer" }}
+                            title="Ver detalle del hallazgo"
+                          >
+                            <td style={{ padding: "0.45rem 0.5rem" }}>
+                              <span className={`chip ${f.severidad}`}>{SEV_LABEL[f.severidad] ?? f.severidad}</span>
+                            </td>
+                            <td style={{ padding: "0.45rem 0.5rem" }}>{f.tipo}</td>
+                            <td
+                              style={{
+                                padding: "0.45rem 0.5rem",
+                                fontFamily: "var(--font-mono)",
+                                fontSize: 12,
+                                color: "var(--text-secondary)",
+                                wordBreak: "break-all",
+                              }}
+                            >
+                              {f.endpoint || "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {grupo.lista.length > 100 && (
+                      <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
+                        Mostrando los primeros 100 de {grupo.lista.length}. Descargá el reporte para el detalle completo.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </details>
+          )}
 
           <KpiWidget assets={assets} />
 
@@ -880,8 +1041,12 @@ export default function Dashboard() {
             </p>
             <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
               <span className={`chip ${scanVisto.estado}`}>{scanVisto.estado}</span>
+              {/* Fase 7: el detalle de un escaneo sí lista TODO (es el registro
+                  crudo de esa corrida), pero el encabezado ya separa la cuenta
+                  para que el número grande no se lea como "N problemas". */}
               <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
-                {scanVisto.findings.length} hallazgo(s)
+                {scanVisto.findings.filter(esRiesgoReal).length} de riesgo real ·{" "}
+                {scanVisto.findings.filter((f) => !esRiesgoReal(f)).length} de higiene/informativos
               </span>
             </div>
 
@@ -889,7 +1054,14 @@ export default function Dashboard() {
               <div style={{ overflowX: "auto", marginBottom: 18 }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                   <tbody>
-                    {ordenarPorSev(scanVisto.findings).map((f) => (
+                    {[...scanVisto.findings]
+                      .sort(
+                        (a, b) =>
+                          Number(esRiesgoReal(b)) - Number(esRiesgoReal(a)) ||
+                          SEV_ORDEN.indexOf(a.severidad as (typeof SEV_ORDEN)[number]) -
+                            SEV_ORDEN.indexOf(b.severidad as (typeof SEV_ORDEN)[number])
+                      )
+                      .map((f) => (
                       <tr
                         key={f.id}
                         onClick={() => setFindingIdAbierto(f.id)}
@@ -899,7 +1071,12 @@ export default function Dashboard() {
                         <td style={{ padding: "0.45rem 0.5rem" }}>
                           <span className={`chip ${f.severidad}`}>{SEV_LABEL[f.severidad] ?? f.severidad}</span>
                         </td>
-                        <td style={{ padding: "0.45rem 0.5rem" }}>{f.tipo}</td>
+                        <td style={{ padding: "0.45rem 0.5rem" }}>
+                          {f.tipo}
+                          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                            {CLASE_LABEL[claseDeFinding(f)]}
+                          </div>
+                        </td>
                         <td style={{ padding: "0.45rem 0.5rem", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)", wordBreak: "break-all" }}>
                           {f.endpoint || "—"}
                         </td>

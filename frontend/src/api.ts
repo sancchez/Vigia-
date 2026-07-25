@@ -162,6 +162,65 @@ export type Finding = {
   // `dominio_base` (ver `api/certstream_listener.py::registrar_finding_certstream`),
   // que `VigilanciaPanel.tsx` necesita mostrar y que no tiene columna propia.
   raw_json?: string | null;
+  // Fase 7 (señal vs. ruido): segundo eje, ORTOGONAL a `severidad`. El
+  // backend (`FindingOut.clase`) SIEMPRE lo manda -- incluso para hallazgos
+  // históricos, que lo derivan en lectura -- pero se tipa opcional por la
+  // misma razón que `estado` de arriba: tolerar una ventana de despliegue
+  // parcial contra un backend anterior a esta fase. Usá `claseDeFinding()`
+  // en vez de leerlo directo para que ese caso caiga a un default seguro.
+  clase?: ClaseHallazgo;
+};
+
+// Fase 7: `severidad` responde "qué tan grave sería si se explota"; `clase`
+// responde "qué tipo de cosa es". Un `CSP Header Not Set` puede ser `medium`
+// y aun así ser higiene, no una puerta abierta -- por eso son dos ejes y no
+// uno. Ver `tools/clasificacion.py` (determinista, sin LLM, auditable).
+export type ClaseHallazgo =
+  | "vulnerabilidad_explotable"
+  | "amenaza_externa"
+  | "higiene_configuracion"
+  | "informativo";
+
+// Clases que cuentan como riesgo real para el nivel de riesgo del panel.
+// Espejo de `CLASES_RIESGO_REAL` en `tools/clasificacion.py`.
+export const CLASES_RIESGO_REAL: ClaseHallazgo[] = [
+  "vulnerabilidad_explotable",
+  "amenaza_externa",
+];
+
+/** Clase de un hallazgo, con default seguro para un backend pre-Fase 7.
+ *
+ * El default NO es `higiene_configuracion`: si el backend no clasificó, lo
+ * peor que puede hacer el panel es esconder algo real en el bloque colapsado.
+ * Ante la duda, el hallazgo se muestra arriba. */
+export function claseDeFinding(finding: Pick<Finding, "clase">): ClaseHallazgo {
+  return finding.clase ?? "vulnerabilidad_explotable";
+}
+
+export function esRiesgoReal(finding: Pick<Finding, "clase">): boolean {
+  return CLASES_RIESGO_REAL.includes(claseDeFinding(finding));
+}
+
+// Etiquetas y explicaciones en lenguaje de dueño de pyme, no de pentester --
+// mismo tono que el resto del panel. Se exportan desde acá (y no inline en el
+// Dashboard) porque `FindingDetailPanel` y el tablero de remediación usan las
+// mismas.
+export const CLASE_LABEL: Record<ClaseHallazgo, string> = {
+  vulnerabilidad_explotable: "Vulnerabilidad explotable",
+  amenaza_externa: "Amenaza externa",
+  higiene_configuracion: "Higiene de configuración",
+  informativo: "Informativo",
+};
+
+export const CLASE_EXPLICACION: Record<ClaseHallazgo, string> = {
+  vulnerabilidad_explotable:
+    "Esto es una puerta abierta: alguien podría usarlo para entrar, robar datos o tomar control. Es lo que hay que arreglar primero.",
+  amenaza_externa:
+    "Esto no es una falla en tus sistemas: es alguien de afuera haciéndose pasar por tu negocio (un dominio parecido, un perfil falso).",
+  higiene_configuracion:
+    "Esto no es una puerta abierta: es una buena práctica que falta. Conviene arreglarlo, pero nadie entra a tu sistema por esto solo.",
+  informativo:
+    "Esto no requiere ninguna acción: es información que encontramos sobre tus sistemas y dejamos registrada para que la auditoría quede completa.",
 };
 
 // Fase 2b: contrato REAL de `FindingPatchIn` (fase2a) -- `nota` es
@@ -230,6 +289,9 @@ export type KpiSummary = {
   mttr_por_severidad: { severidad: string; mttr_dias: number | null; precision: string }[];
   porcentaje_dentro_sla: number | null;
   tendencia_por_activo: { asset_id: string; puntos: Record<string, unknown>[] }[];
+  // Fase 7: conteo de hallazgos ABIERTOS por clase. Opcional por la misma
+  // razón de despliegue parcial que `Finding.clase`.
+  hallazgos_abiertos_por_clase?: { clase: ClaseHallazgo; total: number }[];
 };
 
 // Fase 4 (openspec/changes/fase4-revision-codigo-ia): contrato de

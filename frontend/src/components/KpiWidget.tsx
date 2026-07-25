@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type Asset, type KpiSummary } from "../api";
+import { api, CLASE_EXPLICACION, CLASE_LABEL, type Asset, type KpiSummary } from "../api";
 
 // Fase 2c (openspec/changes/fase2b-tablero-remediacion... continúa fase2b):
 // widget simple (no BI) de los 3 KPIs de `GET /kpis` -- MTTR por severidad
@@ -97,6 +97,34 @@ export default function KpiWidget({ assets }: Props) {
           ))}
         </div>
       </div>
+
+      {/* Fase 7 (señal vs. ruido): conteo de hallazgos abiertos por CLASE.
+          Sin esto, el KPI de SLA de abajo cambia de significado (la higiene ya
+          no hereda plazos de 7/30 días) sin que nada en la UI explique por
+          qué. Aditivo y tolerante a un backend anterior a esta fase. */}
+      {kpis.hallazgos_abiertos_por_clase && kpis.hallazgos_abiertos_por_clase.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <h3 style={{ fontSize: 13.5, marginBottom: 8, color: "var(--text-secondary)" }}>
+            Hallazgos abiertos por tipo de problema
+          </h3>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {kpis.hallazgos_abiertos_por_clase.map((c) => (
+              <div
+                key={c.clase}
+                title={CLASE_EXPLICACION[c.clase]}
+                style={{ padding: "0.5rem 0.75rem", background: "var(--bg-sunken)", borderRadius: 8, fontSize: 13 }}
+              >
+                <strong>{CLASE_LABEL[c.clase] ?? c.clase}:</strong> {c.total}
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.5 }}>
+            La higiene de configuración no lleva plazos de 7 o 30 días: exigirle el mismo SLA que a una
+            vulnerabilidad explotable llenaría el tablero de vencidos por cosas que nadie prioriza
+            sobre una puerta abierta real.
+          </p>
+        </div>
+      )}
 
       <div style={{ marginBottom: 18 }}>
         <h3 style={{ fontSize: 13.5, marginBottom: 8, color: "var(--text-secondary)" }}>

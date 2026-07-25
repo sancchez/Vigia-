@@ -141,7 +141,25 @@ CREATE TABLE IF NOT EXISTS findings (
     sla_due_at              TIMESTAMP,
     estado_verificacion     TEXT,
     primera_vez_visto       TIMESTAMP,
-    ultima_vez_visto        TIMESTAMP
+    ultima_vez_visto        TIMESTAMP,
+    -- Segundo eje de clasificación, ORTOGONAL a `severidad` (Fase 7,
+    -- `tools/clasificacion.py`): `severidad` dice qué tan grave sería si se
+    -- explota, `clase` dice QUÉ TIPO DE COSA ES. Un "CSP Header Not Set"
+    -- puede ser `medium` de severidad y aun así ser higiene, no una puerta
+    -- abierta -- sin este eje, un SQLi real y una cabecera faltante se veían
+    -- igual en el panel.
+    --
+    -- NULLABLE y SIN DEFAULT a propósito: toda fila nueva la escribe
+    -- `_registrar_findings_con_ciclo_de_vida`, pero las filas históricas
+    -- (guardadas antes de esta migración) quedan en NULL y se derivan EN
+    -- LECTURA con `tools/clasificacion.py::clasificar_fila_finding()`, que
+    -- aplica exactamente el mismo criterio determinista sobre `tipo`/
+    -- `raw_json`/`confirmado`. Un DEFAULT habría congelado una etiqueta
+    -- incorrecta ('informativo') sobre hallazgos reales viejos; un backfill
+    -- destructivo habría hecho lo mismo sin posibilidad de recalcular cuando
+    -- se afinen los patrones. Sin CHECK por la misma razón: NULL es un
+    -- estado legítimo "todavía no clasificado en la fila".
+    clase                   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_findings_tenant_id ON findings(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id);
