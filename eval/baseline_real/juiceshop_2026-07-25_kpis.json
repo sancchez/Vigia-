@@ -1,0 +1,63 @@
+{
+  "mttr_por_severidad": [
+    {
+      "severidad": "critical",
+      "mttr_dias": null,
+      "precision": "exacto"
+    },
+    {
+      "severidad": "high",
+      "mttr_dias": null,
+      "precision": "exacto"
+    },
+    {
+      "severidad": "medium",
+      "mttr_dias": null,
+      "precision": "exacto"
+    },
+    {
+      "severidad": "low",
+      "mttr_dias": null,
+      "precision": "exacto"
+    },
+    {
+      "severidad": "info",
+      "mttr_dias": null,
+      "precision": "exacto"
+    }
+  ],
+  "porcentaje_dentro_sla": 100.0,
+  "tendencia_por_activo": [
+    {
+      "asset_id": "345f9d9d-a1e1-4d1d-9986-6826f35db47e",
+      "puntos": [
+        {
+          "fecha": "2026-07-25 04:12:57",
+          "critical": 0,
+          "high": 0,
+          "medium": 249,
+          "low": 104,
+          "info": 106
+        }
+      ]
+    }
+  ],
+  "hallazgos_abiertos_por_clase": [
+    {
+      "clase": "vulnerabilidad_explotable",
+      "total": 137
+    },
+    {
+      "clase": "amenaza_externa",
+      "total": 0
+    },
+    {
+      "clase": "higiene_configuracion",
+      "total": 112
+    },
+    {
+      "clase": "informativo",
+      "total": 210
+    }
+  ]
+}
