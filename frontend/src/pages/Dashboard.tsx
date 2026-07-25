@@ -4,6 +4,7 @@ import { useAuth } from "../AuthContext";
 import { api, ApiError, type Asset, type CumplimientoReport, type Finding, type Member, type ScanDetail, type ScanHistoryItem } from "../api";
 import ScanHistoryChart from "../components/ScanHistoryChart";
 import Equipo from "../components/Equipo";
+import NotificationRules from "../components/NotificationRules";
 import FindingDetailPanel from "../components/FindingDetailPanel";
 import RemediationBoard from "../components/RemediationBoard";
 import KpiWidget from "../components/KpiWidget";
@@ -674,6 +675,11 @@ export default function Dashboard() {
           <div className="card" style={{ marginTop: "1.25rem" }}>
             <h2 style={{ fontSize: 17, marginBottom: 12 }}>Equipo</h2>
             <Equipo />
+          </div>
+
+          <div className="card" style={{ marginTop: "1.25rem" }}>
+            <h2 style={{ fontSize: 17, marginBottom: 12 }}>Alertas y notificaciones</h2>
+            <NotificationRules />
           </div>
         </>
       )}

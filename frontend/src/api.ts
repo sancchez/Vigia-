@@ -204,6 +204,24 @@ export type InvitationPreview = {
   motivo?: string | null;
 };
 
+// Fase 5 (openspec/changes/fase5-notificaciones-alertas): reglas de
+// notificación configurables por tenant. `canal` solo soporta 'email' en
+// v1 -- el backend responde 422 para cualquier otro valor (`NotificationRuleIn`
+// en api/main.py), pero el tipo se deja abierto (string) porque el esquema
+// reserva la columna para 'slack'/'webhook' a futuro (ver design.md).
+export type EventoNotificacion =
+  | "hallazgo_critico_nuevo"
+  | "dominio_clon_detectado"
+  | "sla_escalamiento";
+
+export type NotificationRule = {
+  id: string;
+  evento: EventoNotificacion;
+  canal: string;
+  destino: string;
+  is_active: boolean;
+};
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -333,6 +351,20 @@ export const api = {
     request<Invitation>("/tenant/invitations", { method: "POST", body: JSON.stringify({ email, role }) }),
   revokeInvitation: (id: string) => request<void>(`/tenant/invitations/${id}`, { method: "DELETE" }),
   previewInvitation: (token: string) => request<InvitationPreview>(`/tenant/invitations/preview/${token}`),
+  // Fase 5: CRUD de reglas de notificación. 422 si `canal` no es 'email'
+  // (Slack/webhook diferidos a un follow-up); 404 cross-tenant en PATCH/DELETE.
+  listNotificationRules: () => request<NotificationRule[]>("/notification-rules"),
+  createNotificationRule: (evento: EventoNotificacion, destino: string) =>
+    request<NotificationRule>("/notification-rules", {
+      method: "POST",
+      body: JSON.stringify({ evento, canal: "email", destino }),
+    }),
+  toggleNotificationRule: (id: string, is_active: boolean) =>
+    request<NotificationRule>(`/notification-rules/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_active }),
+    }),
+  deleteNotificationRule: (id: string) => request<void>(`/notification-rules/${id}`, { method: "DELETE" }),
 };
 
 export { ApiError };

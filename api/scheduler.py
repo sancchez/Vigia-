@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from db.connection import get_conn
+from api.notificaciones import enviar_notificacion
+from db.connection import dict_from_row, get_conn
 from orchestrator.graph import compile_graph
 from orchestrator.state import new_state
 from tools.asset_verification import asset_autorizado_para_escanear
@@ -121,6 +122,95 @@ def run_scan_cycle_once() -> int:
     return procesados
 
 
+_ESTADOS_TERMINALES_SLA = ("cerrado", "verificado", "aceptado_riesgo")
+
+
+def run_sla_escalation_once() -> int:
+    """Barre findings abiertos con `sla_due_at` y dispara `sla_escalamiento`
+    en dos umbrales -- Fase 5 (openspec/changes/fase5-notificaciones-alertas).
+
+    Umbrales (ver spec.md, Requirement "Escalamiento de SLA"):
+    - `75pct`: transcurrió >= 75% del plazo entre `created_at` y `sla_due_at`,
+      y `sla_due_at` sigue en el futuro.
+    - `vencido`: `sla_due_at` ya pasó.
+
+    Cada umbral se notifica UNA sola vez por finding -- la idempotencia real
+    la garantiza `enviar_notificacion` (clave compuesta `evento:finding_id`
+    sobre `notifications`, ver api/notificaciones.py); este job simplemente
+    calcula qué umbral corresponde y lo invoca, sin su propio estado.
+    Findings `cerrado`/`verificado`/`aceptado_riesgo` quedan fuera de la
+    consulta -- no se escala nada ya resuelto.
+
+    Devuelve cuántos findings cruzaron algún umbral en esta corrida (no
+    necesariamente cuántos emails se enviaron -- ver "sin regla activa"
+    en enviar_notificacion, que degrada en silencio).
+    """
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT id, tenant_id, tipo, endpoint, created_at, sla_due_at
+            FROM findings
+            WHERE sla_due_at IS NOT NULL
+              AND estado NOT IN ({", ".join("?" for _ in _ESTADOS_TERMINALES_SLA)})
+            """,
+            _ESTADOS_TERMINALES_SLA,
+        ).fetchall()
+
+        ahora = datetime.now(timezone.utc)
+        escalados = 0
+        for row in rows:
+            finding = dict_from_row(row)
+            try:
+                creado = datetime.fromisoformat(finding["created_at"])
+                vence = datetime.fromisoformat(finding["sla_due_at"])
+            except (TypeError, ValueError):
+                continue
+            if creado.tzinfo is None:
+                creado = creado.replace(tzinfo=timezone.utc)
+            if vence.tzinfo is None:
+                vence = vence.replace(tzinfo=timezone.utc)
+
+            if ahora >= vence:
+                umbral = "vencido"
+            else:
+                plazo_total = (vence - creado).total_seconds()
+                transcurrido = (ahora - creado).total_seconds()
+                if plazo_total > 0 and (transcurrido / plazo_total) >= 0.75:
+                    umbral = "75pct"
+                else:
+                    umbral = None
+
+            if umbral is None:
+                continue
+
+            escalados += 1
+            enviar_notificacion(
+                conn,
+                finding["tenant_id"],
+                f"sla_escalamiento:{umbral}",
+                finding["id"],
+                asunto=(
+                    f"[Vigia] SLA vencido: {finding['tipo']}"
+                    if umbral == "vencido"
+                    else f"[Vigia] SLA al 75% del plazo: {finding['tipo']}"
+                ),
+                cuerpo=(
+                    f"Un hallazgo {'venció' if umbral == 'vencido' else 'está por vencer (75% del plazo)'} "
+                    f"su SLA de remediación.\n\n"
+                    f"Tipo: {finding['tipo']}\n"
+                    f"Endpoint: {finding['endpoint']}\n"
+                    f"Finding ID: {finding['id']}\n"
+                    f"Vence: {finding['sla_due_at']}\n"
+                ),
+            )
+    finally:
+        conn.close()
+
+    logger.info("Escalamiento de SLA completado: %d finding(s) cruzaron algún umbral", escalados)
+    return escalados
+
+
 def start_scheduler() -> BackgroundScheduler:
     """Arranca el scheduler en background (idempotente — llamar dos veces no duplica jobs).
 
@@ -139,8 +229,26 @@ def start_scheduler() -> BackgroundScheduler:
         id="vigia_recon_recurrente",
         replace_existing=True,
     )
+
+    # Fase 5 (openspec/changes/fase5-notificaciones-alertas): mismo patrón de
+    # job periódico que el de arriba, intervalo propio y más corto por
+    # default (6h) -- el escalamiento de SLA es sensible al tiempo de forma
+    # distinta al recon pasivo.
+    sla_interval_hours = float(os.environ.get("VIGIA_SLA_CHECK_INTERVAL_HOURS", "6"))
+    _scheduler.add_job(
+        run_sla_escalation_once,
+        "interval",
+        hours=sla_interval_hours,
+        id="vigia_sla_escalamiento",
+        replace_existing=True,
+    )
+
     _scheduler.start()
-    logger.info("Scheduler de escaneo recurrente iniciado (cada %.1fh)", interval_hours)
+    logger.info(
+        "Scheduler iniciado -- recon recurrente cada %.1fh, escalamiento de SLA cada %.1fh",
+        interval_hours,
+        sla_interval_hours,
+    )
     return _scheduler
 
 
