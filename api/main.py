@@ -3015,11 +3015,30 @@ def _correr_escaneo_activo_en_background(
     timeout fijo) — ver HANDOFF.md Item 2 y el docstring de
     `tools/zap_api.py` para el razonamiento completo y la verificación en
     vivo contra Juice Shop real.
+
+    Fase 8 (Grupo 3, `openspec/changes/fase8-motor-deteccion`): además de
+    ZAP, ahora también invoca `tools.scan.run_nuclei` sobre el mismo target
+    -- antes de este cambio, Nuclei NUNCA se ejecutaba desde este camino
+    (`POST /scan/activo`), solo desde el grafo LangGraph de `POST /scan`
+    (ver `eval/failure_log.md`, entrada de la investigación 0.3). Los dos
+    motores son independientes: si uno falla, el otro igual persiste lo que
+    haya encontrado (nunca se descarta todo por un fallo aislado). Cada
+    hallazgo lleva `_motor` ("zap"/"nuclei") embebido en `raw_json` -- no hay
+    columna propia en `findings` para el origen, así que la atribución vive
+    ahí, recuperable parseando `raw_json` en lectura (ver `eval/run_eval.py`
+    y el informe de la corrida autenticada para el detalle de cómo se separa
+    la medición por motor).
     """
     # Fase 6a: contextvars NO se heredan de un `threading.Thread` padre --
     # hay que poblar el contexto de costo DENTRO de este thread, no antes de
     # arrancarlo (ver docstring de agents/_llm.py).
     set_llm_context(tenant_id, scan_id)
+
+    hallazgos_normalizados: list[dict] = []
+    partes_reporte: list[str] = []
+    algun_motor_ok = False
+
+    # --- Motor 1: ZAP (spider + ajax spider opcional + escaneo activo) ---
     try:
         resultado = run_checkpointed_active_scan(
             payload.target_url,
@@ -3029,35 +3048,17 @@ def _correr_escaneo_activo_en_background(
             scan_id=scan_id,
             on_progress=lambda progreso: _persistir_progreso_checkpoint(scan_id, progreso),
         )
-        estado_final = "completado"
-        reporte = f"Escaneo activo completado — {resultado.detalle_final}"
-        hallazgos = resultado.findings
-    except ToolExecutionError as exc:
-        estado_final = "error"
-        reporte = f"Escaneo activo falló: {exc}"
-        hallazgos = []
-    except Exception as exc:  # noqa: BLE001 — este thread es el último punto de captura posible
-        estado_final = "error"
-        reporte = f"Escaneo activo falló con un error inesperado: {exc}"
-        hallazgos = []
-
-    now = datetime.now(timezone.utc).isoformat()
-    conn = get_conn()
-    try:
-        conn.execute(
-            "UPDATE scans SET estado = ?, reporte_final = ?, completed_at = ? WHERE id = ?",
-            (estado_final, reporte, now, scan_id),
-        )
-
+        algun_motor_ok = True
+        partes_reporte.append(f"ZAP: {resultado.detalle_final}")
         # Fase 1 (openspec/changes/fase1-deteccion-visible): antes de ese
         # cambio, cada alerta se insertaba con `confirmado=0` fijo -- el
         # escaneo activo nunca corría `agents/verificacion.py`. Ahora se
         # aplica la misma verificación determinista (Exploit-DB offline) que
         # ya corre implícitamente en el escaneo pasivo dentro del grafo, ANTES
         # de normalizar para `_registrar_findings_con_ciclo_de_vida`.
-        hallazgos_normalizados = []
-        for hallazgo in hallazgos:
+        for hallazgo in resultado.findings:
             hallazgo_verificado = verificar_un_hallazgo(hallazgo)
+            hallazgo_verificado["_motor"] = "zap"
             hallazgos_normalizados.append(
                 {
                     "tipo": hallazgo_verificado.get("name", "desconocido"),
@@ -3072,9 +3073,54 @@ def _correr_escaneo_activo_en_background(
                     "endpoint": hallazgo_verificado.get("url")
                     or (hallazgo_verificado.get("instances") or [{}])[0].get("uri", ""),
                     "confirmado": bool(hallazgo_verificado["confirmado"]),
-                    "raw_json": json.dumps(hallazgo_verificado),
+                    "raw_json": json.dumps(hallazgo_verificado, default=str),
                 }
             )
+    except ToolExecutionError as exc:
+        partes_reporte.append(f"ZAP falló: {exc}")
+    except Exception as exc:  # noqa: BLE001 — este thread es el último punto de captura posible
+        partes_reporte.append(f"ZAP falló con un error inesperado: {exc}")
+
+    # --- Motor 2: Nuclei (independiente de ZAP -- ver docstring) ---
+    try:
+        resultado_nuclei = run_nuclei(
+            payload.target_url,
+            severity="critical,high,medium",
+            timeout=NUCLEI_TIMEOUT_ACTIVO_SEGUNDOS,
+        )
+        algun_motor_ok = True
+        partes_reporte.append(f"Nuclei: {len(resultado_nuclei.findings)} hallazgo(s).")
+        for hallazgo in resultado_nuclei.findings:
+            hallazgo_verificado = verificar_un_hallazgo(hallazgo)
+            hallazgo_verificado["_motor"] = "nuclei"
+            info = hallazgo_verificado.get("info")
+            info = info if isinstance(info, dict) else {}
+            hallazgos_normalizados.append(
+                {
+                    "tipo": info.get("name") or hallazgo_verificado.get("template-id", "desconocido"),
+                    "severidad": normalize_severity(hallazgo_verificado, "nuclei"),
+                    "endpoint": hallazgo_verificado.get("matched-at")
+                    or hallazgo_verificado.get("host")
+                    or payload.target_url,
+                    "confirmado": bool(hallazgo_verificado["confirmado"]),
+                    "raw_json": json.dumps(hallazgo_verificado, default=str),
+                }
+            )
+    except ToolExecutionError as exc:
+        partes_reporte.append(f"Nuclei falló: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        partes_reporte.append(f"Nuclei falló con un error inesperado: {exc}")
+
+    estado_final = "completado" if algun_motor_ok else "error"
+    reporte = " | ".join(partes_reporte) if partes_reporte else "Escaneo activo sin resultado."
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE scans SET estado = ?, reporte_final = ?, completed_at = ? WHERE id = ?",
+            (estado_final, reporte, now, scan_id),
+        )
 
         _registrar_findings_con_ciclo_de_vida(
             conn, tenant_id, scan_id, asset_id, hallazgos_normalizados, now
@@ -3132,6 +3178,16 @@ def escaneo_activo_async(
 # ---------------------------------------------------------------------------
 
 VIGIA_SCREENSHOT_DIR = os.environ.get("VIGIA_SCREENSHOT_DIR", "data/screenshots")
+
+# Fase 8 (Grupo 3): timeout acotado para el Motor 2 (Nuclei) dentro del
+# camino de escaneo activo en background. `tools.scan.run_nuclei` ya acepta
+# un `timeout` propio (default 900s pensado para uso interactivo/CLI), pero
+# ese default es demasiado largo para un thread de background que además ya
+# corrió ZAP -- un Nuclei colgado (target caído, DNS que no resuelve, red
+# lenta) no debe poder tener al scan completo en 'corriendo' indefinidamente.
+# Configurable vía env var para no hardcodear un valor que no sirva en todos
+# los entornos de despliegue.
+NUCLEI_TIMEOUT_ACTIVO_SEGUNDOS = int(os.environ.get("VIGIA_NUCLEI_TIMEOUT_ACTIVO_SEGUNDOS", "180"))
 
 
 def _enriquecer_dominios_clon(antisuplantacion_findings: list[dict], out_dir: str) -> None:

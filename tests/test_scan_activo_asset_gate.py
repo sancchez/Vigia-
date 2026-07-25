@@ -268,6 +268,11 @@ def test_scan_activo_permite_target_con_asset_registrado(client, monkeypatch):
         return _ResultadoFalso()
 
     monkeypatch.setattr(main_module, "run_checkpointed_active_scan", _zap_espia)
+    # Fase 8 (Grupo 3): además de ZAP, el thread de fondo ahora también
+    # corre Nuclei sobre el mismo target -- se mockea por el mismo motivo
+    # que `_zap_espia` (evitar una ejecución real contra un target de
+    # laboratorio que no existe, que dejaba el scan colgado en 'corriendo').
+    monkeypatch.setattr(main_module, "run_nuclei", lambda *_a, **_k: _ResultadoFalso())
     monkeypatch.setattr(
         main_module, "verificar_asset", lambda *_a, **_k: (True, "mock: token encontrado")
     )

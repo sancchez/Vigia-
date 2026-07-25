@@ -50,6 +50,14 @@ def test_scan_activo_real_puebla_asset_id_y_campos_de_ciclo_de_vida(client, monk
         return _ResultadoFalso()
 
     monkeypatch.setattr(main_module, "run_checkpointed_active_scan", _zap_espia)
+    # Fase 8 (Grupo 3): el camino de escaneo activo ahora también corre
+    # Nuclei -- se mockea igual que ZAP para que este test siga enfocado en
+    # ciclo de vida/asset_id y no dependa de una ejecución real de Nuclei.
+    class _ResultadoNucleiFalso:
+        findings: list = []
+        detalle_final: str = "mock: nuclei sin hallazgos"
+
+    monkeypatch.setattr(main_module, "run_nuclei", lambda *_a, **_k: _ResultadoNucleiFalso())
     monkeypatch.setattr(
         main_module, "verificar_asset", lambda *_a, **_k: (True, "mock: token encontrado")
     )

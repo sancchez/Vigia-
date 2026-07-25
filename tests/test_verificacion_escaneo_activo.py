@@ -184,6 +184,16 @@ def test_escaneo_activo_persiste_confirmado_real_no_cero_fijo(client, monkeypatc
         detalle_final = "mock: 2 hallazgos"
 
     monkeypatch.setattr(main_module, "run_checkpointed_active_scan", lambda *_a, **_k: _ResultadoZapFalso())
+
+    # Fase 8 (Grupo 3): el escaneo activo ahora también corre Nuclei -- se
+    # mockea igual que ZAP para que este test siga midiendo solo la
+    # persistencia de `confirmado`/ciclo de vida, no la ejecución real de un
+    # segundo motor de escaneo.
+    class _ResultadoNucleiFalso:
+        findings: list = []
+        detalle_final: str = "mock: nuclei sin hallazgos"
+
+    monkeypatch.setattr(main_module, "run_nuclei", lambda *_a, **_k: _ResultadoNucleiFalso())
     monkeypatch.setattr(main_module, "verificar_asset", lambda *_a, **_k: (True, "mock: token encontrado"))
 
     token = _registrar_tenant(client, "Escaneo Con Verificacion", "verif@escaneoactivo.test")

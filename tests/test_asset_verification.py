@@ -460,6 +460,12 @@ def test_scan_activo_permite_ip_privada_exenta_sin_verificar(client, monkeypatch
         return _ResultadoFalso()
 
     monkeypatch.setattr(main_module, "run_checkpointed_active_scan", _zap_espia)
+    # Fase 8 (Grupo 3): `_correr_escaneo_activo_en_background` ahora también
+    # invoca Nuclei -- sin este mock corre de verdad contra un target de
+    # laboratorio inexistente y el thread de fondo no termina a tiempo para
+    # `_esperar_scan_terminado` (ver informe de la regresión medida de esta
+    # sesión). Mismo patrón que el mock de ZAP arriba.
+    monkeypatch.setattr(main_module, "run_nuclei", lambda *_a, **_k: _ResultadoFalso())
 
     token_auth = _registrar_tenant(client, "Pyme Scan Activo IP", "scanactivoip@scanverif.test")
     client.post(
