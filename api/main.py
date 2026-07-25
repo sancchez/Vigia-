@@ -58,6 +58,7 @@ from agents.cumplimiento import generar_reporte_cumplimiento
 from agents.revision_ia import revisar_codigo
 from agents.verificacion import verificar_un_hallazgo
 from api.certstream_listener import start_certstream_listener, stop_certstream_listener
+from api.notificaciones import CANALES_SOPORTADOS, enviar_notificacion
 from api.scheduler import start_scheduler, stop_scheduler
 from db.connection import dict_from_row, get_conn
 from orchestrator.graph import compile_graph
@@ -2387,6 +2388,7 @@ def _registrar_findings_con_ciclo_de_vida(
                 )
             continue
 
+        finding_id = str(uuid.uuid4())
         sla_due_at = _calcular_sla_due_at(conn, tenant_id, hallazgo["severidad"], now)
         conn.execute(
             """
@@ -2396,7 +2398,7 @@ def _registrar_findings_con_ciclo_de_vida(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                str(uuid.uuid4()),
+                finding_id,
                 scan_id,
                 tenant_id,
                 tipo,
@@ -2410,6 +2412,28 @@ def _registrar_findings_con_ciclo_de_vida(
                 now,
             ),
         )
+
+        # Fase 5 (openspec/changes/fase5-notificaciones-alertas): un finding
+        # crítico NUEVO (esta rama del if -- no la de reincidencia de arriba,
+        # ver spec.md "nuevo, no una reaparición") dispara `enviar_notificacion`.
+        # Best-effort real -- `enviar_notificacion` atrapa toda excepción y
+        # nunca propaga, así que este hook no puede tumbar la persistencia de
+        # findings ni el resto del ciclo de vida de arriba.
+        if hallazgo["severidad"] == "critical":
+            enviar_notificacion(
+                conn,
+                tenant_id,
+                "hallazgo_critico_nuevo",
+                finding_id,
+                asunto=f"[Vigia] Hallazgo crítico nuevo: {tipo}",
+                cuerpo=(
+                    f"Se detectó un hallazgo crítico nuevo en tu vigilancia continua.\n\n"
+                    f"Tipo: {tipo}\n"
+                    f"Endpoint: {endpoint}\n"
+                    f"Finding ID: {finding_id}\n"
+                    f"Detectado: {now}\n"
+                ),
+            )
 
 
 @app.post("/scan", response_model=ScanResponse)
@@ -3512,6 +3536,145 @@ def desactivar_watched_brand(brand_id: str, user: UserContext = Depends(get_curr
         if row is None:
             raise HTTPException(status_code=404, detail="Marca vigilada no encontrada")
         conn.execute("UPDATE watched_brands SET is_active = 0 WHERE id = ?", (brand_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Reglas de notificación (openspec/changes/fase5-notificaciones-alertas):
+# CRUD scoped por tenant sobre `notification_rules` (tabla ya existe desde
+# `fase0-fundaciones-datos`). El envío/evaluación real vive en
+# `api/notificaciones.py`; este bloque solo gestiona las reglas que ese
+# módulo consulta. Mismo criterio 404-no-403 cross-tenant que `PATCH
+# /findings/{id}` -- ver ese docstring.
+# ---------------------------------------------------------------------------
+
+EVENTOS_NOTIFICACION_VALIDOS = (
+    "hallazgo_critico_nuevo",
+    "dominio_clon_detectado",
+    "sla_escalamiento",
+)
+
+
+class NotificationRuleIn(BaseModel):
+    evento: str
+    canal: str = "email"
+    destino: str
+    is_active: bool = True
+
+
+class NotificationRuleOut(BaseModel):
+    id: str
+    evento: str
+    canal: str
+    destino: str
+    is_active: bool
+
+
+class NotificationRulePatchIn(BaseModel):
+    destino: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+def _notification_rule_out_de_row(d: dict) -> NotificationRuleOut:
+    return NotificationRuleOut(
+        id=d["id"],
+        evento=d["evento"],
+        canal=d["canal"],
+        destino=d["destino"],
+        is_active=bool(d["is_active"]),
+    )
+
+
+@app.get("/notification-rules", response_model=list[NotificationRuleOut])
+def listar_notification_rules(user: UserContext = Depends(get_current_user)) -> list[NotificationRuleOut]:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM notification_rules WHERE tenant_id = ?", (user.tenant_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_notification_rule_out_de_row(dict_from_row(r)) for r in rows]
+
+
+@app.post("/notification-rules", response_model=NotificationRuleOut, status_code=201)
+def crear_notification_rule(
+    payload: NotificationRuleIn, user: UserContext = Depends(get_current_user)
+) -> NotificationRuleOut:
+    """Canal validado a `email` en v1 -- `slack`/`webhook` quedan reservados en
+    el esquema (columna `canal` libre) pero responden 422 explícito hasta que
+    se implemente el envío real (ver spec.md, Requirement "Canal validado")."""
+    if payload.canal not in CANALES_SOPORTADOS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"canal '{payload.canal}' no soportado todavía -- solo 'email' en v1.",
+        )
+    if payload.evento not in EVENTOS_NOTIFICACION_VALIDOS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"evento debe ser uno de {list(EVENTOS_NOTIFICACION_VALIDOS)}",
+        )
+
+    rule_id = str(uuid.uuid4())
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO notification_rules (id, tenant_id, evento, canal, destino, is_active)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (rule_id, user.tenant_id, payload.evento, payload.canal, payload.destino, int(payload.is_active)),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM notification_rules WHERE id = ?", (rule_id,)).fetchone()
+    finally:
+        conn.close()
+    return _notification_rule_out_de_row(dict_from_row(row))
+
+
+@app.patch("/notification-rules/{rule_id}", response_model=NotificationRuleOut)
+def actualizar_notification_rule(
+    rule_id: str, payload: NotificationRulePatchIn, user: UserContext = Depends(get_current_user)
+) -> NotificationRuleOut:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM notification_rules WHERE id = ? AND tenant_id = ?", (rule_id, user.tenant_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Regla de notificación no encontrada")
+
+        set_clauses: list[str] = []
+        params: list[Any] = []
+        if payload.destino is not None:
+            set_clauses.append("destino = ?")
+            params.append(payload.destino)
+        if payload.is_active is not None:
+            set_clauses.append("is_active = ?")
+            params.append(int(payload.is_active))
+        if set_clauses:
+            params.append(rule_id)
+            conn.execute(f"UPDATE notification_rules SET {', '.join(set_clauses)} WHERE id = ?", params)
+            conn.commit()
+
+        row_actualizado = conn.execute("SELECT * FROM notification_rules WHERE id = ?", (rule_id,)).fetchone()
+    finally:
+        conn.close()
+    return _notification_rule_out_de_row(dict_from_row(row_actualizado))
+
+
+@app.delete("/notification-rules/{rule_id}", status_code=204)
+def eliminar_notification_rule(rule_id: str, user: UserContext = Depends(get_current_user)) -> None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM notification_rules WHERE id = ? AND tenant_id = ?", (rule_id, user.tenant_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Regla de notificación no encontrada")
+        conn.execute("DELETE FROM notification_rules WHERE id = ?", (rule_id,))
         conn.commit()
     finally:
         conn.close()

@@ -74,6 +74,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from api.notificaciones import enviar_notificacion
 from db.connection import get_conn
 from tools.antisuplantacion import generate_domain_variants, registrable_domain
 from tools.asset_verification import asset_autorizado_para_escanear
@@ -259,13 +260,14 @@ def registrar_finding_certstream(
                 now,
             ),
         )
+        finding_id = str(uuid.uuid4())
         conn.execute(
             """
             INSERT INTO findings (id, scan_id, tenant_id, tipo, severidad, endpoint, confirmado, raw_json)
             VALUES (?, ?, ?, 'dominio_variante_certstream', 'high', ?, 0, ?)
             """,
             (
-                str(uuid.uuid4()),
+                finding_id,
                 scan_id,
                 tenant_id,
                 dominio_observado,
@@ -281,6 +283,27 @@ def registrar_finding_certstream(
             ),
         )
         conn.commit()
+
+        # Fase 5 (openspec/changes/fase5-notificaciones-alertas): dispara
+        # `dominio_clon_detectado` -- se ancla a `tipo='dominio_variante_certstream'`
+        # que este listener YA escribe (ver design.md, dependencia no
+        # bloqueante con fase3b). Best-effort real: `enviar_notificacion`
+        # nunca lanza, así que esto no puede tumbar el listener de CertStream.
+        enviar_notificacion(
+            conn,
+            tenant_id,
+            "dominio_clon_detectado",
+            finding_id,
+            asunto=f"[Vigia] Posible dominio clon detectado: {dominio_observado}",
+            cuerpo=(
+                f"CertStream detectó un certificado SSL emitido para un dominio que "
+                f"parece una variante de tu dominio vigilado.\n\n"
+                f"Dominio base: {dominio_base}\n"
+                f"Dominio observado: {dominio_observado}\n"
+                f"Finding ID: {finding_id}\n"
+                f"Detectado: {now}\n"
+            ),
+        )
     finally:
         conn.close()
     logger.warning(

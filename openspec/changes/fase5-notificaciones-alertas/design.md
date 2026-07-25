@@ -110,22 +110,29 @@ No requiere migración: las tablas existen vacías desde Fase 0. Aditivo puro.
 `git revert` sin downtime. Sin SMTP configurado, el sistema funciona igual que
 hoy (envío se omite silenciosamente) — no bloquea despliegues sin correo.
 
-## Open Questions
+## Open Questions (resueltas en `sdd-apply`)
 
-- [ ] **Clave exacta de idempotencia** en `notifications` sin columna nueva:
-  filtrar por `(tenant_id, evento, destino)` es insuficiente si dos findings del
-  mismo tenant comparten evento+destino. Opción A: codificar `recurso_id` dentro
-  de `evento` (`hallazgo_critico_nuevo:{finding_id}`) — simple, sin columna, pero
-  ensucia el campo `evento` para la regla-match (se resuelve haciendo match de la
-  regla por prefijo antes de `:`). Opción B: agregar columna `recurso_id` a
-  `notifications` (rompe "sin cambios de schema"). **Recomendado: Opción A**,
-  decidir en `sdd-apply`.
-- [ ] **[RIESGO ABIERTO — dependencia `fase3b`, no bloqueante para esta ronda]**
-  El evento `dominio_clon_detectado` se ancla a `tipo='dominio_variante_certstream'`
-  que el listener ya emite. Si `fase3b` (planificándose en paralelo, diseño no
-  visible) redefine el `tipo`/severidad o mueve la escritura de esos findings,
-  el predicado de disparo debe re-alinearse antes del `sdd-apply` de este change.
-  No cambia la forma del despacho, solo el punto/condición de invocación.
-- [ ] ¿El aviso `sla_escalamiento:vencido` debe además transicionar el `estado`
-  del finding (p.ej. marcar un flag de escalado)? v1: solo notifica, no muta
-  `findings` (evita colisión con la máquina de estados de `fase2a`). Diferido.
+- [x] **Clave exacta de idempotencia** en `notifications` sin columna nueva:
+  **Resuelto -- Opción A**, implementada tal cual (`api/notificaciones.py`).
+  La columna `evento` guarda `"{evento}:{recurso_id}"` (ej.
+  `"hallazgo_critico_nuevo:f123"`, `"sla_escalamiento:75pct:f123"`); el match
+  de `notification_rules` usa solo la porción antes del primer `:`
+  (`_evento_base`). La clave de idempotencia real terminó siendo
+  `(tenant_id, evento_compuesto, destino)` -- no solo `(tenant_id, evento,
+  recurso)` -- para que dos reglas del mismo evento con destinos distintos se
+  traten como notificaciones independientes (cada destino se envía y registra
+  por separado), decisión no explícita en el design original pero consistente
+  con la fila-por-envío de `notifications`.
+- [x] **[RIESGO ABIERTO — dependencia `fase3b`]** Confirmado al releer
+  `api/certstream_listener.py` en esta sesión de `sdd-apply` (Task 0.2): el
+  `tipo='dominio_variante_certstream'` sigue siendo exactamente el que el
+  listener escribe hoy, sin cambios de `fase3b` visibles en este worktree
+  aislado. El hook quedó anclado a ese `tipo` tal como estaba planeado. Si al
+  mergear se descubre que `fase3b` renombró el tipo/severidad, el orquestador
+  solo necesita ajustar el predicado en
+  `api/certstream_listener.py::registrar_finding_certstream` (la llamada a
+  `enviar_notificacion` ya está ahí, justo después del `INSERT`) -- no hace
+  falta tocar `api/notificaciones.py`.
+- [x] ¿El aviso `sla_escalamiento:vencido` debe además transicionar el `estado`
+  del finding? **Diferido, como estaba previsto** -- v1 solo notifica, no muta
+  `findings` (evita colisión con la máquina de estados de `fase2a`).
