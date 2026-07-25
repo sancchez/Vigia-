@@ -105,6 +105,7 @@ _TIPOS_AMENAZA_EXTERNA: frozenset[str] = frozenset(
 # qué otras palabras contenga.
 _RUIDO_ZAP: tuple[str, ...] = (
     "absence of anti-csrf tokens",
+    "cross-domain misconfiguration",
     "content security policy (csp) header not set",
     "csp: wildcard directive",
     "csp: style-src unsafe-inline",

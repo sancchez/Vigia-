@@ -2404,6 +2404,134 @@ def _calcular_sla_due_at(
     return (datetime.fromisoformat(created_at) + timedelta(days=dias)).isoformat()
 
 
+_ORDEN_SEVERIDAD: dict[str, int] = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+    "info": 0,
+}
+
+
+def _clave_agrupacion_hallazgo(hallazgo: dict) -> tuple[str, str]:
+    """Fase 8 (Grupo 1, deduplicación) -- clave = (`tipo`, parámetro afectado).
+
+    Validado contra la corrida real (`eval/baseline_real/juiceshop_2026-07-25_findings.json`,
+    459 hallazgos): para los 6 tipos que aparecen ahí, `raw_json.param` está
+    vacío en todos salvo "User Agent Fuzzer" (`"Header User-Agent"`, igual en
+    sus 2 instancias) -- son alertas de header/sitio, no de un parámetro de
+    URL puntual. Cuando no hay `param`, se usa el host (`scheme://netloc` del
+    `endpoint`) como sustituto del "parámetro afectado": agrupa todo lo que es
+    el mismo problema sobre el mismo sitio, pero NO fusiona el mismo `tipo`
+    detectado en dos sitios distintos dentro del mismo llamado (relevante para
+    los hallazgos de antisuplantación, que traen un dominio típosquat distinto
+    por fila con el mismo `tipo`. Ver `_extraer_findings_antisuplantacion`).
+
+    Devuelve la clave tal cual -- quien llama decide qué hacer con ella (acá,
+    se reusa directo como valor de `endpoint` del hallazgo agrupado, ver
+    `_combinar_grupo_hallazgos`, para que la identidad de
+    `_registrar_findings_con_ciclo_de_vida` -- que matchea por `(tipo,
+    endpoint)` -- se mantenga estable entre corridas sin tocar esa query).
+    """
+    tipo = hallazgo.get("tipo") or ""
+    parametro = ""
+    raw_json = hallazgo.get("raw_json")
+    if raw_json:
+        try:
+            raw = json.loads(raw_json)
+        except (TypeError, ValueError):
+            raw = None
+        if isinstance(raw, dict):
+            parametro = str(raw.get("param") or "").strip()
+    if not parametro:
+        partes = urlparse(hallazgo.get("endpoint") or "")
+        if partes.netloc:
+            parametro = f"{partes.scheme}://{partes.netloc}"
+    return (tipo, parametro)
+
+
+def _combinar_grupo_hallazgos(clave: tuple[str, str], miembros: list[dict]) -> dict:
+    """Colapsa un grupo de hallazgos duplicados (misma clave de
+    `_clave_agrupacion_hallazgo`) en UN solo hallazgo, con las URLs afectadas
+    como lista de evidencia dentro de `raw_json` (propuesta del proposal,
+    sección 4.3).
+
+    `endpoint` del resultado = la clave de agrupación misma (parámetro
+    afectado, o `scheme://netloc` como sustituto) -- ver docstring de
+    `_clave_agrupacion_hallazgo` para el porqué: tiene que ser el mismo string
+    en la próxima corrida para que la reincidencia (drift) siga funcionando.
+
+    `severidad` = la más grave del grupo (nunca se "esconde" un hallazgo
+    grave promediando con hallazgos leves). `confirmado` = True si CUALQUIER
+    miembro del grupo está confirmado.
+    """
+    tipo, parametro = clave
+    representante = dict(miembros[0])
+    try:
+        raw_repr = json.loads(representante.get("raw_json") or "{}")
+        if not isinstance(raw_repr, dict):
+            raw_repr = {}
+    except (TypeError, ValueError):
+        raw_repr = {}
+
+    urls_afectadas: list[str] = []
+    vistas: set[str] = set()
+    for miembro in miembros:
+        ep = str(miembro.get("endpoint") or "")
+        if ep and ep not in vistas:
+            vistas.add(ep)
+            urls_afectadas.append(ep)
+
+    raw_agrupado = dict(raw_repr)
+    raw_agrupado["grupo_deduplicado"] = True
+    raw_agrupado["parametro_afectado"] = parametro
+    raw_agrupado["cantidad_hallazgos_agrupados"] = len(miembros)
+    raw_agrupado["urls_afectadas"] = urls_afectadas
+
+    severidad = max(
+        (str(m.get("severidad") or "info") for m in miembros),
+        key=lambda s: _ORDEN_SEVERIDAD.get(s, 0),
+    )
+    confirmado = any(bool(m.get("confirmado")) for m in miembros)
+
+    return {
+        "tipo": tipo,
+        "severidad": severidad,
+        "endpoint": parametro or representante.get("endpoint") or "",
+        "confirmado": confirmado,
+        "raw_json": json.dumps(raw_agrupado, ensure_ascii=False, default=str),
+    }
+
+
+def _deduplicar_hallazgos(hallazgos: list[dict]) -> list[dict]:
+    """Agrupa `hallazgos` por `_clave_agrupacion_hallazgo` antes de persistir
+    -- Fase 8, Grupo 1. Un hallazgo sin duplicados pasa sin cambios (mismo
+    dict, no se le agrega `grupo_deduplicado` ni se pierde nada de su forma
+    original) para no tocar el camino feliz de "1 problema, 1 fila" con
+    metadata que nadie pidió.
+
+    Preserva el orden de primera aparición de cada clave -- determinismo, no
+    depende de detalles de iteración de `dict`.
+    """
+    grupos: dict[tuple[str, str], list[dict]] = {}
+    orden: list[tuple[str, str]] = []
+    for hallazgo in hallazgos:
+        clave = _clave_agrupacion_hallazgo(hallazgo)
+        if clave not in grupos:
+            grupos[clave] = []
+            orden.append(clave)
+        grupos[clave].append(hallazgo)
+
+    resultado: list[dict] = []
+    for clave in orden:
+        miembros = grupos[clave]
+        if len(miembros) == 1:
+            resultado.append(miembros[0])
+        else:
+            resultado.append(_combinar_grupo_hallazgos(clave, miembros))
+    return resultado
+
+
 def _registrar_findings_con_ciclo_de_vida(
     conn,
     tenant_id: str,
@@ -2412,16 +2540,20 @@ def _registrar_findings_con_ciclo_de_vida(
     hallazgos: list[dict],
     now: str,
 ) -> None:
-    """Inserta o actualiza findings aplicando SLA (por severidad) y detección
-    de reincidencia (drift) contra hallazgos previos del mismo asset -- ver
-    design.md, Data Flow. Compartida por ambos paths de inserción (`scan()` y
-    `_correr_escaneo_activo_en_background`) para que esta lógica viva en un
-    solo lugar.
+    """Inserta o actualiza findings aplicando deduplicación (Fase 8, Grupo 1),
+    SLA (por severidad) y detección de reincidencia (drift) contra hallazgos
+    previos del mismo asset -- ver design.md, Data Flow. Compartida por ambos
+    paths de inserción (`scan()` y `_correr_escaneo_activo_en_background`)
+    para que esta lógica viva en un solo lugar.
 
     `hallazgos` ya viene normalizado por el llamador: cada dict trae `tipo`,
     `severidad`, `endpoint`, `confirmado` (bool/int), `raw_json` (string JSON
     ya serializado) -- exactamente los mismos valores que antes se pasaban
-    directo al `INSERT INTO findings` en cada call site.
+    directo al `INSERT INTO findings` en cada call site. Acá, ANTES de tocar
+    la base, se agrupan con `_deduplicar_hallazgos` (459 hallazgos de ZAP
+    contra Juice Shop -> 6 grupos reales en la corrida medida, ver
+    `eval/failure_log.md`) -- el resto de la función no sabe ni le importa si
+    un `hallazgo` es agrupado o no, ya llega con la forma de siempre.
 
     `asset_id` puede ser `None` (scan sin asset resoluble) -- la subquery de
     abajo (`scans.asset_id = ? AND asset_id IS NOT NULL`) nunca matchea con
@@ -2429,7 +2561,7 @@ def _registrar_findings_con_ciclo_de_vida(
     trata como nuevo, nunca como reincidencia falsa (ver spec.md, escenario
     "Scan sin asset resoluble no participa del drift").
     """
-    for hallazgo in hallazgos:
+    for hallazgo in _deduplicar_hallazgos(hallazgos):
         tipo = hallazgo["tipo"]
         endpoint = hallazgo["endpoint"]
         match = conn.execute(
