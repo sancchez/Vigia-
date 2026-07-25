@@ -341,6 +341,62 @@ def add_cookie_replacer(base_url: str, cookie_header: str) -> None:
     )
 
 
+# Rutas que cierran la sesión del usuario. Si el spider las visita durante un
+# escaneo AUTENTICADO, el servidor invalida la sesión y TODO lo que se escanea
+# después corre como anónimo -- el escaneo "termina bien", no reporta nada, y
+# el informe parece limpio. Es el peor modo de falla posible para un producto
+# de seguridad: falsa tranquilidad.
+#
+# Medido el 2026-07-25 contra DVWA: el spider visitó `logout.php` 13 veces y el
+# escaneo activo posterior corrió sin sesión contra las 12 páginas vulnerables,
+# devolviendo recall 0.0 con 771 alertas, todas de header. Ver
+# `eval/failure_log.md`.
+#
+# Incluye variantes en español porque los clientes objetivo son pymes
+# colombianas y sus apps usan `/salir`, `/cerrar-sesion`, etc.
+_PATRONES_CIERRE_SESION: tuple[str, ...] = (
+    "logout",
+    "log-out",
+    "log_out",
+    "signout",
+    "sign-out",
+    "sign_out",
+    "logoff",
+    "log-off",
+    "cerrar-sesion",
+    "cerrar_sesion",
+    "cerrarsesion",
+    "desconectar",
+    "salir",
+)
+
+
+def exclude_session_killers_from_scan(base_url: str) -> list[str]:
+    """Excluye del spider y del escaneo activo las rutas que cierran sesión.
+
+    Devuelve los regex aplicados (para poder registrarlos en el trace del
+    escaneo y que quede auditable qué se excluyó y por qué).
+
+    Se aplica SIEMPRE, no solo en escaneos autenticados: excluir un `/logout`
+    en un escaneo anónimo no pierde cobertura real (no hay nada que atacar en
+    una ruta que solo destruye una sesión inexistente), y evita depender de
+    que el llamador se acuerde de activarlo.
+    """
+    regexes = [f"(?i).*{p}.*" for p in _PATRONES_CIERRE_SESION]
+    for regex in regexes:
+        for endpoint in (
+            "/JSON/spider/action/excludeFromScan/",
+            "/JSON/ascan/action/excludeFromScan/",
+        ):
+            try:
+                _zap_get(base_url, endpoint, params={"regex": regex})
+            except Exception:  # noqa: BLE001
+                # Un patrón rechazado no debe abortar el escaneo entero; los
+                # demás siguen aplicándose. Se reporta vía el valor de retorno.
+                pass
+    return regexes
+
+
 def spider_start(base_url: str, target_url: str) -> str:
     data = _zap_get(base_url, "/JSON/spider/action/scan/", params={"url": target_url, "recurse": "true"})
     return str(data["scan"])
@@ -508,6 +564,16 @@ def run_checkpointed_active_scan(
         # `add_cookie_replacer` y `eval/live_run_report.md`.
         if cookie_header:
             add_cookie_replacer(base_url, cookie_header)
+
+        # Excluir rutas de cierre de sesión ANTES de crawlear nada: si el
+        # spider visita `/logout`, el resto del escaneo corre sin sesión y el
+        # informe sale limpio por la razón equivocada. Ver
+        # `exclude_session_killers_from_scan`.
+        excluidos = exclude_session_killers_from_scan(base_url)
+        _reportar(
+            "iniciando",
+            f"Excluidas {len(excluidos)} rutas de cierre de sesión del alcance.",
+        )
 
         # --- Fase 1: spider clásico (siempre corre, es rápido y barato) ---
         spider_id = spider_start(base_url, zap_target)
