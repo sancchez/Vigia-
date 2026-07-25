@@ -1,0 +1,27 @@
+{
+  "_comentario": "Hallazgos canned de revisión de código IA -- 'conforme' cita texto LITERAL de fixtures/muestra_control_acceso.py (ver check validar_no_alucinacion_evidencia); 'no_conforme' inventa una cita que no existe en el archivo, para probar que el check la detecta.",
+  "respuesta_conforme": [
+    {
+      "archivo": "eval/agent_quality/fixtures/muestra_control_acceso.py",
+      "linea_aprox": 10,
+      "categoria": "logica_de_negocio",
+      "severidad": "alta",
+      "descripcion": "El chequeo de autorización compara el rol del usuario objetivo en vez del rol de quien hace la solicitud.",
+      "evidencia": "if usuario_objetivo.rol != \"admin\":",
+      "recomendacion": "Comparar el rol de `usuario_actual` (quien solicita la acción), no el de `usuario_objetivo`.",
+      "relacionado_con_semgrep": null
+    }
+  ],
+  "respuesta_no_conforme": [
+    {
+      "archivo": "eval/agent_quality/fixtures/muestra_control_acceso.py",
+      "linea_aprox": 42,
+      "categoria": "logica_de_negocio",
+      "severidad": "alta",
+      "descripcion": "Cita inventada para probar la detección de alucinación.",
+      "evidencia": "if session.token_secreto == GLOBAL_ADMIN_BYPASS:",
+      "recomendacion": "N/A -- este hallazgo es deliberadamente falso para el eval.",
+      "relacionado_con_semgrep": null
+    }
+  ]
+}

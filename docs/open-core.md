@@ -175,6 +175,33 @@ de error.
   `revision_ia`) no tenían tests que asertaran el contenido exacto del
   prompt -- no hizo falta mover ni duplicar nada ahí.
 
+## Fase 7 (`fase7-confianza-calidad`): evals de calidad del fallback vs. contenido privado
+
+Mismo criterio de split que el resto de este documento, aplicado ahora a
+**evals de CALIDAD** de los agentes de razonamiento (no solo a los tests de
+`agents.cumplimiento`):
+
+- **Repo público, `eval/agent_quality/` + `tests/test_agent_quality_fallback.py`**
+  (ejecutado en esta ronda): mockean `agents._llm.call_claude` con
+  respuestas canned y verifican el CONTRATO del modo `fallback_publico` de
+  `priorizacion`/`remediacion`/`revision_ia` -- conformidad de esquema JSON
+  de salida, orden por severidad técnica, y ausencia de marcadores de
+  sobre-promesa/alucinación (ej. citas de código que no existen
+  literalmente en el archivo revisado). Nunca corren contra el
+  `SYSTEM_PROMPT` real ni asertan su contenido.
+- **Repo privado, `vigia_core_private/tests/test_{priorizacion,remediacion,revision_ia}_contenido.py`**
+  (planeado en `openspec/changes/fase7-confianza-calidad/tasks.md`, Fase 6
+  -- NO ejecutado en esta ronda, commit aparte en `vigIA-Privado`): evals
+  que sí asertan el contenido real de esos `SYSTEM_PROMPT` (ponderación por
+  impacto de negocio, estilo/estructura de remediación, las 5 categorías
+  finas de revisión de código) -- mismo patrón que
+  `vigia_core_private/tests/test_cumplimiento_categorizacion.py` ya
+  establecido arriba.
+- El gate de regresión (`eval/regression_runner.py` + `eval/baseline.json`,
+  también Fase 7) y el FP-rate expuesto en `eval/run_eval.py` son
+  100% público -- miden DETECCIÓN de hallazgos (Nuclei/ZAP/Semgrep), no
+  contenido de prompts, así que no aplica ningún split ahí.
+
 ## Verificación realizada
 
 1. **Modo fallback (paquete privado NO instalado, el estado normal de

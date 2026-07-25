@@ -1,0 +1,37 @@
+{
+  "_comentario": "Fase 7 -- hallazgos ya CONFIRMADOS (mismo contrato que agents/priorizacion.py::node() espera en state['verified_findings']), deliberadamente fuera de orden de severidad para ejercitar el reordenamiento.",
+  "verified_findings": [
+    {
+      "id": "F-001",
+      "tipo": "sql_injection",
+      "severidad": "high",
+      "endpoint": "/rest/user/login",
+      "confirmado": true,
+      "objetivo": "juice-shop"
+    },
+    {
+      "id": "F-002",
+      "tipo": "xss_reflected",
+      "severidad": "low",
+      "endpoint": "/search",
+      "confirmado": true,
+      "objetivo": "juice-shop"
+    },
+    {
+      "id": "F-003",
+      "tipo": "broken_access_control",
+      "severidad": "critical",
+      "endpoint": "/rest/admin/application",
+      "confirmado": true,
+      "objetivo": "juice-shop"
+    },
+    {
+      "id": "F-004",
+      "tipo": "sensitive_data_exposure",
+      "severidad": "medium",
+      "endpoint": "/rest/products/reviews",
+      "confirmado": true,
+      "objetivo": "juice-shop"
+    }
+  ]
+}

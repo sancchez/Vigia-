@@ -25,6 +25,7 @@ import VigilanciaPanel from "../components/VigilanciaPanel";
 import WatchedBrandsConfig from "../components/WatchedBrandsConfig";
 import BrandProtectionPanel from "../components/BrandProtectionPanel";
 import OnboardingWizard from "../components/OnboardingWizard";
+import AuditLog from "../components/AuditLog";
 
 const PLAN_LABEL: Record<string, string> = {
   trial: "Prueba",
@@ -819,6 +820,8 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
+
+          <AuditLog />
 
           <div className="card" style={{ marginTop: "1.25rem" }}>
             <h2 style={{ fontSize: 17, marginBottom: 4 }}>Export ejecutivo</h2>

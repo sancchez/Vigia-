@@ -273,6 +273,15 @@ def compute_metrics(match: MatchResult) -> dict:
         if (precision + recall) > 0
         else 0.0
     )
+    # Fase 7 (openspec/changes/fase7-confianza-calidad): tasa de falsos
+    # positivos como KPI de producto explícito, no solo un derivado implícito
+    # de precision. Mismo denominador que precision (TP+FP) -- fp_rate es
+    # simplemente `1 - precision` cuando hay al menos un hallazgo reportado,
+    # pero se expone con su propio nombre porque el gate de regresión
+    # (`regression_runner.py`) y el reporte lo tratan como métrica de primera
+    # clase (spec.md: "El harness ... MUST exponer una tasa de falsos
+    # positivos (FP-rate)").
+    fp_rate = fp / (tp + fp) if (tp + fp) > 0 else 0.0
     return {
         "tp": tp,
         "fp": fp,
@@ -280,6 +289,7 @@ def compute_metrics(match: MatchResult) -> dict:
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "fp_rate": fp_rate,
     }
 
 
@@ -297,6 +307,7 @@ def print_report(match: MatchResult, metrics: dict) -> None:
     print(f"{'Precision':<20}{metrics['precision']:.2%}")
     print(f"{'Recall':<20}{metrics['recall']:.2%}")
     print(f"{'F1-score':<20}{metrics['f1']:.2%}")
+    print(f"{'FP-rate':<20}{metrics['fp_rate']:.2%}")
     print()
 
     print(line)
@@ -351,6 +362,15 @@ def main() -> int:
         default=os.path.join(here, "sample_findings.json"),
         help="Ruta al JSON de hallazgos reportados (default: eval/sample_findings.json)",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emite SOLO las metricas (tp/fp/fn/precision/recall/f1/fp_rate) como "
+            "JSON en stdout, sin el reporte de texto -- salida parseable por "
+            "maquina para `eval/regression_runner.py` u otros scripts."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.ground_truth):
@@ -368,7 +388,11 @@ def main() -> int:
 
     match = match_findings(ground_truth, findings)
     metrics = compute_metrics(match)
-    print_report(match, metrics)
+
+    if args.json:
+        print(json.dumps(metrics, ensure_ascii=False))
+    else:
+        print_report(match, metrics)
 
     return 0
 
