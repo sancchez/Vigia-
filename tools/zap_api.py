@@ -242,7 +242,11 @@ def start_daemon(container_name: str, host_port: int | None = None) -> tuple[str
     return f"http://localhost:{port}", port
 
 
-def wait_ready(base_url: str, timeout: int = 240, poll_interval: float = 3.0) -> None:
+def wait_ready(
+    base_url: str,
+    timeout: int | None = None,
+    poll_interval: float = 3.0,
+) -> None:
     """Bloquea (poco, y en pasos cortos) hasta que la API de ZAP responde.
 
     Cada contenedor daemon arranca "en frío" -- la imagen no trae los
@@ -267,7 +271,18 @@ def wait_ready(base_url: str, timeout: int = 240, poll_interval: float = 3.0) ->
     por el riesgo de compartir estado entre escaneos concurrentes de
     tenants distintos sin diseñarlo con cuidado (un volumen compartido
     ingenuo podría filtrar contexto/sesión de un escaneo a otro).
+    **Por qué el default es 600s y configurable (medido 2026-07-25):** con
+    Juice Shop y DVWA levantados en paralelo, ZAP 2.17.0 tardó MÁS de 240s
+    en responder `/JSON/core/view/version/` -- el contenedor estaba sano y
+    progresando (instalando add-ons, creando el CA root), simplemente lento.
+    Con el default anterior de 240s el escaneo moría con `ZapDaemonError`
+    justo antes de arrancar, que es exactamente el "bloqueador de timeout de
+    ZAP" que ya había frenado a Corrida 12 sin diagnosticarse. No es solo un
+    problema de laboratorio: en la máquina de un cliente el arranque en frío
+    puede ser igual de lento, y el escaneo fallaría sin haber empezado.
     """
+    if timeout is None:
+        timeout = int(os.environ.get("VIGIA_ZAP_READY_TIMEOUT", "600"))
     deadline = time.monotonic() + timeout
     ultimo_error: Exception | None = None
     while time.monotonic() < deadline:
@@ -299,6 +314,29 @@ def add_bearer_auth_replacer(base_url: str, bearer_token: str) -> None:
             "matchString": "Authorization",
             "matchRegex": "false",
             "replacement": f"Bearer {bearer_token}",
+        },
+    )
+
+
+def add_cookie_replacer(base_url: str, cookie_header: str) -> None:
+    """Inyecta un header `Cookie: <cookie_header>` en todas las peticiones salientes de ZAP.
+
+    Análogo a `add_bearer_auth_replacer`, pero para targets que autentican
+    por cookie de sesión (ej. DVWA: `PHPSESSID=...; security=low`) en vez de
+    JWT Bearer. Agregado en la corrida DVWA autenticada del 2026-07-25 (ver
+    `eval/live_run_report.md`) -- el replacer existente solo cubría
+    `Authorization`, que no aplica a DVWA.
+    """
+    _zap_get(
+        base_url,
+        "/JSON/replacer/action/addRule/",
+        params={
+            "description": "vigia-cookie-auth",
+            "enabled": "true",
+            "matchType": "REQ_HEADER",
+            "matchString": "Cookie",
+            "matchRegex": "false",
+            "replacement": cookie_header,
         },
     )
 
@@ -397,6 +435,7 @@ def run_checkpointed_active_scan(
     scan_id: str,
     on_progress: Callable[[ZapProgress], None] | None = None,
     poll_interval: float = 4.0,
+    cookie_header: str | None = None,
 ) -> ZapCheckpointedResult:
     """Corre spider (+ AJAX spider opcional) y escaneo activo vía la API real de ZAP.
 
@@ -463,6 +502,12 @@ def run_checkpointed_active_scan(
 
         if bearer_token:
             add_bearer_auth_replacer(base_url, bearer_token)
+        # Targets que autentican por cookie de sesión (ej. DVWA:
+        # `PHPSESSID=...; security=low`) en vez de JWT Bearer -- agregado en
+        # la corrida DVWA autenticada del 2026-07-25, ver
+        # `add_cookie_replacer` y `eval/live_run_report.md`.
+        if cookie_header:
+            add_cookie_replacer(base_url, cookie_header)
 
         # --- Fase 1: spider clásico (siempre corre, es rápido y barato) ---
         spider_id = spider_start(base_url, zap_target)

@@ -59,6 +59,7 @@ def run_nuclei(
     templates: str | None = None,
     severity: str | None = None,
     timeout: int = 900,
+    headers: list[str] | None = None,
 ) -> ScanResult:
     """Escanea `target` con Nuclei (projectdiscovery/nuclei), +12.000 plantillas YAML.
 
@@ -86,6 +87,11 @@ def run_nuclei(
         cmd += ["-t", templates]
     if severity:
         cmd += ["-severity", severity]
+    # Targets autenticados por cookie de sesión (ej. DVWA) -- agregado en la
+    # corrida DVWA autenticada del 2026-07-25 (ver eval/live_run_report.md).
+    # Sin esto Nuclei solo ve la página de login en cualquier ruta protegida.
+    for h in headers or []:
+        cmd += ["-H", h]
     result = run_command("nuclei", cmd, timeout=timeout)
     findings = parse_jsonl(result.stdout)
     result.parsed = findings
