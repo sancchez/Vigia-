@@ -427,3 +427,56 @@ def test_kpis_mttd_calculado_cuando_hay_ssl_not_before(client):
     data = resp.json()
     assert data["mttd_dias"] == 4.0
     assert data["mttd_precision"] == "aproximado"
+
+
+# ---------------------------------------------------------------------------
+# Fase 9: cableado del filtro de defensivos en el camino de persistencia.
+# Regresión MEDIDA (2026-07-25): `triar_lookalikes` existía y tenía tests,
+# pero NINGÚN camino de producción lo usaba -- el builder persistía los
+# registros defensivos del propio cliente como amenazas "high". Estos tests
+# protegen el cableado real (`_extraer_findings_antisuplantacion`), no la
+# función pura.
+# ---------------------------------------------------------------------------
+
+def _senal_dominio(dominio, *, defensivo=False, correo=False, registrado=True):
+    return {
+        "señales_crudas": [
+            {
+                "tipo": "dominio_variante",
+                "fuzzer": "addition",
+                "dominio": dominio,
+                "registrado": registrado,
+                "es_defensivo": defensivo,
+                "tiene_correo": correo,
+            }
+        ],
+        "analisis_claude": None,
+    }
+
+
+def test_persistencia_excluye_registros_defensivos_del_cliente():
+    """Un lookalike marcado `es_defensivo` (mismo nameserver que el dominio
+    legítimo) NO debe generar una fila: es la defensa del cliente, no una
+    amenaza. Sin este filtro se le reportaría su propia infraestructura."""
+    filas = main_module._extraer_findings_antisuplantacion(
+        "marca.com",
+        [_senal_dominio("marca-defensiva.com", defensivo=True)],
+    )
+    assert filas == []
+
+
+def test_persistencia_eleva_a_critical_los_que_pueden_enviar_correo():
+    """Tercero con MX real -> puede enviar phishing que parezca del cliente ->
+    severidad critical (encabeza el informe). Tercero sin correo -> high."""
+    filas = main_module._extraer_findings_antisuplantacion(
+        "marca.com",
+        [
+            _senal_dominio("marca-con-correo.com", correo=True),
+            _senal_dominio("marca-sin-correo.com", correo=False),
+        ],
+    )
+    por_endpoint = {f["endpoint"]: f["severidad"] for f in filas}
+    assert por_endpoint == {
+        "marca-con-correo.com": "critical",
+        "marca-sin-correo.com": "high",
+    }

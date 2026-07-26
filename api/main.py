@@ -2295,8 +2295,19 @@ def _extraer_findings_antisuplantacion(target: str, antisuplantacion_findings: l
                 # `autorizacion_firmada` en `agents/escaneo.py`).
                 if not señal.get("registrado"):
                     continue
+                # Registro defensivo del propio cliente (comparte nameserver con
+                # el dominio legítimo, marcado por `triar_lookalikes` en
+                # `agents/antisuplantacion.py`): NO es una amenaza, es la defensa
+                # del cliente. Reportárselo es un falso positivo comercial grave
+                # -- se le alarma con su propia infraestructura. Medido contra un
+                # banco real (10 de 45 lookalikes registrados eran del banco).
+                if señal.get("es_defensivo"):
+                    continue
                 endpoint = señal.get("dominio") or ""
-                severidad = "high"
+                # Un lookalike de tercero CON servidor de correo real puede
+                # ENVIAR phishing que parezca del cliente -- es el subconjunto
+                # urgente, se eleva a critical para que encabece el informe.
+                severidad = "critical" if señal.get("tiene_correo") else "high"
             elif tipo_señal == "perfil_red_social":
                 endpoint = señal.get("url") or ""
                 severidad = "medium"

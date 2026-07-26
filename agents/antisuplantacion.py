@@ -14,7 +14,7 @@ import json
 
 from orchestrator.state import PipelineState, make_trace_event
 from tools._shared import ToolExecutionError
-from tools.antisuplantacion import run_dnstwist, run_sherlock
+from tools.antisuplantacion import run_dnstwist, run_sherlock, triar_lookalikes
 
 from ._llm import LLMNoDisponibleError, call_claude
 
@@ -44,6 +44,16 @@ def node(state: PipelineState) -> dict:
 
     try:
         dnstwist_result = run_dnstwist(target, registered_only=True)
+        # Triaje ANTES de emitir señales: separa los registros DEFENSIVOS del
+        # propio dueño de la marca (comparten nameserver con el dominio
+        # legítimo) de las amenazas de terceros, y marca los urgentes (tercero
+        # con MX real -> puede enviar phishing). Sin esto el informe reportaría
+        # los registros defensivos del cliente como amenazas -- falso positivo
+        # comercial grave, medido contra un banco real el 2026-07-25 (10 de 45
+        # eran del propio banco). Ver `tools.antisuplantacion.triar_lookalikes`.
+        triaje = triar_lookalikes(dnstwist_result)
+        defensivos = {v.domain for v in triaje.propios}
+        urgentes = {v.domain for v in triaje.con_correo}
         for variante in dnstwist_result.findings:
             señales.append(
                 {
@@ -51,7 +61,12 @@ def node(state: PipelineState) -> dict:
                     "fuzzer": variante.fuzzer,
                     "dominio": variante.domain,
                     "dns_a": variante.dns_a,
+                    # Nameservers: dato que el triaje aguas abajo necesita para
+                    # auditar la atribución de propiedad (antes se descartaba).
+                    "dns_ns": (variante.raw or {}).get("dns_ns", []),
                     "registrado": variante.registered,
+                    "es_defensivo": variante.domain in defensivos,
+                    "tiene_correo": variante.domain in urgentes,
                 }
             )
     except ToolExecutionError as exc:
