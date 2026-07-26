@@ -2309,8 +2309,23 @@ def _extraer_findings_antisuplantacion(target: str, antisuplantacion_findings: l
                 # urgente, se eleva a critical para que encabece el informe.
                 severidad = "critical" if señal.get("tiene_correo") else "high"
             elif tipo_señal == "perfil_red_social":
+                # Fase 10 WS3 -- MEDIDO (2026-07-26): `run_sherlock` (Sherlock
+                # 0.16.0) solo confirma que el username existe en cada
+                # plataforma y devuelve la URL del perfil -- no trae bio,
+                # nombre para mostrar, ni ningún dato que permita saber si el
+                # perfil enlaza al dominio legítimo del cliente. Corrida real
+                # contra "nubank": 68 perfiles, cero metadata más allá de la
+                # URL. Sin esa señal (u otra) no hay forma confiable de
+                # separar el perfil oficial del cliente de una entidad no
+                # relacionada con el mismo username o de un suplantador real
+                # -- reportar cualquiera de los tres como amenaza "medium"
+                # sin evidencia es el falso positivo que esta fase existe
+                # para evitar. Se degrada a "info": lista para revisión
+                # humana, no una amenaza confirmada. Si en el futuro se agrega
+                # un fetch del perfil para leer su bio/enlace, esta decisión
+                # se puede revisar con esa señal nueva medida.
                 endpoint = señal.get("url") or ""
-                severidad = "medium"
+                severidad = "info"
             else:
                 continue  # señal sin schema reconocido; no persistir a ciegas
             filas.append(
@@ -2454,10 +2469,30 @@ def _clave_agrupacion_hallazgo(hallazgo: dict) -> tuple[str, str]:
             raw = None
         if isinstance(raw, dict):
             parametro = str(raw.get("param") or "").strip()
+    endpoint = (hallazgo.get("endpoint") or "").strip()
     if not parametro:
-        partes = urlparse(hallazgo.get("endpoint") or "")
+        partes = urlparse(endpoint)
         if partes.netloc:
             parametro = f"{partes.scheme}://{partes.netloc}"
+        elif endpoint:
+            # BUG MEDIDO (2026-07-26, Fase 10 WS1): `urlparse()` sobre un
+            # dominio PELADO (sin esquema) devuelve `netloc` vacío -- lo
+            # interpreta como `path`. Los hallazgos de antisuplantación usan
+            # el dominio pelado como `endpoint` (ver
+            # `_extraer_findings_antisuplantacion`: `endpoint = señal["dominio"]`),
+            # así que TODOS caían en la clave `("dominio_variante", "")` y se
+            # fusionaban en UN solo hallazgo. Corrida real: 35 dominios
+            # suplantadores distintos colapsados en 1 -- el cliente vería "1
+            # amenaza" en vez de 35. El docstring de arriba AFIRMABA que esto
+            # no pasaba, pero nunca se había medido contra datos reales de
+            # antisuplantación (solo contra alertas ZAP, que sí traen URL
+            # completa y por eso funcionaban bien).
+            #
+            # Cada dominio típosquat es una amenaza DISTINTA, no la misma
+            # repetida: usar el endpoint como discriminador los mantiene
+            # separados. No afecta a ZAP (sus endpoints son URLs con esquema y
+            # siguen tomando la rama `netloc` de arriba).
+            parametro = endpoint
     return (tipo, parametro)
 
 

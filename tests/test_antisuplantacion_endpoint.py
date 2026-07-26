@@ -480,3 +480,75 @@ def test_persistencia_eleva_a_critical_los_que_pueden_enviar_correo():
         "marca-con-correo.com": "critical",
         "marca-sin-correo.com": "high",
     }
+
+
+# ---------------------------------------------------------------------------
+# Fase 10 WS3: triaje honesto de perfiles de redes sociales (Sherlock).
+# MEDIDO (2026-07-26): `sherlock nubank --print-found` sobre 68 plataformas
+# reales solo devuelve URL + existencia -- sin bio, sin enlace al dominio del
+# cliente, sin ninguna señal para distinguir el perfil oficial de una
+# entidad no relacionada o de un suplantador real. Sin esa señal, clasificar
+# automáticamente sería inventar un clasificador que miente. Por eso TODO
+# hallazgo `perfil_red_social` se persiste como severidad `info` ("revisión
+# humana"), nunca como amenaza medium/high/critical. Este test protege esa
+# decisión: si alguien revierte la degradación a `info` (ej. la vuelve a
+# `medium` para "que se vea más urgente"), este test falla.
+# ---------------------------------------------------------------------------
+
+def _senal_perfil(url: str) -> dict:
+    return {
+        "señales_crudas": [
+            {"tipo": "perfil_red_social", "username": "marca", "url": url},
+        ],
+        "analisis_claude": None,
+    }
+
+
+def test_persistencia_degrada_perfiles_red_social_a_info_para_revision_humana():
+    """Ningún perfil de red social se persiste como amenaza sin evidencia:
+    Sherlock no da señal para distinguir oficial/no-relacionado/suplantador
+    (ver comentario en `_extraer_findings_antisuplantacion` y en
+    `tools.antisuplantacion.run_sherlock`), así que todos quedan en `info`."""
+    filas = main_module._extraer_findings_antisuplantacion(
+        "marca.com",
+        [
+            _senal_perfil("https://twitter.com/marca"),
+            _senal_perfil("https://github.com/marca"),
+        ],
+    )
+    assert len(filas) == 2
+    assert {f["severidad"] for f in filas} == {"info"}
+    # Ninguna severidad de amenaza confirmada, ni una sola vez.
+    assert not any(f["severidad"] in {"medium", "high", "critical"} for f in filas)
+
+
+# ---------------------------------------------------------------------------
+# Fase 10 WS1: la deduplicación NO debe fusionar dominios suplantadores
+# distintos. BUG MEDIDO (2026-07-26): `urlparse()` sobre un dominio pelado
+# devuelve `netloc` vacío, así que los 35 lookalikes de una corrida real
+# cayeron todos en la clave `("dominio_variante", "")` y se persistió UN solo
+# hallazgo -- el cliente habría visto "1 amenaza" en vez de 35.
+# ---------------------------------------------------------------------------
+
+def test_dedup_no_fusiona_dominios_suplantadores_distintos():
+    """Cada dominio típosquat es una amenaza distinta, no la misma repetida.
+    Si alguien revierte el fallback a `endpoint` en
+    `_clave_agrupacion_hallazgo`, estos tres colapsan en uno y el test falla."""
+    hallazgos = [
+        {"tipo": "dominio_variante", "endpoint": d, "raw_json": None}
+        for d in ("bancolombias.com", "bamcolombia.com", "bancolornbia.com")
+    ]
+    claves = {main_module._clave_agrupacion_hallazgo(h) for h in hallazgos}
+    assert len(claves) == 3, f"se fusionaron dominios distintos: {claves}"
+
+
+def test_dedup_sigue_agrupando_alertas_zap_del_mismo_sitio():
+    """El fix de arriba no debe romper el comportamiento de Fase 8: la misma
+    alerta ZAP sobre muchas URLs del MISMO sitio sigue siendo un solo grupo
+    (esos endpoints sí traen esquema, así que usan la rama `netloc`)."""
+    hallazgos = [
+        {"tipo": "CSP Header Not Set", "endpoint": f"http://localhost:3000/pagina{i}", "raw_json": None}
+        for i in range(5)
+    ]
+    claves = {main_module._clave_agrupacion_hallazgo(h) for h in hallazgos}
+    assert len(claves) == 1, f"dejó de agrupar alertas del mismo sitio: {claves}"

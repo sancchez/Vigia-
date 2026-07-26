@@ -75,6 +75,13 @@ def node(state: PipelineState) -> dict:
     username = _username_desde_target(target)
     try:
         sherlock_result = run_sherlock(username)
+        # A diferencia de dominios (triaje por nameserver compartido, ver
+        # arriba), acá NO se marca ningún perfil como "oficial" ni como
+        # "amenaza": medido (2026-07-26) que Sherlock solo confirma existencia
+        # + URL, sin bio ni enlace al dominio del cliente -- no hay señal para
+        # atribuir. `_extraer_findings_antisuplantacion` persiste todos estos
+        # hallazgos como severidad `info` para revisión humana, no como
+        # amenaza confirmada. Ver `tools.antisuplantacion.run_sherlock`.
         for url in sherlock_result.findings:
             señales.append({"tipo": "perfil_red_social", "username": username, "url": url})
     except ToolExecutionError as exc:

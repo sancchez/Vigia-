@@ -1,0 +1,368 @@
+# Ground truth de clasificacion de dominios lookalike -- bancolombia.com
+#
+# WS2 (openspec/changes/fase10-antisuplantacion-lista-demo). Etiqueta cada uno
+# de los 45 dominios lookalike REGISTRADOS que devolvio una corrida real de
+# run_dnstwist('bancolombia.com', registered_only=True) el 2026-07-25 (ver
+# eval/baseline_real/antisup_bancolombia_2026-07-25_snapshot.json), con una de
+# tres clases:
+#   defensivo -- registrado por el propio Bancolombia para protegerse.
+#   tercero   -- registrado por alguien mas, sin correo real detectado.
+#   urgente   -- tercero que ademas tiene un registro MX real (puede enviar
+#                correo que aparente venir del banco).
+#
+# LIMITACION ANTI-CIRCULAR (leer antes de confiar en las metricas)
+# ------------------------------------------------------------------
+# El codigo bajo prueba (tools/antisuplantacion.py::triar_lookalikes) clasifica
+# "defensivo" == "comparte nameserver autoritativo (dns_ns) con el dominio
+# legitimo". Si esta ground truth usara esa MISMA senal para etiquetar, el eval
+# daria 100% siempre y no probaria nada -- solo confirmaria que el codigo hace
+# lo que hace, no que lo que hace es correcto.
+#
+# Para evitar esto, cada entrada "defensivo" y una muestra amplia de "tercero"
+# se verificaron con una senal INDEPENDIENTE que el codigo NO usa: el
+# **registrador (registrar) del dominio via RDAP** (https://rdap.org/domain/<d>,
+# campo entities[].vcardArray con roles: [registrar]), consultado en vivo el
+# 2026-07-26. El dominio legitimo bancolombia.com esta registrado con
+# "CCI REG S.A.". Los 10 dominios que el codigo marca "propio" (comparten NS)
+# TAMBIEN comparten ese mismo registrador exacto -- senal distinta (RDAP/WHOIS,
+# no DNS) que corrobora la atribucion sin depender de la logica que se mide.
+# Los 7 "urgentes" y una muestra de 6 "terceros" planos se verificaron con la
+# misma via y dieron registradores DISTINTOS (GoDaddy, Key-Systems, Porkbun,
+# Hostinger, NameBright, etc.) -- consistente con ser terceros no relacionados.
+#
+# Los 22 "tercero" restantes (marcados senal: circular abajo) NO se verificaron
+# uno por uno via RDAP por costo/tiempo de esta corrida -- para ellos la unica
+# senal disponible en este eval es la misma que usa el codigo (no compartir NS
+# con el legitimo). Se documentan asi, honestamente, en vez de inventarles una
+# verificacion que no se hizo. El eval SIGUE siendo util para estos: protege que
+# no se filtren a "defensivo" por error (regresion de la logica de particion), y
+# la clase "urgente" (la que mas importa para severidad) esta 100% verificada
+# independientemente.
+#
+# Que protege realmente este eval:
+#   1. Regresion del pipeline completo variantes -> deteccion de registro ->
+#      triaje defensivo/tercero/urgente (no solo una unidad aislada).
+#   2. Que los 10 defensivos verificados independientemente sigan clasificando
+#      como tal (evita el falso positivo grave de alarmar sobre el propio banco).
+#   3. Que los 7 urgentes (con MX real, verificados independientemente como
+#      terceros) sigan marcados como el subconjunto de mayor severidad.
+# Que NO prueba: que el criterio "compartir NS" sea la mejor senal posible en
+# general -- eso requeriria mas casos con NS compartido pero registrador
+# distinto (posible con proveedores DNS genericos), que no aparecieron en esta
+# corrida real.
+#
+dominios:
+  - domain: "bancolombias.com"
+    etiqueta: tercero
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "Porkbun LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "bancolombiai.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolombian.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "bancolombiq.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancomombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "banc0l0mbia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "barcolombia.com"
+    etiqueta: tercero
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "clancolombia.com"
+    etiqueta: tercero
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "bamcolombia.com"
+    etiqueta: urgente
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "xn--bancolomba-s8a.com"
+    etiqueta: urgente
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "HOSTINGER operations, UAB", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "bancolommbia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolornbia.com"
+    etiqueta: urgente
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "bancolonbia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "banc0lombia.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "banco1ombia.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "bancol0mbia.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "bancolomb1a.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "ban-colombia.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "bancollombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancoloimbia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "banxcolombia.com"
+    etiqueta: urgente
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "Porkbun LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "nbancolombia.com"
+    etiqueta: tercero
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "Porkbun LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "vbancolombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolombnia.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "bancolmbia.com"
+    etiqueta: urgente
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "Key-Systems GmbH", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "bancolomba.com"
+    etiqueta: tercero
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "TurnCommerce, Inc. DBA NameBright.com", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "bancoombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolombi.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bncolombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolobia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bacolombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "banolombia.com"
+    etiqueta: urgente
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "TurnCommerce, Inc. DBA NameBright.com", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "banscolombia.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "bancolomnia.com"
+    etiqueta: urgente
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "Key-Systems GmbH", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+  - domain: "vancolombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancilombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolombis.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "banvolombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bsncolombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolomb.ia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bancolombai.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bnacolombia.com"
+    etiqueta: tercero
+    senal: circular
+    evidencia: >
+      No comparte NS con el legitimo (misma senal que usa el codigo para
+      excluirlo de "defensivo"); no se verifico registrador via RDAP en
+      esta corrida -- no discrimina de forma independiente, documentado
+      honestamente como limite de este eval.
+  - domain: "bacnolombia.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "bancolomiba.com"
+    etiqueta: defensivo
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      (mismo registrador real; NO es la senal de NS que usa el codigo).
+  - domain: "boncolombia.com"
+    etiqueta: tercero
+    senal: independiente
+    evidencia: >
+      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
+      ("CCI REG S.A."); confirma que es de un tercero no relacionado.

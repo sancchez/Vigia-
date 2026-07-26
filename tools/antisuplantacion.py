@@ -151,6 +151,22 @@ def run_sherlock(username: str, timeout: int = 180) -> AntiSuplantacionResult:
     hacen pasar por el negocio (caso de validación: suplantación en
     WhatsApp/Instagram).
 
+    **Sin triaje automático de "oficial vs. suplantador" -- MEDIDO
+    (2026-07-26, `openspec/changes/fase10-antisuplantacion-lista-demo`):**
+    corrida real con `sherlock nubank --print-found` (Sherlock 0.16.0) contra
+    68 plataformas devolvió únicamente `[+] Sitio: URL` por línea -- ni bio,
+    ni nombre para mostrar, ni ningún campo que permita saber si ese perfil
+    enlaza al dominio legítimo del cliente. `run_command` no invoca
+    `--dump-response` (que sí trae el HTML crudo) porque habría que parsear
+    HTML heterogéneo de +400 sitios distintos solo para buscar un enlace, sin
+    garantía de que la bio sea visible sin sesión. Con la señal que
+    efectivamente produce esta función (URL + existencia) no hay forma
+    confiable de distinguir el perfil oficial del cliente de una entidad no
+    relacionada con el mismo username o de un suplantador real -- por eso
+    `api/main.py::_extraer_findings_antisuplantacion` persiste TODO hallazgo
+    `perfil_red_social` como severidad `info` ("revisión humana"), nunca como
+    amenaza confirmada. Ver ese comentario para el detalle de la decisión.
+
     Instalación si falta:
         pip install sherlock-project
 
@@ -158,7 +174,12 @@ def run_sherlock(username: str, timeout: int = 180) -> AntiSuplantacionResult:
         ToolNotInstalledError: si el binario `sherlock` no está disponible.
     """
     binary = require_binary("sherlock", "pip install sherlock-project")
-    cmd = [binary, username, "--print-found", "--no-color", "--timeout", "30"]
+    # `--no-txt`: sin esto Sherlock escribe `<username>.txt` en el directorio
+    # de trabajo en CADA corrida. En producción eso ensucia el servidor con un
+    # archivo por escaneo (detectado al correr la medición de Fase 10 WS3, que
+    # dejó un `nubank.txt` suelto en la raíz del repo). La salida se lee de
+    # stdout, el archivo nunca se usó.
+    cmd = [binary, username, "--print-found", "--no-color", "--no-txt", "--timeout", "30"]
     result = run_command("sherlock", cmd, timeout=timeout)
     found_urls: list[str] = []
     for line in result.stdout.splitlines():
