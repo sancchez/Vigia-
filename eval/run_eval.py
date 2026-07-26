@@ -116,6 +116,20 @@ except ImportError:
     )
     sys.exit(1)
 
+# Fase 9, Grupo 0 (openspec/changes/fase9-motor-dirigido): normalización de
+# tipo/ubicación, capa de adaptación al CARGAR los findings (opción (a) de
+# tasks.md 0.2 -- la más barata, sin migración de DB). `tools/` vive un nivel
+# arriba de `eval/`; este script se corre como archivo suelto
+# (`py -3 eval/run_eval.py`), así que Python solo pone `eval/` en `sys.path`
+# por default -- hay que agregar la raíz del repo a mano para poder
+# `import tools.normalizacion_hallazgos`. Mismo patrón que ya usa
+# `eval/regression_runner.py` con `run_eval` (línea ~47 de ese archivo).
+_ROOT_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT_REPO not in sys.path:
+    sys.path.insert(0, _ROOT_REPO)
+
+from tools.normalizacion_hallazgos import tipo_canonico, ubicacion_relativa  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Modelos
@@ -175,13 +189,26 @@ def load_findings(path: str) -> list[Finding]:
     raw_list = data.get("findings", []) if isinstance(data, dict) else data
     result = []
     for item in raw_list:
-        location = item.get("endpoint") or item.get("location") or ""
+        # Fase 9, Grupo 0: acepta tanto el esquema documentado en el
+        # docstring del módulo (`type`/`endpoint`/`location`) como el de una
+        # fila de la tabla `findings` tal como se persiste/exporta hoy
+        # (`tipo`/`endpoint`) o el de un export ad-hoc en español
+        # (`tipo`/`ubicacion`, ver `eval/baseline_real/dvwa_autenticado_*`).
+        # Sin esto, un hallazgo correcto queda con `type`/`location` vacíos
+        # y jamás puede matchear -- medido: ver `eval/failure_log.md`.
+        tipo_crudo = item.get("type") or item.get("tipo") or ""
+        location = (
+            item.get("endpoint")
+            or item.get("location")
+            or item.get("ubicacion")
+            or ""
+        )
         result.append(
             Finding(
                 id=str(item.get("id", "?")),
-                type=str(item.get("type", "")).strip().lower(),
-                location=str(location).strip(),
-                severity=str(item.get("severity", "unknown")).strip().lower(),
+                type=tipo_canonico(tipo_crudo),
+                location=ubicacion_relativa(str(location).strip()),
+                severity=str(item.get("severity") or item.get("severidad") or "unknown").strip().lower(),
                 confidence=float(item.get("confidence", 0.0) or 0.0),
                 description=str(item.get("description", "")).strip(),
             )

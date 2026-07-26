@@ -127,3 +127,60 @@ def test_capturar_screenshot_maneja_fallo_de_captura_sin_romper(monkeypatch, tmp
 
     resultado = antisuplantacion.capturar_screenshot("http://clon.test", str(tmp_path))
     assert resultado is None
+
+
+# ---------------------------------------------------------------------------
+# Triaje de lookalikes: separar registros defensivos del cliente de amenazas
+# reales (Fase 9). Datos sintéticos derivados de la corrida real 2026-07-25
+# contra un banco colombiano (45 registrados, 10 defensivos del propio banco
+# detectados por NS compartido). Ver eval/failure_log.md.
+# ---------------------------------------------------------------------------
+
+def _variante(dominio, fuzzer="homoglyph", ns=None, mx=None):
+    return antisuplantacion.DomainVariant(
+        fuzzer=fuzzer,
+        domain=dominio,
+        registered=True,
+        raw={"domain": dominio, "fuzzer": fuzzer, "dns_ns": ns or [], "dns_mx": mx or []},
+    )
+
+
+def _resultado(*variantes):
+    return antisuplantacion.AntiSuplantacionResult(
+        target="marca.com", tool="dnstwist", findings=list(variantes), raw={}
+    )
+
+
+def test_triaje_separa_defensivos_del_cliente_por_nameserver_compartido():
+    r = _resultado(
+        _variante("marca.com", fuzzer="*original", ns=["ns1.propio.com"]),
+        _variante("marca-defensivo.com", ns=["ns1.propio.com"]),   # mismo NS -> del cliente
+        _variante("marcaa.com", ns=["ns1.estafador.com"]),         # NS ajeno -> tercero
+    )
+    t = antisuplantacion.triar_lookalikes(r)
+    assert [v.domain for v in t.propios] == ["marca-defensivo.com"]
+    assert [v.domain for v in t.terceros] == ["marcaa.com"]
+
+
+def test_triaje_marca_urgentes_solo_terceros_con_mx_real():
+    r = _resultado(
+        _variante("marca.com", fuzzer="*original", ns=["ns1.propio.com"]),
+        _variante("marca-con-correo.com", ns=["ns1.estafador.com"], mx=["mx.estafador.com"]),
+        _variante("marca-sin-correo.com", ns=["ns1.estafador.com"], mx=[]),
+        _variante("marca-mx-vacio.com", ns=["ns1.estafador.com"], mx=[""]),  # MX vacío != correo real
+    )
+    t = antisuplantacion.triar_lookalikes(r)
+    assert [v.domain for v in t.con_correo] == ["marca-con-correo.com"]
+
+
+def test_triaje_sin_ns_legitimos_no_inventa_propiedad():
+    """Sin NS del dominio original conocido, todo es de terceros -- nunca se
+    atribuye propiedad al cliente sin evidencia (falso negativo defensivo
+    preferible a atribución inventada)."""
+    r = _resultado(
+        _variante("marca.com", fuzzer="*original", ns=[]),  # sin NS
+        _variante("marcaa.com", ns=["ns1.cualquiera.com"]),
+    )
+    t = antisuplantacion.triar_lookalikes(r)
+    assert t.propios == []
+    assert [v.domain for v in t.terceros] == ["marcaa.com"]

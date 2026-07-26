@@ -425,6 +425,76 @@ def puntuar_infra_lookalike(dominio: str, timeout: int = 10) -> InfraScore:
     )
 
 
+@dataclass
+class TriajeLookalikes:
+    """Resultado de separar registros defensivos del cliente de amenazas reales.
+
+    `propios` son variantes que el propio dueño de la marca registró para
+    protegerse (práctica estándar: un banco compra `banc0lombia.com` para que
+    no la compre un estafador). Reportárselas como amenazas es un falso
+    positivo grave a nivel comercial -- se le está alarmando al cliente con su
+    propia defensa, delante de gente que conoce su infraestructura.
+    """
+
+    propios: list[DomainVariant] = field(default_factory=list)
+    terceros: list[DomainVariant] = field(default_factory=list)
+    con_correo: list[DomainVariant] = field(default_factory=list)
+    ns_legitimos: list[str] = field(default_factory=list)
+
+
+def _ns_de(variante: DomainVariant) -> set[str]:
+    return {n for n in (variante.raw or {}).get("dns_ns", []) if n}
+
+
+def _mx_de(variante: DomainVariant) -> list[str]:
+    """MX no vacíos. dnstwist emite `['']` para un MX presente pero sin valor
+    resoluble; esa cadena vacía NO cuenta como servidor de correo real."""
+    return [m for m in (variante.raw or {}).get("dns_mx", []) if m and m.strip()]
+
+
+def triar_lookalikes(resultado: AntiSuplantacionResult) -> TriajeLookalikes:
+    """Separa registros defensivos del dueño de la marca de amenazas de terceros.
+
+    **Por qué existe (medido 2026-07-25):** una corrida real de `run_dnstwist`
+    contra un banco colombiano devolvió 45 dominios lookalike registrados. De
+    esos, **10 los había registrado el propio banco** para protegerse -- se
+    detectan porque delegan a los MISMOS nameservers que el dominio legítimo.
+    Sin este triaje el informe diría "45 amenazas" cuando 35 lo son.
+
+    Criterio de atribución: compartir nameserver autoritativo con el dominio
+    legítimo. Es la señal más fuerte disponible sin consultar WHOIS (que está
+    mayormente redactado desde GDPR) -- si un dominio delega a la misma
+    infraestructura DNS que la marca, lo controla la marca.
+
+    Deliberadamente NO se usa "misma IP" como señal de propiedad: dos dominios
+    de estafadores distintos comparten IP todo el tiempo por estar en el mismo
+    hosting barato o en el mismo parking, y eso produciría atribuciones falsas.
+
+    `con_correo` son los de terceros que además tienen MX real: pueden ENVIAR
+    correo que parezca del cliente. Es el subconjunto urgente.
+    """
+    original = next(
+        (v for v in resultado.findings if v.fuzzer == "*original"),
+        None,
+    )
+    ns_legitimos = _ns_de(original) if original else set()
+
+    triaje = TriajeLookalikes(ns_legitimos=sorted(ns_legitimos))
+    for variante in resultado.findings:
+        if variante.fuzzer == "*original":
+            continue
+        # Sin NS legítimos conocidos no se puede atribuir propiedad: se trata
+        # todo como de terceros (falso positivo es preferible a pasar por alto
+        # una amenaza real, PERO sin inventar una atribución que no se midió).
+        if ns_legitimos and (_ns_de(variante) & ns_legitimos):
+            triaje.propios.append(variante)
+            continue
+        triaje.terceros.append(variante)
+        if _mx_de(variante):
+            triaje.con_correo.append(variante)
+    return triaje
+
+
 def capturar_screenshot(url: str, out_dir: str, timeout: int = 20) -> str | None:
     """Captura un screenshot best-effort de `url` con Playwright/Chromium headless.
 
