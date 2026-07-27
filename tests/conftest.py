@@ -31,6 +31,26 @@ import os
 
 import pytest
 
+# Se setean ANTES de que cualquier test importe `api.main`/`tools.antisuplantacion`
+# (pytest importa este conftest primero), porque ambos módulos leen estos
+# valores en tiempo de import o de llamada:
+#
+# - `VIGIA_RATE_LIMIT_ENABLED=false`: el rate limiting de slowapi guarda su
+#   contador en memoria del proceso, y toda la suite corre en UN proceso con
+#   la misma clave de IP ("testclient") -- con el límite activo, los cientos de
+#   `POST /auth/register` de la suite se estrangularían entre sí y los tests
+#   fallarían por 429 sin que nada esté roto. El comportamiento con el límite
+#   ENCENDIDO tiene su propio test dedicado, que lo reactiva explícitamente
+#   (ver tests/test_rate_limiting.py).
+# - `VIGIA_SONDEO_DELAY_*=0`: la cortesía de red al sondear dominios lookalike
+#   (ver el bloque "Cortesía de red" en tools/antisuplantacion.py) es real y
+#   deliberadamente lenta; la suite no toca red real (todo mockeado), así que
+#   pagar esos segundos por test solo alargaría la corrida. El cálculo de la
+#   espera tiene su propio test dedicado, que sí setea delays reales.
+os.environ.setdefault("VIGIA_RATE_LIMIT_ENABLED", "false")
+os.environ.setdefault("VIGIA_SONDEO_DELAY_SEGUNDOS", "0")
+os.environ.setdefault("VIGIA_SONDEO_DELAY_MISMO_HOST", "0")
+
 _PG_TABLES = (
     "tenants", "users", "assets", "scans", "findings",
     "invitations", "subscriptions",

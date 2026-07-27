@@ -28,14 +28,25 @@ def _crear_tenant(conn, tenant_id: str) -> None:
     )
 
 
-def _sembrar_marca(tenant_id: str, marca: str, is_active: bool = True) -> None:
+def _sembrar_marca(
+    tenant_id: str,
+    marca: str,
+    is_active: bool = True,
+    dominio_asociado: str | None = "miempresa.com",
+) -> None:
+    """`dominio_asociado` no vacío por default: desde el cierre del hueco de
+    propiedad de marcas, `_build_variant_map` solo consume marcas ancladas a
+    un dominio verificado del tenant (ver api/main.py::
+    `_dominio_verificado_para_marca`). `dominio_asociado=None` siembra a
+    propósito una fila LEGADA, anterior a esa migración."""
     conn = get_conn()
     try:
         if not conn.execute("SELECT 1 FROM tenants WHERE id = ?", (tenant_id,)).fetchone():
             _crear_tenant(conn, tenant_id)
         conn.execute(
-            "INSERT INTO watched_brands (id, tenant_id, marca, is_active) VALUES (?, ?, ?, ?)",
-            (str(uuid.uuid4()), tenant_id, marca, 1 if is_active else 0),
+            "INSERT INTO watched_brands (id, tenant_id, marca, dominio_asociado, is_active) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), tenant_id, marca, dominio_asociado, 1 if is_active else 0),
         )
         conn.commit()
     finally:
@@ -79,6 +90,22 @@ def test_marca_inactiva_no_entra_al_mapa(test_db, monkeypatch):
         return {"acmee.com"}
 
     monkeypatch.setattr(listener_module, "generate_domain_variants", fake_generate)
+
+    mapa = listener_module._build_variant_map()
+    assert "acmee.com" not in mapa
+
+
+def test_marca_legada_sin_dominio_asociado_no_entra_al_mapa(test_db, monkeypatch):
+    """Fila anterior a la migración de propiedad de marcas: se conserva en la
+    tabla (nada se borra, el arranque no rompe) pero NO alimenta la
+    vigilancia continua hasta que su tenant la re-registre anclada a un
+    dominio verificado. Ver db/schema.sql y api/main.py::crear_watched_brand."""
+    tenant_id = "tenant-marca-legada"
+    _sembrar_marca(tenant_id, "acme", dominio_asociado=None)
+
+    monkeypatch.setattr(
+        listener_module, "generate_domain_variants", lambda _d: {"acmee.com"}
+    )
 
     mapa = listener_module._build_variant_map()
     assert "acmee.com" not in mapa

@@ -376,6 +376,11 @@ export type InvitationPreview = {
 export type WatchedBrand = {
   id: string;
   marca: string;
+  // Dominio propio y VERIFICADO del tenant que respalda la propiedad de la
+  // marca. `null` = fila anterior a la migración de propiedad de marca: se
+  // sigue listando pero no alimenta la vigilancia continua hasta re-registrarla.
+  dominio_asociado: string | null;
+  verificada: boolean;
   is_active: boolean;
   created_at: string;
 };
@@ -668,8 +673,13 @@ export const api = {
     request<DmarcSender[]>(`/dmarc/summary${dominio ? `?dominio=${encodeURIComponent(dominio)}` : ""}`),
   // Fase 3b: CRUD de `watched_brands` (`WatchedBrandsConfig.tsx`).
   listWatchedBrands: () => request<WatchedBrand[]>("/watched-brands"),
-  createWatchedBrand: (marca: string) =>
-    request<WatchedBrand>("/watched-brands", { method: "POST", body: JSON.stringify({ marca }) }),
+  // `dominioAsociado` es obligatorio: el backend responde 403 si no es un
+  // activo tipo 'dominio' verificado de este tenant.
+  createWatchedBrand: (marca: string, dominioAsociado: string) =>
+    request<WatchedBrand>("/watched-brands", {
+      method: "POST",
+      body: JSON.stringify({ marca, dominio_asociado: dominioAsociado }),
+    }),
   deleteWatchedBrand: (id: string) => request<void>(`/watched-brands/${id}`, { method: "DELETE" }),
   // Fase 3a: dispara SOLO la rama anti-suplantación sobre un asset dominio
   // ya verificado (o exento) -- síncrono, dnstwist+Sherlock bajo demanda

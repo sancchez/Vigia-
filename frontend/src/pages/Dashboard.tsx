@@ -896,7 +896,7 @@ export default function Dashboard() {
           )}
 
           <VigilanciaPanel findings={findings} members={members} onChanged={cargarTodo} />
-          <WatchedBrandsConfig brands={watchedBrands} onChanged={cargarTodo} />
+          <WatchedBrandsConfig brands={watchedBrands} assets={assets} onChanged={cargarTodo} />
           <BrandProtectionPanel refreshKey={refrescarProteccion} />
 
           {/* Fase 4 (openspec/changes/fase4-revision-codigo-ia): sección

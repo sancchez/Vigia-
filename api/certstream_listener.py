@@ -127,14 +127,21 @@ def _build_variant_map() -> dict[str, tuple[str, str | None, str]]:
 
     Fase 3b agrega un segundo bucle sobre `watched_brands` activas de cada
     tenant (ver design.md "Semántica de generación desde watched_brands").
-    A diferencia de los activos de dominio, el gate
-    `asset_autorizado_para_escanear` NO aplica aquí a propósito: una marca
-    no es un activo con prueba de propiedad, es la marca/nombre del propio
-    tenant -- vigilar quién registra un dominio parecido a TU marca es
-    legítimo por definición (a diferencia de escanear activamente el
-    dominio de un tercero). `asset_id` queda en `None` para las entradas
-    derivadas de marca (no hay un activo detrás, la columna es nullable en
-    `scans.asset_id`, ver db/schema.sql).
+    `asset_id` queda en `None` para las entradas derivadas de marca (no hay
+    un activo detrás, la columna es nullable en `scans.asset_id`, ver
+    db/schema.sql).
+
+    **Corrección posterior (cierre de huecos legales):** el razonamiento
+    original decía que a las marcas no les aplicaba ningún gate de propiedad
+    porque "la marca es del propio tenant". Eso asumía justo lo que no se
+    verificaba: `POST /watched-brands` aceptaba cualquier cadena, así que
+    "bancolombia" registrada por un tenant cualquiera alimentaba esta
+    vigilancia sin ninguna relación con el titular real. Ahora una marca
+    debe estar anclada a un dominio-activo VERIFICADO del tenant
+    (`watched_brands.dominio_asociado`, ver `api/main.py::
+    _dominio_verificado_para_marca`), y este bucle solo consume las que lo
+    tienen -- las filas anteriores a esa migración quedan fuera hasta que su
+    tenant las re-registre con un dominio verificado.
     """
     conn = get_conn()
     try:
@@ -142,7 +149,12 @@ def _build_variant_map() -> dict[str, tuple[str, str | None, str]]:
             "SELECT id, tenant_id, valor, verificado FROM assets WHERE tipo = 'dominio' AND is_active = 1"
         ).fetchall()
         marcas = conn.execute(
-            "SELECT tenant_id, marca FROM watched_brands WHERE is_active = 1"
+            """
+            SELECT tenant_id, marca FROM watched_brands
+            WHERE is_active = 1
+              AND dominio_asociado IS NOT NULL
+              AND TRIM(dominio_asociado) <> ''
+            """
         ).fetchall()
     finally:
         conn.close()

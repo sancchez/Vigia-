@@ -9,16 +9,132 @@ URLs maliciosas usando el nombre/marca del cliente.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import ssl
+import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ._shared import ToolNotInstalledError, ToolResult, require_binary, run_command
+
+logger = logging.getLogger("vigia.antisuplantacion")
+
+
+# ---------------------------------------------------------------------------
+# Cortesía de red al sondear dominios lookalike (obligación legal, no un
+# "nice to have").
+#
+# `puntuar_infra_lookalike` y `capturar_screenshot` abren conexiones
+# DNS/MX/TLS/HTTP -- y en el caso del screenshot cargan el sitio entero con
+# Chromium headless -- contra dominios que pertenecen a TERCEROS que nunca
+# consintieron nada. El único fundamento defendible de esa actividad es que
+# sea (a) de bajo volumen, (b) indistinguible de una visita normal en carga, y
+# (c) ATRIBUIBLE: un bot que se identifica y publica a dónde escribirle
+# demuestra que no hay ocultamiento ni ánimo de daño. Un sondeo anónimo, a
+# ritmo de máquina y sin tope de concurrencia es exactamente lo contrario, y
+# es lo que había antes de esta sesión.
+#
+# Todo configurable por entorno, con defaults deliberadamente conservadores
+# (cortesía sobre velocidad):
+#   VIGIA_SONDEO_DELAY_SEGUNDOS   -- espera mínima entre sondeos consecutivos
+#                                    (global, entre hosts distintos).
+#   VIGIA_SONDEO_DELAY_MISMO_HOST -- espera mínima entre dos sondeos al MISMO
+#                                    host (más larga: nadie debe recibir una
+#                                    ráfaga nuestra).
+#   VIGIA_SONDEO_MAX_CONCURRENTE  -- tope de sondeos simultáneos.
+#   VIGIA_BOT_USER_AGENT          -- identidad declarada del bot.
+# ---------------------------------------------------------------------------
+
+# La URL del User-Agent apunta al repositorio PÚBLICO del proyecto, no a un
+# dominio institucional: `vigia.com.co` no está publicado y un bot que se
+# identifica con una URL muerta es peor que uno que no se identifica -- el
+# administrador que lo ve en sus logs no tendría dónde reclamar. El repo sí
+# existe y contiene la Política de Uso Aceptable y el canal de abuso.
+# PENDIENTE: reemplazar por la URL definitiva (vía VIGIA_BOT_USER_AGENT)
+# cuando se publique el sitio institucional.
+USER_AGENT_BOT = os.environ.get(
+    "VIGIA_BOT_USER_AGENT",
+    "Vigia-BrandMonitor/1.0 "
+    "(+https://github.com/sancchez/Vigia-/blob/main/legal/politica-uso-aceptable.md)",
+)
+
+_lock_sondeo = threading.Lock()
+_ultimo_sondeo_global: float = 0.0
+_ultimo_sondeo_por_host: dict[str, float] = {}
+_semaforo_sondeo: threading.BoundedSemaphore | None = None
+_semaforo_sondeo_tope: int = 0
+
+
+def _config_sondeo() -> tuple[float, float, int]:
+    """(delay global, delay por host, concurrencia máxima), leídos del entorno.
+
+    Se leen en cada sondeo en vez de congelarse en constantes de módulo: así
+    un operador puede bajar el ritmo en caliente (y la suite de tests puede
+    poner los delays en 0 sin pagar la cortesía de red real, ver
+    tests/conftest.py) sin reimportar nada.
+    """
+
+    def _num(nombre: str, default: str) -> float:
+        try:
+            return max(0.0, float(os.environ.get(nombre, default)))
+        except ValueError:
+            return float(default)
+
+    delay_global = _num("VIGIA_SONDEO_DELAY_SEGUNDOS", "2")
+    delay_host = _num("VIGIA_SONDEO_DELAY_MISMO_HOST", "10")
+    try:
+        concurrencia = max(1, int(os.environ.get("VIGIA_SONDEO_MAX_CONCURRENTE", "2")))
+    except ValueError:
+        concurrencia = 2
+    return delay_global, delay_host, concurrencia
+
+
+def _obtener_semaforo(tope: int) -> threading.BoundedSemaphore:
+    global _semaforo_sondeo, _semaforo_sondeo_tope
+    with _lock_sondeo:
+        if _semaforo_sondeo is None or _semaforo_sondeo_tope != tope:
+            _semaforo_sondeo = threading.BoundedSemaphore(tope)
+            _semaforo_sondeo_tope = tope
+        return _semaforo_sondeo
+
+
+@contextmanager
+def turno_de_sondeo(host: str):
+    """Serializa y espacia el acceso a la red contra `host` (ver bloque de arriba).
+
+    Dos límites a la vez: un semáforo (nunca más de N sondeos simultáneos en
+    todo el proceso) y una espera mínima antes de abrir la primera conexión
+    -- global entre hosts distintos, y más larga contra un mismo host.
+    """
+    delay_global, delay_host, concurrencia = _config_sondeo()
+    semaforo = _obtener_semaforo(concurrencia)
+    semaforo.acquire()
+    try:
+        espera = 0.0
+        with _lock_sondeo:
+            global _ultimo_sondeo_global
+            ahora = time.monotonic()
+            espera = max(
+                delay_global - (ahora - _ultimo_sondeo_global),
+                delay_host - (ahora - _ultimo_sondeo_por_host.get(host, float("-inf"))),
+                0.0,
+            )
+            # Se "reserva" el turno ya desplazado para que dos hilos que
+            # entran a la vez no calculen la misma espera y salgan juntos.
+            _ultimo_sondeo_global = ahora + espera
+            _ultimo_sondeo_por_host[host] = ahora + espera
+        if espera > 0:
+            time.sleep(espera)
+        yield
+    finally:
+        semaforo.release()
 
 
 @dataclass
@@ -414,7 +530,10 @@ def _probe_http(dominio: str, timeout: int) -> bool:
     for esquema in ("https", "http"):
         url = f"{esquema}://{dominio}"
         try:
-            peticion = urllib.request.Request(url, headers={"User-Agent": "Vigia-BrandProtection/1.0"})
+            # User-Agent identificable a propósito -- ver el bloque "Cortesía
+            # de red" al inicio del módulo: el dueño del host sondeado tiene
+            # que poder saber quién lo tocó y a dónde escribir.
+            peticion = urllib.request.Request(url, headers={"User-Agent": USER_AGENT_BOT})
             urllib.request.urlopen(peticion, timeout=timeout)  # noqa: S310 -- URL del dominio clon detectado, GET pasivo
             return True
         except urllib.error.HTTPError:
@@ -431,11 +550,18 @@ def puntuar_infra_lookalike(dominio: str, timeout: int = 10) -> InfraScore:
     gracia): un dominio parqueado sin ningún servicio real da `score=0`, un
     dominio con infraestructura activa completa da `score=4`. Ver spec.md,
     Domain "Scoring de infraestructura activa".
+
+    Los cuatro probes se hacen dentro de UN solo `turno_de_sondeo` (ver el
+    bloque "Cortesía de red" al inicio del módulo): son la misma visita al
+    mismo host de un tercero, no cuatro visitas independientes, y espaciarlos
+    entre sí solo alargaría la ventana en la que estamos conectados a un
+    sistema ajeno sin ganar nada.
     """
-    dns_a = _probe_dns_a(dominio, timeout)
-    mx = _probe_mx(dominio, timeout)
-    ssl_ok, ssl_not_before = _probe_ssl(dominio, timeout)
-    http_ok = _probe_http(dominio, timeout)
+    with turno_de_sondeo(dominio):
+        dns_a = _probe_dns_a(dominio, timeout)
+        mx = _probe_mx(dominio, timeout)
+        ssl_ok, ssl_not_before = _probe_ssl(dominio, timeout)
+        http_ok = _probe_http(dominio, timeout)
     return InfraScore(
         dns_a=dns_a,
         mx=mx,
@@ -526,6 +652,11 @@ def capturar_screenshot(url: str, out_dir: str, timeout: int = 20) -> str | None
     gracia que `check_certthreat`/`check_phishing_catcher`: la feature
     (score + KPIs) funciona igual sin este enriquecimiento (spec.md,
     escenario "Screenshot omitido cuando el navegador no está instalado").
+
+    Es el sondeo MÁS intrusivo del módulo (carga la página entera y todos sus
+    recursos, no un handshake), así que también pasa por `turno_de_sondeo` y
+    declara el mismo User-Agent identificable que el resto -- ver el bloque
+    "Cortesía de red" al inicio del módulo.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -536,14 +667,16 @@ def capturar_screenshot(url: str, out_dir: str, timeout: int = 20) -> str | None
         os.makedirs(out_dir, exist_ok=True)
         ruta = os.path.join(out_dir, f"{uuid.uuid4().hex}.png")
         objetivo = url if "://" in url else f"http://{url}"
-        with sync_playwright() as p:
-            navegador = p.chromium.launch(headless=True)
-            try:
-                pagina = navegador.new_page()
-                pagina.goto(objetivo, timeout=timeout * 1000)
-                pagina.screenshot(path=ruta)
-            finally:
-                navegador.close()
+        host = objetivo.split("://", 1)[1].split("/", 1)[0]
+        with turno_de_sondeo(host):
+            with sync_playwright() as p:
+                navegador = p.chromium.launch(headless=True)
+                try:
+                    pagina = navegador.new_page(user_agent=USER_AGENT_BOT)
+                    pagina.goto(objetivo, timeout=timeout * 1000)
+                    pagina.screenshot(path=ruta)
+                finally:
+                    navegador.close()
         return ruta
     except Exception:  # noqa: BLE001 -- best-effort: cualquier fallo de captura es "sin screenshot", no un 500
         return None

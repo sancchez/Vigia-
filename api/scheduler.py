@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -332,6 +333,62 @@ def run_sla_escalation_once() -> int:
     return escalados
 
 
+def run_screenshot_purge_once() -> int:
+    """Borra los screenshots de sitios de terceros más viejos que el plazo de retención.
+
+    `POST /antisuplantacion` guarda un PNG del sitio clon por cada dominio
+    lookalike enriquecido (`api/main.py::_enriquecer_dominios_clon` ->
+    `tools/antisuplantacion.py::capturar_screenshot`), en
+    `VIGIA_SCREENSHOT_DIR`. Hasta esta sesión ese directorio solo crecía:
+    una copia indefinida del contenido de sitios web de TERCEROS, sin plazo
+    ni criterio de borrado. Guardar evidencia de una posible suplantación es
+    legítimo y necesario para un takedown; guardarla para siempre no lo es
+    -- la minimización y la retención limitada son obligaciones de la Ley
+    1581 de 2012 y de cualquier política de uso aceptable que se publique.
+
+    Criterio: antigüedad del archivo (`st_mtime`) contra
+    `VIGIA_SCREENSHOT_RETENCION_DIAS` (default 90). Deliberadamente NO se
+    cruza contra `findings` -- un hallazgo abierto no justifica conservar la
+    captura más allá del plazo, y atar el borrado a la vida del hallazgo
+    reintroduciría la retención indefinida por la puerta de atrás.
+
+    Nunca lanza: un archivo que no se puede borrar (bloqueado por otro
+    proceso, permisos) se registra y se salta -- este job corre en el
+    scheduler de fondo y no debe tumbarlo. Devuelve cuántos archivos borró.
+    """
+    directorio = os.environ.get("VIGIA_SCREENSHOT_DIR", "data/screenshots")
+    try:
+        dias = max(0.0, float(os.environ.get("VIGIA_SCREENSHOT_RETENCION_DIAS", "90")))
+    except ValueError:
+        dias = 90.0
+
+    if not os.path.isdir(directorio):
+        return 0
+
+    limite = time.time() - dias * 86400
+    borrados = 0
+    for nombre in os.listdir(directorio):
+        ruta = os.path.join(directorio, nombre)
+        try:
+            if not os.path.isfile(ruta):
+                continue
+            if os.stat(ruta).st_mtime >= limite:
+                continue
+            os.remove(ruta)
+            borrados += 1
+        except OSError:
+            logger.warning("No se pudo purgar el screenshot %s", ruta, exc_info=True)
+
+    if borrados:
+        logger.info(
+            "Purga de screenshots: %d archivo(s) borrado(s) de %s (retención %.0f día(s))",
+            borrados,
+            directorio,
+            dias,
+        )
+    return borrados
+
+
 def start_scheduler() -> BackgroundScheduler:
     """Arranca el scheduler en background (idempotente — llamar dos veces no duplica jobs).
 
@@ -364,11 +421,25 @@ def start_scheduler() -> BackgroundScheduler:
         replace_existing=True,
     )
 
+    # Retención de screenshots de terceros: mismo patrón de job periódico que
+    # los dos de arriba, con su propio intervalo (default 24h -- una purga por
+    # antigüedad no gana nada corriendo más seguido).
+    purga_interval_hours = float(os.environ.get("VIGIA_SCREENSHOT_PURGE_INTERVAL_HOURS", "24"))
+    _scheduler.add_job(
+        run_screenshot_purge_once,
+        "interval",
+        hours=purga_interval_hours,
+        id="vigia_purga_screenshots",
+        replace_existing=True,
+    )
+
     _scheduler.start()
     logger.info(
-        "Scheduler iniciado -- recon recurrente cada %.1fh, escalamiento de SLA cada %.1fh",
+        "Scheduler iniciado -- recon recurrente cada %.1fh, escalamiento de SLA cada %.1fh, "
+        "purga de screenshots cada %.1fh",
         interval_hours,
         sla_interval_hours,
+        purga_interval_hours,
     )
     return _scheduler
 

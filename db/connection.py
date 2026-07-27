@@ -134,6 +134,15 @@ _ASSETS_SCHEDULING_COLUMNS: list[tuple[str, str]] = [
     ("scan_paused", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
+# Columna que ancla una marca vigilada a un dominio-activo verificado del
+# tenant -- mismo motivo/patrón que las listas de arriba (`watched_brands` ya
+# existía desde Fase 0). NULLABLE y sin DEFAULT a propósito: una marca vieja
+# sin dominio no se puede "adivinar", queda como no verificada. Ver el
+# comentario largo en db/schema.sql.
+_WATCHED_BRANDS_DOMINIO_COLUMNS: list[tuple[str, str]] = [
+    ("dominio_asociado", "TEXT"),
+]
+
 # `finding_transiciones`/`tenant_sla_config` (fase2a-ciclo-vida-hallazgo) NO
 # necesitan una lista de reconciliación como las de arriba: a diferencia de
 # `_ASSET_VERIFICATION_COLUMNS`/`_FINDINGS_LIFECYCLE_COLUMNS`/
@@ -251,6 +260,10 @@ def _get_pg_conn(url: str) -> _PgConnection:
                     conn.execute(
                         f"ALTER TABLE assets ADD COLUMN IF NOT EXISTS {column} {coltype}"
                     )
+                for column, coltype in _WATCHED_BRANDS_DOMINIO_COLUMNS:
+                    conn.execute(
+                        f"ALTER TABLE watched_brands ADD COLUMN IF NOT EXISTS {column} {coltype}"
+                    )
                 conn.commit()
                 _pg_schema_ready.add(url)
     return _PgConnection(conn)
@@ -317,6 +330,19 @@ def _ensure_sqlite_assets_scheduling_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {coltype}")
 
 
+def _ensure_sqlite_watched_brands_columns(conn: sqlite3.Connection) -> None:
+    """Agrega a `watched_brands` la columna `dominio_asociado` si la tabla es anterior a la migración.
+
+    Mismo patrón que `_ensure_sqlite_asset_verification_columns`.
+    """
+    columnas_existentes = {
+        row[1] for row in conn.execute("PRAGMA table_info(watched_brands)").fetchall()
+    }
+    for column, coltype in _WATCHED_BRANDS_DOMINIO_COLUMNS:
+        if column not in columnas_existentes:
+            conn.execute(f"ALTER TABLE watched_brands ADD COLUMN {column} {coltype}")
+
+
 def get_conn() -> sqlite3.Connection | _PgConnection:
     """Abre una conexión nueva con el schema ya aplicado (idempotente).
 
@@ -341,6 +367,7 @@ def get_conn() -> sqlite3.Connection | _PgConnection:
     _ensure_sqlite_findings_columns(conn)
     _ensure_sqlite_assets_autorizacion_columns(conn)
     _ensure_sqlite_assets_scheduling_columns(conn)
+    _ensure_sqlite_watched_brands_columns(conn)
     conn.commit()
     return conn
 

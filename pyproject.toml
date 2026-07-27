@@ -21,6 +21,10 @@ dependencies = [
     "dnspython",
     "defusedxml",
     "python-multipart",
+    # Rate limiting de la API HTTP (api/main.py). El import está envuelto en
+    # try/except a propósito -- un despliegue viejo sin este paquete arranca
+    # igual, solo sin límites y con un warning en el log.
+    "slowapi",
 ]
 
 [project.optional-dependencies]

@@ -86,8 +86,10 @@ deliberadamente fuera de alcance de esta sesión (ver HANDOFF.md).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -134,10 +136,73 @@ def _free_host_port() -> int:
     Necesario para que escaneos concurrentes (dos scan_id distintos al
     mismo tiempo) no choquen por el mismo puerto -- a diferencia del
     contenedor daemon único que se probó manualmente en esta sesión.
+
+    OJO: esto resuelve la colisión de puertos, NO el volumen. El tope de
+    cuántos escaneos activos pueden correr a la vez lo pone
+    `turno_de_escaneo_activo` (abajo), no esta función.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
+
+# ---------------------------------------------------------------------------
+# Tope de escaneos activos simultáneos.
+#
+# Un escaneo activo NO es una lectura: es tráfico de ataque real (inyecciones,
+# fuzzing) contra un sistema, más un contenedor ZAP entero (Java + a veces
+# Firefox headless) por cada uno. Sin tope, N requests concurrentes a
+# `POST /scan/activo` levantan N contenedores y N oleadas de ataque en
+# paralelo -- un riesgo doble: tumbar la máquina que corre Vigia, y
+# convertir un escaneo autorizado en algo indistinguible de una denegación
+# de servicio contra el cliente que lo autorizó. `VIGIA_ZAP_MAX_CONCURRENTES`
+# lo acota; `VIGIA_ZAP_ESPERA_SLOT_SEGUNDOS` acota cuánto espera un escaneo
+# por un cupo antes de rendirse con un error explícito (mejor un error
+# legible en `scans.reporte_final` que un thread colgado para siempre).
+# ---------------------------------------------------------------------------
+
+_lock_cupo = threading.Lock()
+_semaforo_escaneos: threading.BoundedSemaphore | None = None
+_semaforo_escaneos_tope: int = 0
+
+
+def _config_cupo_escaneos() -> tuple[int, float]:
+    try:
+        tope = max(1, int(os.environ.get("VIGIA_ZAP_MAX_CONCURRENTES", "2")))
+    except ValueError:
+        tope = 2
+    try:
+        espera = max(0.0, float(os.environ.get("VIGIA_ZAP_ESPERA_SLOT_SEGUNDOS", "600")))
+    except ValueError:
+        espera = 600.0
+    return tope, espera
+
+
+@contextlib.contextmanager
+def turno_de_escaneo_activo(etiqueta: str = ""):
+    """Reserva uno de los cupos de escaneo activo simultáneo.
+
+    Raises:
+        ZapDaemonError: si no se liberó ningún cupo dentro de
+            `VIGIA_ZAP_ESPERA_SLOT_SEGUNDOS`.
+    """
+    global _semaforo_escaneos, _semaforo_escaneos_tope
+    tope, espera = _config_cupo_escaneos()
+    with _lock_cupo:
+        if _semaforo_escaneos is None or _semaforo_escaneos_tope != tope:
+            _semaforo_escaneos = threading.BoundedSemaphore(tope)
+            _semaforo_escaneos_tope = tope
+        semaforo = _semaforo_escaneos
+    if not semaforo.acquire(timeout=espera):
+        raise ZapDaemonError(
+            f"Cupo de escaneos activos simultáneos agotado ({tope}) tras esperar "
+            f"{espera:.0f}s{f' [{etiqueta}]' if etiqueta else ''}. Reintenta más tarde o "
+            "sube VIGIA_ZAP_MAX_CONCURRENTES si la máquina lo aguanta."
+        )
+    try:
+        yield
+    finally:
+        semaforo.release()
 
 
 def _zap_get(
@@ -549,6 +614,12 @@ def run_checkpointed_active_scan(
 
     resultado = ZapCheckpointedResult(target=target_url)
     base_url = ""
+    # Cupo de concurrencia ANTES de levantar nada: si no hay slot libre, esto
+    # lanza `ZapDaemonError` sin haber arrancado un solo contenedor. Se libera
+    # en el `finally` de abajo, después de `stop_daemon` -- el cupo representa
+    # "un ZAP corriendo", así que no puede soltarse antes de apagarlo.
+    pila_cupo = contextlib.ExitStack()
+    pila_cupo.enter_context(turno_de_escaneo_activo(f"scan_id={scan_id}"))
     try:
         _reportar("iniciando", "Arrancando el daemon de ZAP…")
         base_url, _port = start_daemon(container_name)
@@ -629,6 +700,7 @@ def run_checkpointed_active_scan(
         return resultado
     finally:
         stop_daemon(container_name)
+        pila_cupo.close()
 
 
 def run_single_target_verification(
@@ -699,6 +771,11 @@ def run_single_target_verification(
 
     resultado = ZapCheckpointedResult(target=endpoint_url)
     base_url = ""
+    # Misma cuota que `run_checkpointed_active_scan`: una verificación puntual
+    # es un `ascan` real (tráfico de ataque) con su propio contenedor ZAP, así
+    # que cuenta contra el mismo tope de concurrencia.
+    pila_cupo = contextlib.ExitStack()
+    pila_cupo.enter_context(turno_de_escaneo_activo(f"verif scan_id={scan_id}"))
     try:
         _reportar("iniciando", "Arrancando el daemon de ZAP para verificación puntual…")
         base_url, _port = start_daemon(container_name)
@@ -734,3 +811,4 @@ def run_single_target_verification(
         return resultado
     finally:
         stop_daemon(container_name)
+        pila_cupo.close()

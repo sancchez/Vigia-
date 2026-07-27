@@ -235,12 +235,26 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 -- Marcas/keywords que un tenant quiere vigilar (fuera de scope de este
 -- change la lógica de CertStream que las consume -- Fase 3b de
 -- docs/plan-entregable.md -- acá solo el schema).
+-- `dominio_asociado` ancla la marca a un dominio-activo YA VERIFICADO del
+-- tenant (mismo patrón Google Search Console de `assets.verification_token`,
+-- ver tools/asset_verification.py). Sin ese ancla, cualquier tenant podía
+-- registrar "bancolombia" y alimentar el monitoreo CertStream con una marca
+-- que no le pertenece -- exactamente el agujero que ya se había cerrado para
+-- dominios y que quedaba abierto para marcas.
+--
+-- NULLABLE a propósito: filas creadas ANTES de esta migración no tienen
+-- dominio y no se les puede inventar uno. Se conservan (nada se borra, el
+-- arranque no rompe) pero cuentan como NO VERIFICADAS: `GET /watched-brands`
+-- las devuelve con `verificada=false` y el listener CertStream
+-- (api/certstream_listener.py) las ignora. El tenant las re-registra con un
+-- `dominio_asociado` verificado para reactivarlas.
 CREATE TABLE IF NOT EXISTS watched_brands (
-    id              TEXT PRIMARY KEY,
-    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    marca           TEXT NOT NULL,
-    is_active       INTEGER NOT NULL DEFAULT 1,
-    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id                TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    marca             TEXT NOT NULL,
+    dominio_asociado  TEXT,
+    is_active         INTEGER NOT NULL DEFAULT 1,
+    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_watched_brands_tenant_id ON watched_brands(tenant_id);
 

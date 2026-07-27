@@ -38,7 +38,7 @@ from typing import Any, Optional
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -91,6 +91,104 @@ from tools.zap_api import run_checkpointed_active_scan, run_single_target_verifi
 from urllib.parse import urlparse
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Rate limiting (slowapi). Import degradado a propósito: si el paquete no está
+# instalado en el entorno (despliegue viejo, imagen sin actualizar), la app
+# DEBE arrancar igual -- mismo espíritu que la degradación con gracia de
+# `tools/antisuplantacion.py::capturar_screenshot` cuando falta Playwright, o
+# del listener CertStream cuando falta el paquete `certstream`. Lo único que
+# se pierde es el límite; nada del resto del servicio depende de él.
+# ---------------------------------------------------------------------------
+import logging
+
+logger = logging.getLogger("vigia.api")
+
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+    from slowapi.util import get_remote_address
+
+    SLOWAPI_DISPONIBLE = True
+except ImportError:  # pragma: no cover -- depende del entorno, no de la lógica
+    SLOWAPI_DISPONIBLE = False
+    logger.warning(
+        "slowapi no está instalado: la API arranca SIN rate limiting. "
+        "Instálalo (`pip install slowapi`) antes de exponer este servicio a "
+        "internet -- ver legal/politica-uso-aceptable.md."
+    )
+
+    def get_remote_address(request) -> str:  # type: ignore[misc]
+        cliente = getattr(request, "client", None)
+        return getattr(cliente, "host", "") or "anonimo"
+
+    class _LimiterNoOp:
+        """Stub con la misma superficie que usamos de `slowapi.Limiter`."""
+
+        def __init__(self, **_kwargs) -> None:
+            self.enabled = False
+
+        def limit(self, *_args, **_kwargs):
+            def decorador(func):
+                return func
+
+            return decorador
+
+    Limiter = _LimiterNoOp  # type: ignore[assignment,misc]
+    RateLimitExceeded = None  # type: ignore[assignment]
+    _rate_limit_exceeded_handler = None  # type: ignore[assignment]
+
+
+def _flag_env(nombre: str, default: str = "true") -> bool:
+    return os.environ.get(nombre, default).strip().lower() not in ("false", "0", "no")
+
+
+def clave_rate_limit(request) -> str:
+    """Clave del límite: el `tenant_id` del JWT si viene uno válido, si no la IP.
+
+    Por tenant y no por usuario a propósito: el costo real (escaneos, tokens
+    de LLM, sondeos a dominios de terceros) se factura y se justifica
+    legalmente a nivel de tenant, y un tenant no debería poder multiplicar su
+    cuota creando usuarios. Sin JWT (o con uno inválido -- ese request lo
+    rechazará igual el `Depends(get_current_user)` después) cae a la IP, que
+    es lo único identificable que queda.
+    """
+    encabezado = request.headers.get("authorization") or ""
+    if encabezado.lower().startswith("bearer "):
+        try:
+            import jwt as _jwt
+
+            from auth.jwt_auth import _JWT_ALGO, _jwt_secret
+
+            payload = _jwt.decode(
+                encabezado.split(" ", 1)[1].strip(), _jwt_secret(), algorithms=[_JWT_ALGO]
+            )
+            tenant_id = payload.get("tenant_id")
+            if tenant_id:
+                return f"tenant:{tenant_id}"
+        except Exception:  # noqa: BLE001 -- token inválido/expirado: se limita por IP
+            pass
+    return f"ip:{get_remote_address(request)}"
+
+
+# Límites configurables por variable de entorno. Formato de slowapi:
+# "<n>/<unidad>" (ej. "5/minute", "100/hour"), varios separados por ';'.
+# Defaults conservadores en los endpoints caros: /scan y /scan/activo
+# arrancan herramientas externas pesadas, /antisuplantacion sondea dominios
+# de TERCEROS (ver tools/antisuplantacion.py) y /reports/revision-ia además
+# cuesta dinero real en tokens de LLM.
+RATE_LIMIT_DEFAULT = os.environ.get("VIGIA_RATE_LIMIT_DEFAULT", "120/minute")
+RATE_LIMIT_SCAN = os.environ.get("VIGIA_RATE_LIMIT_SCAN", "10/hour")
+RATE_LIMIT_SCAN_ACTIVO = os.environ.get("VIGIA_RATE_LIMIT_SCAN_ACTIVO", "5/hour")
+RATE_LIMIT_ANTISUPLANTACION = os.environ.get("VIGIA_RATE_LIMIT_ANTISUPLANTACION", "10/hour")
+RATE_LIMIT_REVISION_IA = os.environ.get("VIGIA_RATE_LIMIT_REVISION_IA", "5/hour")
+
+limiter = Limiter(
+    key_func=clave_rate_limit,
+    default_limits=[RATE_LIMIT_DEFAULT],
+    enabled=_flag_env("VIGIA_RATE_LIMIT_ENABLED"),
+)
 
 AVISO_LEGAL = (
     "Este servicio NO debe apuntarse contra sistemas de terceros sin una "
@@ -147,6 +245,17 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# slowapi exige que el limiter viva en `app.state` y que el 429 tenga su
+# propio handler; con el stub no-op (paquete ausente) no hay nada que
+# registrar y la app queda exactamente como antes de esta sesión.
+app.state.limiter = limiter
+if SLOWAPI_DISPONIBLE:
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # El middleware es lo que hace que `default_limits` aplique a TODAS las
+    # rutas (sin él, slowapi solo respeta los `@limiter.limit(...)` explícitos
+    # de los cuatro endpoints caros).
+    app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -2133,7 +2242,9 @@ def _persistir_revision_ia(conn, tenant_id: str, resultado: dict, label: str) ->
 
 
 @app.post("/reports/revision-ia", response_model=RevisionIAOut)
+@limiter.limit(RATE_LIMIT_REVISION_IA)
 def reporte_revision_ia(
+    request: Request,
     autorizacion_firmada: bool = Form(...),
     envio_codigo_a_llm_autorizado: bool = Form(False),
     contexto_negocio: str = Form(""),
@@ -2725,7 +2836,10 @@ def _registrar_findings_con_ciclo_de_vida(
 
 
 @app.post("/scan", response_model=ScanResponse)
-def scan(payload: ScanRequest, user: UserContext = Depends(get_current_user)) -> ScanResponse:
+@limiter.limit(RATE_LIMIT_SCAN)
+def scan(
+    request: Request, payload: ScanRequest, user: UserContext = Depends(get_current_user)
+) -> ScanResponse:
     """Dispara el pipeline completo (`orchestrator.graph`) para `target`, para el tenant autenticado.
 
     El grafo (`gate_autorizacion`, sección 8.1) sigue siendo la única fuente
@@ -3177,8 +3291,11 @@ def _correr_escaneo_activo_en_background(
 
 
 @app.post("/scan/activo", response_model=ActiveScanAccepted, status_code=202)
+@limiter.limit(RATE_LIMIT_SCAN_ACTIVO)
 def escaneo_activo_async(
-    payload: ActiveScanRequest, user: UserContext = Depends(get_current_user)
+    request: Request,
+    payload: ActiveScanRequest,
+    user: UserContext = Depends(get_current_user),
 ) -> ActiveScanAccepted:
     if not payload.autorizacion_firmada:
         raise HTTPException(
@@ -3335,8 +3452,11 @@ def _dominio_clon_out_de_row(d: dict) -> DominioClonOut:
 
 
 @app.post("/antisuplantacion", response_model=AntisuplantacionRunOut)
+@limiter.limit(RATE_LIMIT_ANTISUPLANTACION)
 def ejecutar_antisuplantacion(
-    payload: AntisuplantacionRunIn, user: UserContext = Depends(get_current_user)
+    request: Request,
+    payload: AntisuplantacionRunIn,
+    user: UserContext = Depends(get_current_user),
 ) -> AntisuplantacionRunOut:
     """Dispara SOLO la rama anti-suplantación sobre un asset dominio ya
     verificado (o exento) del tenant -- ver design.md, Data Flow.
@@ -3880,18 +4000,104 @@ def previsualizar_invitacion(token: str) -> InvitationPreview:
 # `tenant_id` que `/tenant/invitations` arriba en este archivo.
 class WatchedBrandIn(BaseModel):
     marca: str
+    dominio_asociado: str = Field(
+        ...,
+        description=(
+            "Dominio propio del tenant, ya registrado como asset y VERIFICADO "
+            "(o exento: localhost/IP privada), que respalda la propiedad de esta "
+            "marca. Obligatorio -- ver `_dominio_verificado_para_marca`."
+        ),
+    )
 
 
 class WatchedBrandOut(BaseModel):
     id: str
     marca: str
+    dominio_asociado: Optional[str] = None
+    verificada: bool = False
     is_active: bool
     created_at: str
 
 
+def _watched_brand_out_de_row(d: dict) -> WatchedBrandOut:
+    """Una marca cuenta como `verificada` si tiene un `dominio_asociado` no vacío.
+
+    La verificación real (¿ese dominio es un asset verificado de este tenant?)
+    se hace en el alta (`POST /watched-brands`) -- misma decisión de diseño
+    que `assets.verificado`: se comprueba una vez y se persiste, no se
+    re-comprueba con DNS en cada lectura. Las filas anteriores a la migración
+    tienen `dominio_asociado IS NULL` y salen con `verificada=false`.
+    """
+    dominio = (d.get("dominio_asociado") or "").strip()
+    return WatchedBrandOut(
+        id=d["id"],
+        marca=d["marca"],
+        dominio_asociado=dominio or None,
+        verificada=bool(dominio),
+        is_active=bool(d["is_active"]),
+        created_at=d["created_at"],
+    )
+
+
+def _dominio_verificado_para_marca(conn, tenant_id: str, dominio: str) -> tuple[bool, str]:
+    """¿`dominio` es un asset tipo 'dominio' de este tenant, verificado (o exento)?
+
+    Es la MISMA pregunta que ya gatea `/scan`, `/scan/activo` y
+    `/antisuplantacion` vía `_asset_verificado_para_target`, aplicada ahora a
+    las marcas vigiladas: hasta esta sesión, `POST /watched-brands` aceptaba
+    cualquier cadena, así que un tenant cualquiera podía registrar
+    "bancolombia" y alimentar con ella el monitoreo CertStream
+    (api/certstream_listener.py) sin ninguna relación con esa marca. Vigilar
+    una marca ajena genera hallazgos, alertas y borradores de takedown sobre
+    dominios de terceros a nombre de alguien que no es el titular -- el mismo
+    riesgo que ya se había cerrado para dominios.
+
+    Se exige que el asset sea tipo 'dominio' a propósito: un asset 'ip' no
+    puede verificarse (no hay dónde colgar un TXT, ver
+    `POST /assets/{id}/verify`), así que no puede respaldar la propiedad de
+    nada.
+    """
+    valor = (dominio or "").strip().lower()
+    if not valor:
+        return False, "dominio_asociado no puede estar vacío"
+    row = conn.execute(
+        "SELECT * FROM assets WHERE tenant_id = ? AND tipo = 'dominio' AND LOWER(valor) = ?",
+        (tenant_id, valor),
+    ).fetchone()
+    if row is None:
+        return (
+            False,
+            (
+                f"'{dominio}' no está registrado como activo tipo 'dominio' de este tenant. "
+                "Regístralo primero con POST /assets y verifícalo con "
+                "POST /assets/{id}/verify antes de vigilar una marca."
+            ),
+        )
+    asset = dict_from_row(row)
+    if asset_autorizado_para_escanear(asset["tipo"], asset["valor"], bool(asset["verificado"])):
+        return True, ""
+    return (
+        False,
+        (
+            f"El activo '{asset['valor']}' (id={asset['id']}) está registrado pero NO verificado. "
+            "Demuestra control real del dominio antes de vigilar una marca en su nombre: agrega un "
+            f"registro DNS TXT en '_vigia-challenge.{asset['valor']}' con el token de verificación, o "
+            f"publica ese token en 'https://{asset['valor']}/.well-known/vigia-verification.txt' (ver "
+            "'instrucciones_verificacion' en GET /assets), y luego llama a "
+            f"POST /assets/{asset['id']}/verify con {{'metodo': 'dns_txt'}} o {{'metodo': 'http_file'}}."
+        ),
+    )
+
+
 @app.get("/watched-brands", response_model=list[WatchedBrandOut])
 def listar_watched_brands(user: UserContext = Depends(get_current_user)) -> list[WatchedBrandOut]:
-    """Marcas vigiladas del tenant, más recientes primero (spec.md: "Listado aislado por tenant")."""
+    """Marcas vigiladas del tenant, más recientes primero (spec.md: "Listado aislado por tenant").
+
+    Incluye también las marcas anteriores a la migración de propiedad
+    (`dominio_asociado IS NULL`): salen con `verificada=false` -- no se
+    borran ni rompen el listado, pero el listener CertStream las ignora
+    (ver db/schema.sql y api/certstream_listener.py).
+    """
     conn = get_conn()
     try:
         rows = conn.execute(
@@ -3900,10 +4106,7 @@ def listar_watched_brands(user: UserContext = Depends(get_current_user)) -> list
         ).fetchall()
     finally:
         conn.close()
-    return [
-        WatchedBrandOut(id=r["id"], marca=r["marca"], is_active=bool(r["is_active"]), created_at=r["created_at"])
-        for r in rows
-    ]
+    return [_watched_brand_out_de_row(dict_from_row(r)) for r in rows]
 
 
 @app.post("/watched-brands", response_model=WatchedBrandOut, status_code=201)
@@ -3912,34 +4115,58 @@ def crear_watched_brand(
 ) -> WatchedBrandOut:
     """Alta de una marca vigilada (spec.md: "Alta válida" / "Marca vacía rechazada").
 
-    `marca` vacía tras `strip()` -> 422. Un duplicado exacto (misma `marca`
-    ya activa del tenant) se reactiva/reusa en vez de crear otra fila -- ver
+    `marca` vacía tras `strip()` -> 422. `dominio_asociado` que no sea un
+    activo tipo 'dominio' verificado de este tenant -> 403 con las
+    instrucciones exactas de verificación (ver
+    `_dominio_verificado_para_marca`). Un duplicado exacto (misma `marca` ya
+    activa del tenant) se reactiva/reusa en vez de crear otra fila -- ver
     spec.md, "Un duplicado exacto ... SHOULD reactivarse/deduplicarse"."""
     marca = payload.marca.strip()
     if not marca:
         raise HTTPException(status_code=422, detail="marca no puede estar vacía")
+    dominio = (payload.dominio_asociado or "").strip()
+    if not dominio:
+        raise HTTPException(status_code=422, detail="dominio_asociado no puede estar vacío")
 
     conn = get_conn()
     try:
+        autorizado, motivo = _dominio_verificado_para_marca(conn, user.tenant_id, dominio)
+        if not autorizado:
+            raise HTTPException(status_code=403, detail=motivo)
+
         existente = conn.execute(
             "SELECT * FROM watched_brands WHERE tenant_id = ? AND marca = ? AND is_active = 1",
             (user.tenant_id, marca),
         ).fetchone()
         if existente is not None:
-            row = existente
+            # Duplicado: se reusa la fila, pero se aprovecha para "curar" una
+            # marca legada sin dominio (o re-anclarla a otro dominio ya
+            # verificado del mismo tenant) -- es la vía por la que un tenant
+            # con datos previos a la migración vuelve a tener sus marcas
+            # vigiladas de verdad, sin ningún script de migración manual.
+            conn.execute(
+                "UPDATE watched_brands SET dominio_asociado = ? WHERE id = ?",
+                (dominio, existente["id"]),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM watched_brands WHERE id = ?", (existente["id"],)
+            ).fetchone()
         else:
             brand_id = str(uuid.uuid4())
             conn.execute(
-                "INSERT INTO watched_brands (id, tenant_id, marca, is_active) VALUES (?, ?, ?, 1)",
-                (brand_id, user.tenant_id, marca),
+                """
+                INSERT INTO watched_brands (id, tenant_id, marca, dominio_asociado, is_active)
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (brand_id, user.tenant_id, marca, dominio),
             )
             conn.commit()
             row = conn.execute("SELECT * FROM watched_brands WHERE id = ?", (brand_id,)).fetchone()
     finally:
         conn.close()
 
-    d = dict_from_row(row)
-    return WatchedBrandOut(id=d["id"], marca=d["marca"], is_active=bool(d["is_active"]), created_at=d["created_at"])
+    return _watched_brand_out_de_row(dict_from_row(row))
 
 
 @app.delete("/watched-brands/{brand_id}", status_code=204)

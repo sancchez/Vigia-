@@ -156,6 +156,48 @@ def test_reconciliacion_agrega_columnas_nuevas_sin_perder_filas(tmp_path, monkey
         conn.close()
 
 
+def test_reconciliacion_agrega_dominio_asociado_a_watched_brands(tmp_path, monkeypatch):
+    """Migración de propiedad de marca: una `watched_brands` de una sesión
+    anterior (sin `dominio_asociado`) recibe la columna y conserva sus filas
+    -- no rompe el arranque, quedan como no verificadas (ver db/schema.sql y
+    api/main.py::crear_watched_brand)."""
+    db_path = tmp_path / "marcas-viejas.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE tenants (
+                id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE watched_brands (
+                id          TEXT PRIMARY KEY,
+                tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                marca       TEXT NOT NULL,
+                is_active   INTEGER NOT NULL DEFAULT 1,
+                created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        conn.execute("INSERT INTO tenants (id, slug, name) VALUES ('t1', 'pyme', 'Pyme')")
+        conn.execute(
+            "INSERT INTO watched_brands (id, tenant_id, marca) VALUES ('b1', 't1', 'marcavieja')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    conn = get_conn()
+    try:
+        assert "dominio_asociado" in _columnas(conn, "watched_brands")
+        fila = dict(conn.execute("SELECT * FROM watched_brands WHERE id = 'b1'").fetchone())
+        assert fila["marca"] == "marcavieja"
+        assert fila["dominio_asociado"] is None
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # 2. Default de `estado` + CHECK constraint
 # ---------------------------------------------------------------------------
