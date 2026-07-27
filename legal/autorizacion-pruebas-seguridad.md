@@ -146,7 +146,8 @@ Independientemente de lo listado en la Sección 2, quedan **expresamente excluid
 - El Prestador se compromete a no divulgar, publicar, compartir ni usar los hallazgos con fines distintos a la elaboración del reporte de seguridad para el Cliente, salvo:
   - Autorización expresa y por escrito del Cliente (ej. para caso de estudio, con anonimización).
   - Requerimiento de autoridad judicial o administrativa competente.
-- Toda la evidencia recolectada (capturas, logs, reportes) se almacena de forma cifrada y se elimina o entrega al Cliente según se acuerde, dentro de un plazo máximo de ______________________ días tras la entrega del reporte final.
+- Toda la evidencia recolectada (capturas, logs, reportes) se elimina o entrega al Cliente según se acuerde, dentro de un plazo máximo de ______________________ días tras la entrega del reporte final, y en todo caso conforme a la [Política de Retención](politica-de-retencion.md).
+- **Cifrado en reposo — declaración honesta.** A la fecha de esta versión, la base de datos y el directorio de capturas del Prestador **no están cifrados en reposo**; la protección es por control de acceso (autenticación, aislamiento por cliente) y por cifrado en tránsito. Esta limitación está declarada también en el [Aviso de Privacidad](aviso-de-privacidad.md), Sección 8, y en `docs/cumplimiento-del-proveedor.md` (brecha B3). Si el Cliente requiere cifrado en reposo como condición, debe pactarse expresamente en el Anexo de Alcance antes de firmar.
 - Esta obligación de confidencialidad **sobrevive la terminación de este acuerdo** de forma indefinida respecto a la información clasificada como confidencial.
 - El personal del Prestador que tenga acceso a los hallazgos está sujeto a esta misma obligación de confidencialidad.
 
