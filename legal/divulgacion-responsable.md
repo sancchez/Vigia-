@@ -2,8 +2,8 @@
 
 **Versión:** 1.0 (borrador)
 **Fecha de emisión:** 2026-07-26
-**Responsable:** `[RAZÓN SOCIAL / NIT / DOMICILIO]`
-**Contacto:** `[correo de contacto de seguridad]`
+**Responsable:** `Camilo Sánchez (persona natural, Colombia)`
+**Contacto:** `camilosanch2008@gmail.com`
 
 ---
 
@@ -83,10 +83,10 @@ Si una persona identificable resulta señalada por un hallazgo:
 
 ## 5. Vulnerabilidades en la propia plataforma Vigia
 
-Quien identifique una vulnerabilidad en Vigia —el servicio o el código publicado— puede reportarla a `[correo de contacto de seguridad]`. El Responsable se compromete a:
+Quien identifique una vulnerabilidad en Vigia —el servicio o el código publicado— puede reportarla a `camilosanch2008@gmail.com`. El Responsable se compromete a:
 
-1. Acusar recibo dentro de `[plazo sugerido: 3 días hábiles]`.
-2. Evaluar y comunicar un diagnóstico dentro de `[plazo sugerido: 15 días hábiles]`.
+1. Acusar recibo dentro de tres (3) días hábiles.
+2. Evaluar y comunicar un diagnóstico dentro de quince (15) días hábiles.
 3. No emprender acciones legales contra quien reporte de buena fe, siempre que se haya limitado a lo estrictamente necesario para demostrar la falla, no haya accedido a datos de terceros, no haya degradado el servicio y conceda un plazo razonable antes de cualquier divulgación pública.
 
 Esta salvaguarda es un compromiso del Responsable y no altera el régimen penal aplicable a quien exceda esos límites.

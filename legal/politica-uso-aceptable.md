@@ -2,8 +2,8 @@
 
 **Versión:** 1.0 (borrador)
 **Fecha de emisión:** 2026-07-26
-**Titular del servicio:** `[RAZÓN SOCIAL / NIT / DOMICILIO]`
-**Reporte de abuso:** `[correo de contacto de abuso]`
+**Titular del servicio:** `Camilo Sánchez (persona natural, Colombia)`
+**Reporte de abuso:** `camilosanch2008@gmail.com`
 
 ---
 
@@ -145,7 +145,7 @@ Declarado expresamente, para que nadie —ni cliente, ni tercero afectado, ni au
 
 ## 7. Reporte de abuso
 
-Quien considere que un activo suyo ha sido escaneado desde esta plataforma sin su autorización puede escribir a `[correo de contacto de abuso]` indicando el dominio o IP afectado y la fecha aproximada. El Titular investigará con los registros disponibles y responderá dentro de `[plazo, sugerido: 5 días hábiles]`.
+Quien considere que un activo suyo ha sido escaneado desde esta plataforma sin su autorización puede escribir a `camilosanch2008@gmail.com` indicando el dominio o IP afectado y la fecha aproximada. El Titular investigará con los registros disponibles y responderá dentro de cinco (5) días hábiles.
 
 ---
 

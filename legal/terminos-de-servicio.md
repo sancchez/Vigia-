@@ -2,8 +2,8 @@
 
 **Versión:** 1.0 (borrador)
 **Fecha de emisión:** 2026-07-26
-**Titular del servicio:** `[RAZÓN SOCIAL / NIT / DOMICILIO]`
-**Contacto:** `[correo de contacto comercial y de soporte]`
+**Titular del servicio:** `Camilo Sánchez (persona natural, Colombia)`
+**Contacto:** `camilosanch2008@gmail.com`
 
 ---
 

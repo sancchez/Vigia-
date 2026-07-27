@@ -10,10 +10,10 @@
 
 | Campo | Valor |
 |---|---|
-| Razón social | `[RAZÓN SOCIAL]` |
-| NIT | `[NIT]` |
+| Razón social | Camilo Sánchez |
+| NIT | N/A — persona natural, sin RUT/NIT comercial registrado |
 | Domicilio | `[DOMICILIO — dirección física en Colombia]` |
-| Correo para habeas data | `[correo de contacto de habeas data]` |
+| Correo para habeas data | `camilosanch2008@gmail.com` |
 | Teléfono | `[teléfono de contacto]` |
 | Sitio web | `[sitio web]` |
 
@@ -77,7 +77,7 @@ Todo titular de datos personales tiene derecho a:
 
 ## 5. Canal y procedimiento para ejercer los derechos
 
-**Canal único:** `[correo de contacto de habeas data]`
+**Canal único:** `camilosanch2008@gmail.com`
 
 La solicitud debe indicar: nombre completo del titular, documento de identificación, descripción concreta de lo que se solicita, y datos de contacto para la respuesta.
 

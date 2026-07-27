@@ -2,8 +2,8 @@
 
 **Versión:** 1.0 (borrador)
 **Fecha de emisión:** 2026-07-26
-**Responsable:** `[RAZÓN SOCIAL / NIT / DOMICILIO]`
-**Canal de solicitudes de supresión:** `[correo de contacto de habeas data]`
+**Responsable:** `Camilo Sánchez (persona natural, Colombia)`
+**Canal de solicitudes de supresión:** `camilosanch2008@gmail.com`
 
 ---
 
@@ -77,7 +77,7 @@ Todas las filas marcadas "Pendiente de automatizar" lo están de verdad: **no ex
 
 1. Durante los noventa (90) días siguientes a la terminación, el Cliente puede solicitar la **exportación** de sus reportes y hallazgos en formato legible.
 2. Vencido ese plazo, los datos del Cliente se suprimen o anonimizan, salvo los sujetos a obligación legal de conservación.
-3. Los respaldos (*backups*) pueden conservar copias durante un máximo de `[plazo del ciclo de respaldo — sugerido: 35 días]` adicionales; esas copias no se consultan salvo para recuperación ante desastre y se sobrescriben en el ciclo normal.
+3. Los respaldos (*backups*) pueden conservar copias durante un máximo de treinta y cinco (35) días adicionales; esas copias no se consultan salvo para recuperación ante desastre y se sobrescriben en el ciclo normal.
 
 ---
 
