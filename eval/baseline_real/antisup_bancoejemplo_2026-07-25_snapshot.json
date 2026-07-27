@@ -1,827 +1,827 @@
 {
-  "target": "bancolombia.com",
+  "target": "bancoejemplo.com",
   "tool": "dnstwist",
   "captured_at": "2026-07-25",
-  "source": "run_dnstwist('bancolombia.com', registered_only=True) contra datos reales, ver tools/antisuplantacion.py",
-  "note": "Snapshot congelado para eval de regresion (WS2, fase10-antisuplantacion-lista-demo). NO modificar salvo para probar que el runner detecta una regresion.",
+  "source": "derivado (anonimizado) de run_dnstwist(<marca real, no publicada>, registered_only=True) contra datos reales, ver tools/antisuplantacion.py",
+  "note": "SNAPSHOT ANONIMIZADO. Deriva de una corrida real de dnstwist del 2026-07-25 cuyo objetivo era una marca de un tercero que no autorizo la publicacion de estos datos. Se sustituyeron marca, dominios, nameservers, MX e IPs por valores ficticios (.invalid / rangos de documentacion RFC 5737 y RFC 3849), preservando intactos: numero de registros (45 variantes registradas + el original), las clases de equivalencia de nameservers (de las que depende el triaje de 'defensivo'), la presencia/ausencia de MX (de la que depende 'urgente') y el campo fuzzer. El eval reproduce por tanto la misma particion 10/28/7 que la corrida real. El snapshot original, con los datos sin anonimizar y la cadena de evidencia RDAP completa, vive fuera de este repo publico en vigia_core_private/eval/baseline_real/.",
   "variants": [
     {
       "fuzzer": "*original",
-      "domain": "bancolombia.com",
+      "domain": "bancoejemplo.com",
       "dns_a": [
-        "45.60.241.99"
+        "203.0.113.13"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "45.60.241.99"
+          "203.0.113.13"
         ],
         "dns_mx": [
-          "bancolombia-com.mail.protection.outlook.com"
+          "mx01.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "bancolombia.com",
+        "domain": "bancoejemplo.com",
         "fuzzer": "*original"
       }
     },
     {
       "fuzzer": "addition",
-      "domain": "bancolombias.com",
+      "domain": "bancoejemplo-v01.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolombias.com",
+        "domain": "bancoejemplo-v01.com",
         "fuzzer": "addition"
       }
     },
     {
       "fuzzer": "addition",
-      "domain": "bancolombiai.com",
+      "domain": "bancoejemplo-v02.com",
       "dns_a": [
-        "94.23.162.163"
+        "203.0.113.16"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "94.23.162.163"
+          "203.0.113.16"
         ],
         "dns_ns": [
-          "ns1.emailverification.info"
+          "ns08.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolombiai.com",
+        "domain": "bancoejemplo-v02.com",
         "fuzzer": "addition"
       }
     },
     {
       "fuzzer": "addition",
-      "domain": "bancolombian.com",
+      "domain": "bancoejemplo-v03.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "bancolombian.com",
+        "domain": "bancoejemplo-v03.com",
         "fuzzer": "addition"
       }
     },
     {
       "fuzzer": "bitsquatting",
-      "domain": "bancolombiq.com",
+      "domain": "bancoejemplo-v04.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolombiq.com",
+        "domain": "bancoejemplo-v04.com",
         "fuzzer": "bitsquatting"
       }
     },
     {
       "fuzzer": "bitsquatting",
-      "domain": "bancomombia.com",
+      "domain": "bancoejemplo-v05.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancomombia.com",
+        "domain": "bancoejemplo-v05.com",
         "fuzzer": "bitsquatting"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "banc0l0mbia.com",
+      "domain": "bancoejemplo-v06.com",
       "dns_a": [
-        "!ServFail"
+        "203.0.113.1"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "!ServFail"
+          "203.0.113.1"
         ],
         "dns_aaaa": [
-          "!ServFail"
+          "2001:db8::1"
         ],
         "dns_ns": [
-          "!ServFail"
+          "ns01.proveedor-ejemplo.invalid"
         ],
-        "domain": "banc0l0mbia.com",
+        "domain": "bancoejemplo-v06.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "barcolombia.com",
+      "domain": "bancoejemplo-v07.com",
       "dns_a": [
-        "13.248.169.48"
+        "203.0.113.4"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "13.248.169.48"
+          "203.0.113.4"
         ],
         "dns_mx": [
           ""
         ],
         "dns_ns": [
-          "ns1.afternic.com"
+          "ns05.proveedor-ejemplo.invalid"
         ],
-        "domain": "barcolombia.com",
+        "domain": "bancoejemplo-v07.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "clancolombia.com",
+      "domain": "bancoejemplo-v08.com",
       "dns_a": [
-        "15.197.225.128"
+        "203.0.113.7"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "15.197.225.128"
+          "203.0.113.7"
         ],
         "dns_ns": [
-          "pdns01.domaincontrol.com"
+          "ns16.proveedor-ejemplo.invalid"
         ],
-        "domain": "clancolombia.com",
+        "domain": "bancoejemplo-v08.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "bamcolombia.com",
+      "domain": "bancoejemplo-v09.com",
       "dns_a": [
-        "172.237.146.18"
+        "203.0.113.8"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "172.237.146.18"
+          "203.0.113.8"
         ],
         "dns_mx": [
-          "mx156.hostedmxserver.com"
+          "mx06.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "ns1.parklogic.com"
+          "ns11.proveedor-ejemplo.invalid"
         ],
-        "domain": "bamcolombia.com",
+        "domain": "bancoejemplo-v09.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "xn--bancolomba-s8a.com",
+      "domain": "bancoejemplo-v10.com",
       "dns_a": [
-        "2.57.91.91"
+        "203.0.113.9"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "2.57.91.91"
+          "203.0.113.9"
         ],
         "dns_mx": [
-          "mx1.hostinger.com"
+          "mx05.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "ns1.dns-parking.com"
+          "ns07.proveedor-ejemplo.invalid"
         ],
-        "domain": "xn--bancolomba-s8a.com",
+        "domain": "bancoejemplo-v10.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "bancolommbia.com",
+      "domain": "bancoejemplo-v11.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolommbia.com",
+        "domain": "bancoejemplo-v11.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "bancolornbia.com",
+      "domain": "bancoejemplo-v12.com",
       "dns_a": [
-        "34.59.228.169"
+        "203.0.113.11"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "34.59.228.169"
+          "203.0.113.11"
         ],
         "dns_mx": [
-          "mxa.eu.mailgun.org"
+          "mx07.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "ns37.domaincontrol.com"
+          "ns13.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolornbia.com",
+        "domain": "bancoejemplo-v12.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "bancolonbia.com",
+      "domain": "bancoejemplo-v13.com",
       "dns_a": [
-        "65.21.178.24"
+        "203.0.113.15"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "65.21.178.24"
+          "203.0.113.15"
         ],
         "dns_ns": [
-          "mid8.ns1.sslparking.com"
+          "ns04.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolonbia.com",
+        "domain": "bancoejemplo-v13.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "banc0lombia.com",
+      "domain": "bancoejemplo-v14.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "banc0lombia.com",
+        "domain": "bancoejemplo-v14.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "banco1ombia.com",
+      "domain": "bancoejemplo-v15.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "banco1ombia.com",
+        "domain": "bancoejemplo-v15.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "bancol0mbia.com",
+      "domain": "bancoejemplo-v16.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "bancol0mbia.com",
+        "domain": "bancoejemplo-v16.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "homoglyph",
-      "domain": "bancolomb1a.com",
+      "domain": "bancoejemplo-v17.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "bancolomb1a.com",
+        "domain": "bancoejemplo-v17.com",
         "fuzzer": "homoglyph"
       }
     },
     {
       "fuzzer": "hyphenation",
-      "domain": "ban-colombia.com",
+      "domain": "bancoejemplo-v18.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "ban-colombia.com",
+        "domain": "bancoejemplo-v18.com",
         "fuzzer": "hyphenation"
       }
     },
     {
       "fuzzer": "insertion",
-      "domain": "bancollombia.com",
+      "domain": "bancoejemplo-v19.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancollombia.com",
+        "domain": "bancoejemplo-v19.com",
         "fuzzer": "insertion"
       }
     },
     {
       "fuzzer": "insertion",
-      "domain": "bancoloimbia.com",
+      "domain": "bancoejemplo-v20.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancoloimbia.com",
+        "domain": "bancoejemplo-v20.com",
         "fuzzer": "insertion"
       }
     },
     {
       "fuzzer": "insertion",
-      "domain": "banxcolombia.com",
+      "domain": "bancoejemplo-v21.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_mx": [
-          "fwd1.porkbun.com"
+          "mx02.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "banxcolombia.com",
+        "domain": "bancoejemplo-v21.com",
         "fuzzer": "insertion"
       }
     },
     {
       "fuzzer": "insertion",
-      "domain": "nbancolombia.com",
+      "domain": "bancoejemplo-v22.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "nbancolombia.com",
+        "domain": "bancoejemplo-v22.com",
         "fuzzer": "insertion"
       }
     },
     {
       "fuzzer": "insertion",
-      "domain": "vbancolombia.com",
+      "domain": "bancoejemplo-v23.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "vbancolombia.com",
+        "domain": "bancoejemplo-v23.com",
         "fuzzer": "insertion"
       }
     },
     {
       "fuzzer": "insertion",
-      "domain": "bancolombnia.com",
+      "domain": "bancoejemplo-v24.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "bancolombnia.com",
+        "domain": "bancoejemplo-v24.com",
         "fuzzer": "insertion"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "bancolmbia.com",
+      "domain": "bancoejemplo-v25.com",
       "dns_a": [
-        "104.247.81.99"
+        "203.0.113.2"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "104.247.81.99"
+          "203.0.113.2"
         ],
         "dns_mx": [
-          "mail.h-email.net"
+          "mx04.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "ns1.parkingcrew.net"
+          "ns10.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolmbia.com",
+        "domain": "bancoejemplo-v25.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "bancolomba.com",
+      "domain": "bancoejemplo-v26.com",
       "dns_a": [
-        "13.223.25.84"
+        "203.0.113.3"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "13.223.25.84"
+          "203.0.113.3"
         ],
         "dns_aaaa": [
-          "2600:1f18:4ae:c605:dd5d:b838:5816:d7fb"
+          "2001:db8::2"
         ],
         "dns_ns": [
-          "nsg1.namebrightdns.com"
+          "ns15.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolomba.com",
+        "domain": "bancoejemplo-v26.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "bancoombia.com",
+      "domain": "bancoejemplo-v27.com",
       "dns_a": [
-        "13.223.25.84"
+        "203.0.113.3"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "13.223.25.84"
+          "203.0.113.3"
         ],
         "dns_aaaa": [
-          "2600:1f18:4ae:c605:dd5d:b838:5816:d7fb"
+          "2001:db8::2"
         ],
         "dns_ns": [
-          "nsg1.namebrightdns.com"
+          "ns15.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancoombia.com",
+        "domain": "bancoejemplo-v27.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "bancolombi.com",
+      "domain": "bancoejemplo-v28.com",
       "dns_a": [
-        "13.248.169.48"
+        "203.0.113.4"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "13.248.169.48"
+          "203.0.113.4"
         ],
         "dns_mx": [
           ""
         ],
         "dns_ns": [
-          "ns1.afternic.com"
+          "ns05.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolombi.com",
+        "domain": "bancoejemplo-v28.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "bncolombia.com",
+      "domain": "bancoejemplo-v29.com",
       "dns_a": [
-        "13.248.169.48"
+        "203.0.113.4"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "13.248.169.48"
+          "203.0.113.4"
         ],
         "dns_mx": [
           ""
         ],
         "dns_ns": [
-          "ns1.afternic.com"
+          "ns05.proveedor-ejemplo.invalid"
         ],
-        "domain": "bncolombia.com",
+        "domain": "bancoejemplo-v29.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "bancolobia.com",
+      "domain": "bancoejemplo-v30.com",
       "dns_a": [
-        "149.28.121.93"
+        "203.0.113.5"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "149.28.121.93"
+          "203.0.113.5"
         ],
-        "domain": "bancolobia.com",
+        "domain": "bancoejemplo-v30.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "bacolombia.com",
+      "domain": "bancoejemplo-v31.com",
       "dns_a": [
-        "45.33.83.100"
+        "203.0.113.12"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "45.33.83.100"
+          "203.0.113.12"
         ],
         "dns_aaaa": [
-          "2600:3c03::f03c:95ff:fe00:29ca"
+          "2001:db8::3"
         ],
         "dns_ns": [
-          "chuangchuang.ns.giantpanda.com"
+          "ns02.proveedor-ejemplo.invalid"
         ],
-        "domain": "bacolombia.com",
+        "domain": "bancoejemplo-v31.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "omission",
-      "domain": "banolombia.com",
+      "domain": "bancoejemplo-v32.com",
       "dns_a": [
-        "64.190.63.222"
+        "203.0.113.14"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "64.190.63.222"
+          "203.0.113.14"
         ],
         "dns_mx": [
-          "localhost"
+          "mx03.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "ns1.sedoparking.com"
+          "ns12.proveedor-ejemplo.invalid"
         ],
-        "domain": "banolombia.com",
+        "domain": "bancoejemplo-v32.com",
         "fuzzer": "omission"
       }
     },
     {
       "fuzzer": "plural",
-      "domain": "banscolombia.com",
+      "domain": "bancoejemplo-v33.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "banscolombia.com",
+        "domain": "bancoejemplo-v33.com",
         "fuzzer": "plural"
       }
     },
     {
       "fuzzer": "replacement",
-      "domain": "bancolomnia.com",
+      "domain": "bancoejemplo-v34.com",
       "dns_a": [
-        "104.247.81.99"
+        "203.0.113.2"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "104.247.81.99"
+          "203.0.113.2"
         ],
         "dns_mx": [
-          "mail.h-email.net"
+          "mx04.correo-ejemplo.invalid"
         ],
         "dns_ns": [
-          "ns1.parkingcrew.net"
+          "ns10.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolomnia.com",
+        "domain": "bancoejemplo-v34.com",
         "fuzzer": "replacement"
       }
     },
     {
       "fuzzer": "replacement",
-      "domain": "vancolombia.com",
+      "domain": "bancoejemplo-v35.com",
       "dns_a": [
-        "15.197.148.33"
+        "203.0.113.6"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "15.197.148.33"
+          "203.0.113.6"
         ],
         "dns_ns": [
-          "ns65.domaincontrol.com"
+          "ns14.proveedor-ejemplo.invalid"
         ],
-        "domain": "vancolombia.com",
+        "domain": "bancoejemplo-v35.com",
         "fuzzer": "replacement"
       }
     },
     {
       "fuzzer": "replacement",
-      "domain": "bancilombia.com",
+      "domain": "bancoejemplo-v36.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancilombia.com",
+        "domain": "bancoejemplo-v36.com",
         "fuzzer": "replacement"
       }
     },
     {
       "fuzzer": "replacement",
-      "domain": "bancolombis.com",
+      "domain": "bancoejemplo-v37.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolombis.com",
+        "domain": "bancoejemplo-v37.com",
         "fuzzer": "replacement"
       }
     },
     {
       "fuzzer": "replacement",
-      "domain": "banvolombia.com",
+      "domain": "bancoejemplo-v38.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "banvolombia.com",
+        "domain": "bancoejemplo-v38.com",
         "fuzzer": "replacement"
       }
     },
     {
       "fuzzer": "replacement",
-      "domain": "bsncolombia.com",
+      "domain": "bancoejemplo-v39.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bsncolombia.com",
+        "domain": "bancoejemplo-v39.com",
         "fuzzer": "replacement"
       }
     },
     {
       "fuzzer": "subdomain",
-      "domain": "bancolomb.ia.com",
+      "domain": "bancoejemplo-v40.com",
       "dns_a": [
-        "13.248.169.48"
+        "203.0.113.4"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "13.248.169.48"
+          "203.0.113.4"
         ],
         "dns_ns": [
-          "ns1.dan.com"
+          "ns06.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolomb.ia.com",
+        "domain": "bancoejemplo-v40.com",
         "fuzzer": "subdomain"
       }
     },
     {
       "fuzzer": "transposition",
-      "domain": "bancolombai.com",
+      "domain": "bancoejemplo-v41.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bancolombai.com",
+        "domain": "bancoejemplo-v41.com",
         "fuzzer": "transposition"
       }
     },
     {
       "fuzzer": "transposition",
-      "domain": "bnacolombia.com",
+      "domain": "bancoejemplo-v42.com",
       "dns_a": [
-        "207.207.210.36"
+        "203.0.113.10"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "207.207.210.36"
+          "203.0.113.10"
         ],
         "dns_ns": [
-          "curitiba.ns.porkbun.com"
+          "ns03.proveedor-ejemplo.invalid"
         ],
-        "domain": "bnacolombia.com",
+        "domain": "bancoejemplo-v42.com",
         "fuzzer": "transposition"
       }
     },
     {
       "fuzzer": "transposition",
-      "domain": "bacnolombia.com",
+      "domain": "bancoejemplo-v43.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "bacnolombia.com",
+        "domain": "bancoejemplo-v43.com",
         "fuzzer": "transposition"
       }
     },
     {
       "fuzzer": "transposition",
-      "domain": "bancolomiba.com",
+      "domain": "bancoejemplo-v44.com",
       "dns_a": [],
       "registered": true,
       "raw": {
         "dns_ns": [
-          "ns1.bluecatdns.com"
+          "ns1.dns-titular-ejemplo.invalid"
         ],
-        "domain": "bancolomiba.com",
+        "domain": "bancoejemplo-v44.com",
         "fuzzer": "transposition"
       }
     },
     {
       "fuzzer": "vowel-swap",
-      "domain": "boncolombia.com",
+      "domain": "bancoejemplo-v45.com",
       "dns_a": [
-        "13.248.169.48"
+        "203.0.113.4"
       ],
       "registered": true,
       "raw": {
         "dns_a": [
-          "13.248.169.48"
+          "203.0.113.4"
         ],
         "dns_ns": [
-          "ns1.namefind.com"
+          "ns09.proveedor-ejemplo.invalid"
         ],
-        "domain": "boncolombia.com",
+        "domain": "bancoejemplo-v45.com",
         "fuzzer": "vowel-swap"
       }
     }

@@ -1,11 +1,33 @@
-# Ground truth de clasificacion de dominios lookalike -- bancolombia.com
+# Ground truth de clasificacion de dominios lookalike -- DATOS ANONIMIZADOS
+#
+# AVISO DE PROCEDENCIA (leer antes que nada)
+# ------------------------------------------------------------------
+# Este archivo deriva de una medicion REAL hecha el 2026-07-25/26 sobre una
+# marca de un TERCERO que no autorizo la publicacion de estos datos. Para no
+# versionar en un repo publico artefactos de reconocimiento sobre una entidad
+# ajena (ver "Regla de oro" en README.md), la marca, los dominios, los
+# nameservers, los registradores y las IPs fueron sustituidos por valores
+# ficticios, preservando exactamente: el numero de entradas (45), la particion
+# defensivo/tercero/urgente (10/28/7), las clases de equivalencia de
+# nameservers y la distincion senal independiente/circular.
+#
+# LIMITE DE TRAZABILIDAD (explicito, no minimizado)
+# ------------------------------------------------------------------
+# La anonimizacion CONSERVA el poder del eval como gate de regresion sobre
+# `triar_lookalikes` (que es para lo que existe), pero NO conserva la
+# verificabilidad externa de la evidencia: los registradores RDAP citados abajo
+# ya no se pueden reconsultar contra dominios ficticios. La version con los
+# datos reales y la cadena de evidencia RDAP intacta se conserva FUERA de este
+# repo publico, en `vigia_core_private/eval/baseline_real/`. Quien necesite
+# auditar la medicion original debe mirar alli.
+#
 #
 # WS2 (openspec/changes/fase10-antisuplantacion-lista-demo). Etiqueta cada uno
 # de los 45 dominios lookalike REGISTRADOS que devolvio una corrida real de
-# run_dnstwist('bancolombia.com', registered_only=True) el 2026-07-25 (ver
-# eval/baseline_real/antisup_bancolombia_2026-07-25_snapshot.json), con una de
+# run_dnstwist('bancoejemplo.com', registered_only=True) el 2026-07-25 (ver
+# eval/baseline_real/antisup_bancoejemplo_2026-07-25_snapshot.json), con una de
 # tres clases:
-#   defensivo -- registrado por el propio Bancolombia para protegerse.
+#   defensivo -- registrado por el propio el titular de la marca para protegerse.
 #   tercero   -- registrado por alguien mas, sin correo real detectado.
 #   urgente   -- tercero que ademas tiene un registro MX real (puede enviar
 #                correo que aparente venir del banco).
@@ -22,13 +44,14 @@
 # se verificaron con una senal INDEPENDIENTE que el codigo NO usa: el
 # **registrador (registrar) del dominio via RDAP** (https://rdap.org/domain/<d>,
 # campo entities[].vcardArray con roles: [registrar]), consultado en vivo el
-# 2026-07-26. El dominio legitimo bancolombia.com esta registrado con
-# "CCI REG S.A.". Los 10 dominios que el codigo marca "propio" (comparten NS)
+# 2026-07-26. El dominio legitimo bancoejemplo.com esta registrado con
+# "Registrador-Titular (ficticio)". Los 10 dominios que el codigo marca "propio" (comparten NS)
 # TAMBIEN comparten ese mismo registrador exacto -- senal distinta (RDAP/WHOIS,
 # no DNS) que corrobora la atribucion sin depender de la logica que se mide.
 # Los 7 "urgentes" y una muestra de 6 "terceros" planos se verificaron con la
-# misma via y dieron registradores DISTINTOS (GoDaddy, Key-Systems, Porkbun,
-# Hostinger, NameBright, etc.) -- consistente con ser terceros no relacionados.
+# misma via y dieron registradores DISTINTOS entre si y distintos al del
+# titular (nombres reales omitidos por la anonimizacion) -- consistente con
+# ser terceros no relacionados.
 #
 # Los 22 "tercero" restantes (marcados senal: circular abajo) NO se verificaron
 # uno por uno via RDAP por costo/tiempo de esta corrida -- para ellos la unica
@@ -52,13 +75,13 @@
 # corrida real.
 #
 dominios:
-  - domain: "bancolombias.com"
+  - domain: "bancoejemplo-v01.com"
     etiqueta: tercero
     senal: independiente
     evidencia: >
-      RDAP registrar = "Porkbun LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "bancolombiai.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v02.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -66,13 +89,13 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolombian.com"
+  - domain: "bancoejemplo-v03.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "bancolombiq.com"
+  - domain: "bancoejemplo-v04.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -80,7 +103,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancomombia.com"
+  - domain: "bancoejemplo-v05.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -88,7 +111,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "banc0l0mbia.com"
+  - domain: "bancoejemplo-v06.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -96,31 +119,31 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "barcolombia.com"
+  - domain: "bancoejemplo-v07.com"
     etiqueta: tercero
     senal: independiente
     evidencia: >
-      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "clancolombia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v08.com"
     etiqueta: tercero
     senal: independiente
     evidencia: >
-      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "bamcolombia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v09.com"
     etiqueta: urgente
     senal: independiente
     evidencia: >
-      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "xn--bancolomba-s8a.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v10.com"
     etiqueta: urgente
     senal: independiente
     evidencia: >
-      RDAP registrar = "HOSTINGER operations, UAB", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "bancolommbia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v11.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -128,13 +151,13 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolornbia.com"
+  - domain: "bancoejemplo-v12.com"
     etiqueta: urgente
     senal: independiente
     evidencia: >
-      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "bancolonbia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v13.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -142,37 +165,37 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "banc0lombia.com"
+  - domain: "bancoejemplo-v14.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "banco1ombia.com"
+  - domain: "bancoejemplo-v15.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "bancol0mbia.com"
+  - domain: "bancoejemplo-v16.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "bancolomb1a.com"
+  - domain: "bancoejemplo-v17.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "ban-colombia.com"
+  - domain: "bancoejemplo-v18.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "bancollombia.com"
+  - domain: "bancoejemplo-v19.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -180,7 +203,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancoloimbia.com"
+  - domain: "bancoejemplo-v20.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -188,19 +211,19 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "banxcolombia.com"
+  - domain: "bancoejemplo-v21.com"
     etiqueta: urgente
     senal: independiente
     evidencia: >
-      RDAP registrar = "Porkbun LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "nbancolombia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v22.com"
     etiqueta: tercero
     senal: independiente
     evidencia: >
-      RDAP registrar = "Porkbun LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "vbancolombia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v23.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -208,25 +231,25 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolombnia.com"
+  - domain: "bancoejemplo-v24.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "bancolmbia.com"
+  - domain: "bancoejemplo-v25.com"
     etiqueta: urgente
     senal: independiente
     evidencia: >
-      RDAP registrar = "Key-Systems GmbH", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "bancolomba.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v26.com"
     etiqueta: tercero
     senal: independiente
     evidencia: >
-      RDAP registrar = "TurnCommerce, Inc. DBA NameBright.com", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "bancoombia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v27.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -234,7 +257,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolombi.com"
+  - domain: "bancoejemplo-v28.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -242,7 +265,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bncolombia.com"
+  - domain: "bancoejemplo-v29.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -250,7 +273,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolobia.com"
+  - domain: "bancoejemplo-v30.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -258,7 +281,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bacolombia.com"
+  - domain: "bancoejemplo-v31.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -266,25 +289,25 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "banolombia.com"
+  - domain: "bancoejemplo-v32.com"
     etiqueta: urgente
     senal: independiente
     evidencia: >
-      RDAP registrar = "TurnCommerce, Inc. DBA NameBright.com", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "banscolombia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v33.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "bancolomnia.com"
+  - domain: "bancoejemplo-v34.com"
     etiqueta: urgente
     senal: independiente
     evidencia: >
-      RDAP registrar = "Key-Systems GmbH", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
-  - domain: "vancolombia.com"
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
+  - domain: "bancoejemplo-v35.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -292,7 +315,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancilombia.com"
+  - domain: "bancoejemplo-v36.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -300,7 +323,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolombis.com"
+  - domain: "bancoejemplo-v37.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -308,7 +331,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "banvolombia.com"
+  - domain: "bancoejemplo-v38.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -316,7 +339,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bsncolombia.com"
+  - domain: "bancoejemplo-v39.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -324,7 +347,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolomb.ia.com"
+  - domain: "bancoejemplo-v40.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -332,7 +355,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bancolombai.com"
+  - domain: "bancoejemplo-v41.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -340,7 +363,7 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bnacolombia.com"
+  - domain: "bancoejemplo-v42.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
@@ -348,21 +371,21 @@ dominios:
       excluirlo de "defensivo"); no se verifico registrador via RDAP en
       esta corrida -- no discrimina de forma independiente, documentado
       honestamente como limite de este eval.
-  - domain: "bacnolombia.com"
+  - domain: "bancoejemplo-v43.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "bancolomiba.com"
+  - domain: "bancoejemplo-v44.com"
     etiqueta: defensivo
     senal: independiente
     evidencia: >
-      RDAP registrar = "CCI REG S.A.", identico al de bancolombia.com
+      RDAP registrar = "Registrador-Titular (ficticio)", identico al de bancoejemplo.com
       (mismo registrador real; NO es la senal de NS que usa el codigo).
-  - domain: "boncolombia.com"
+  - domain: "bancoejemplo-v45.com"
     etiqueta: tercero
     senal: independiente
     evidencia: >
-      RDAP registrar = "GoDaddy.com, LLC", DISTINTO al de bancolombia.com
-      ("CCI REG S.A."); confirma que es de un tercero no relacionado.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de bancoejemplo.com
+      ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.

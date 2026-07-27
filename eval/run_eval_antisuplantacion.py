@@ -10,14 +10,22 @@ Analogo a `eval/run_eval.py`, pero en vez de comparar hallazgos de
 vulnerabilidades contra una ground truth de vulnerabilidades, corre el
 pipeline REAL de triaje de dominios lookalike
 (`tools.antisuplantacion.triar_lookalikes`) sobre un snapshot congelado de una
-corrida real de `run_dnstwist('bancolombia.com')`
-(`eval/baseline_real/antisup_bancolombia_2026-07-25_snapshot.json`, ver tarea
+corrida real de `run_dnstwist()`
+(`eval/baseline_real/antisup_bancoejemplo_2026-07-25_snapshot.json`, ver tarea
 2.1) y lo compara contra `eval/ground_truth_antisuplantacion.yaml` (tarea 2.2).
+
+Los dos archivos de datos estan ANONIMIZADOS: la corrida original apuntaba a
+una marca de un tercero que no autorizo publicar esos datos, asi que marca,
+dominios, nameservers, registradores e IPs se sustituyeron por valores
+ficticios preservando la estructura (45 registros, particion 10/28/7, clases
+de equivalencia de NS, presencia de MX). Ver la cabecera de cada archivo; los
+originales viven fuera del repo publico en `vigia_core_private/eval/baseline_real/`.
 
 Por que existe
 ---------------
 `triar_lookalikes` ya esta cableado en el camino de produccion (commit
-`a05b133`) y se midio una vez a mano contra datos reales de bancolombia.com:
+`a05b133`) y se midio una vez a mano contra datos reales de una marca de un tercero
+(no publicada; snapshot original en vigia_core_private/eval/baseline_real/):
 45 lookalikes registrados -> 10 defensivos, 35 terceros, 7 urgentes (ver
 `tools/antisuplantacion.py::triar_lookalikes`, docstring). Sin este harness,
 nada protege esa medicion de una regresion silenciosa -- exactamente el mismo
@@ -349,8 +357,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--snapshot",
-        default=os.path.join(here, "baseline_real", "antisup_bancolombia_2026-07-25_snapshot.json"),
-        help="Ruta al snapshot congelado de run_dnstwist (default: eval/baseline_real/antisup_bancolombia_2026-07-25_snapshot.json)",
+        default=os.path.join(here, "baseline_real", "antisup_bancoejemplo_2026-07-25_snapshot.json"),
+        help="Ruta al snapshot congelado de run_dnstwist (default: eval/baseline_real/antisup_bancoejemplo_2026-07-25_snapshot.json)",
     )
     parser.add_argument(
         "--ground-truth",

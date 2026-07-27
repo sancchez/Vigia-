@@ -11,11 +11,23 @@ Ningún agente commitea ni pushea.
 
 ## WS1 — Seed de watched_brands para demo
 
+> **Corrección posterior (2026-07-26):** 1.1/1.2 se implementaron primero con
+> el dominio de un banco colombiano REAL como default, corriendo dnstwist en
+> vivo en cada seed -- reconocimiento no autorizado contra un tercero. Se
+> revirtió: el seed ahora **reproduce** el snapshot anonimizado de WS2
+> (`eval/baseline_real/antisup_bancoejemplo_2026-07-25_snapshot.json`) sin
+> ninguna llamada de red, y el modo en vivo quedó tras `--live --dominio X`
+> (sin default, solo dominio propio o cliente con autorización firmada). La
+> demo conserva los mismos números (45 lookalikes, 10 defensivos, 28 high, 7
+> critical) y además es determinista: ya no depende de que el DNS responda.
+
 - [ ] 1.1 Script de seed (`scripts/seed_demo_antisuplantacion.py` o similar):
   crear tenant demo + assets dominio verificados + entradas `watched_brands`,
-  con 1-2 dominios públicos. Etiquetar todo como datos de demo.
-- [ ] 1.2 Correr el camino real (`ejecutar_antisuplantacion` / ciclo) contra
-  esas marcas y persistir hallazgos reales.
+  sobre la marca ficticia del snapshot anonimizado. Etiquetar todo como datos
+  de demo.
+- [ ] 1.2 Alimentar el camino real de triaje/persistencia
+  (`triar_lookalikes` + `_extraer_findings_antisuplantacion`) con el snapshot
+  reproducido y persistir los hallazgos.
 - [ ] 1.3 Verificar: `GET /antisuplantacion/dominios` de la cuenta demo
   devuelve hallazgos con defensivos excluidos y urgentes en critical.
 

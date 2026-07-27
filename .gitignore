@@ -63,3 +63,25 @@ Thumbs.db
 # el cliente para revisarlo -- se borra al terminar cada review, pero nunca
 # debe versionarse (es código propietario de terceros, no del proyecto).
 /uploads/
+
+# Salidas CRUDAS de herramientas de reconocimiento (Sherlock, dnstwist,
+# nuclei, amass...) volcadas en la raiz del repo. Son artefactos de recon
+# sobre terceros reales: publicarlos contradice la "Regla de oro" del
+# README y es lo primero que mira un auditor. Solo se ignoran los .txt/.json
+# sueltos EN LA RAIZ -- los de subdirectorios (tools/requirements.txt,
+# eval/*.json, frontend/package.json...) siguen versionandose normalmente.
+/*.txt
+!/requirements.txt
+!/LICENSE.txt
+!/CHANGELOG.txt
+/sherlock_*.txt
+/dnstwist_*.json
+/recon_*.json
+/nuclei_*.json
+
+# Screenshots de dominios lookalike capturados por
+# tools/antisuplantacion.py::capturar_screenshot (VIGIA_SCREENSHOT_DIR,
+# default data/screenshots): son capturas de sitios de terceros, nunca
+# se versionan.
+/data/screenshots/
+data/screenshots/

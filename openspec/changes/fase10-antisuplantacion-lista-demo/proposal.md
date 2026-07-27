@@ -9,7 +9,7 @@
 ## Contexto (medido, no asumido)
 
 `a05b133` dejó el filtro de defensivos cableado en el camino de producción y
-verificado end-to-end (contra `bancolombia.com`: 46 dominios → 0 defensivos
+verificado end-to-end (contra el dominio de una marca bancaria de un tercero (no publicada): 46 dominios → 0 defensivos
 colados, 7 urgentes a critical, 28 terceros high). Lo que falta para demo:
 
 1. **`watched_brands` está vacío** — la capa está encendida pero no vigila
