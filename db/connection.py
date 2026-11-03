@@ -139,6 +139,15 @@ _ASSETS_SCHEDULING_COLUMNS: list[tuple[str, str]] = [
 # existía desde Fase 0). NULLABLE y sin DEFAULT a propósito: una marca vieja
 # sin dominio no se puede "adivinar", queda como no verificada. Ver el
 # comentario largo en db/schema.sql.
+# Columna que registra QUIÉN disparó cada scan (fix H-4). Mismo motivo/patrón
+# que las listas de arriba: `scans` ya existía. NULLABLE y sin FK declarada en
+# el ALTER (SQLite no permite agregar una columna con REFERENCES a una tabla ya
+# creada sin reescribirla; el `CREATE TABLE` de db/schema.sql sí la trae para
+# bases nuevas, y el scoping real por tenant nunca dependió de esta columna).
+_SCANS_USER_COLUMNS: list[tuple[str, str]] = [
+    ("user_id", "TEXT"),
+]
+
 _WATCHED_BRANDS_DOMINIO_COLUMNS: list[tuple[str, str]] = [
     ("dominio_asociado", "TEXT"),
 ]
@@ -264,6 +273,10 @@ def _get_pg_conn(url: str) -> _PgConnection:
                     conn.execute(
                         f"ALTER TABLE watched_brands ADD COLUMN IF NOT EXISTS {column} {coltype}"
                     )
+                for column, coltype in _SCANS_USER_COLUMNS:
+                    conn.execute(
+                        f"ALTER TABLE scans ADD COLUMN IF NOT EXISTS {column} {coltype}"
+                    )
                 conn.commit()
                 _pg_schema_ready.add(url)
     return _PgConnection(conn)
@@ -343,6 +356,19 @@ def _ensure_sqlite_watched_brands_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE watched_brands ADD COLUMN {column} {coltype}")
 
 
+def _ensure_sqlite_scans_user_column(conn: sqlite3.Connection) -> None:
+    """Agrega `scans.user_id` si la tabla es anterior al fix H-4.
+
+    Mismo patrón que `_ensure_sqlite_asset_verification_columns`.
+    """
+    columnas_existentes = {
+        row[1] for row in conn.execute("PRAGMA table_info(scans)").fetchall()
+    }
+    for column, coltype in _SCANS_USER_COLUMNS:
+        if column not in columnas_existentes:
+            conn.execute(f"ALTER TABLE scans ADD COLUMN {column} {coltype}")
+
+
 def get_conn() -> sqlite3.Connection | _PgConnection:
     """Abre una conexión nueva con el schema ya aplicado (idempotente).
 
@@ -368,6 +394,7 @@ def get_conn() -> sqlite3.Connection | _PgConnection:
     _ensure_sqlite_assets_autorizacion_columns(conn)
     _ensure_sqlite_assets_scheduling_columns(conn)
     _ensure_sqlite_watched_brands_columns(conn)
+    _ensure_sqlite_scans_user_column(conn)
     conn.commit()
     return conn
 

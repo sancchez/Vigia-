@@ -63,6 +63,14 @@ def _mockear_ciclo_completo(monkeypatch, *, spider_pcts=(100,), ascan_pcts=(100,
     monkeypatch.setattr(zap_api, "ajax_spider_results_count", lambda *_a: 0)
     monkeypatch.setattr(zap_api, "ajax_spider_stop", lambda *_a: None)
 
+    # H-5: sin este mock la suite se CUELGA. `run_checkpointed_active_scan`
+    # llama `exclude_session_killers_from_scan(base_url)` antes de arrancar el
+    # ascan, y como `start_daemon` está mockeado para devolver
+    # 'http://fake/...', esa función intenta una petición HTTP real contra el
+    # host inexistente 'fake' -- la resolución DNS bloquea el hilo del test sin
+    # timeout. Era la causa raíz del hang de esta suite, no un problema de ZAP.
+    monkeypatch.setattr(zap_api, "exclude_session_killers_from_scan", lambda _b: [])
+
     monkeypatch.setattr(zap_api, "ascan_start", lambda *_a: "ascan-0")
 
     def _ascan_status(*_a):

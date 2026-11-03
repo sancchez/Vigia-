@@ -31,6 +31,11 @@ regla". Si `autorizacion_firmada` no es `True`, el grafo va a
 
 from __future__ import annotations
 
+import logging
+import os
+import sqlite3
+from typing import Any, Optional
+
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -158,6 +163,94 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def compile_graph() -> CompiledStateGraph:
-    """Compila el grafo para ejecución (`.invoke(...)` / `.stream(...)`)."""
-    return build_graph().compile()
+_logger = logging.getLogger("vigia.orchestrator")
+
+# Un saver por `DATABASE_URL` resuelta. La clave es la URL (no un singleton
+# global) a propósito: la suite de tests apunta `DATABASE_URL` a un SQLite
+# temporal distinto por test, y un singleton dejaría el grafo compilado
+# escribiendo checkpoints contra un archivo que ya no existe.
+_saver_cache: dict[str, Any] = {}
+
+_CHECKPOINTER_OFF = {"0", "off", "false", "no"}
+
+
+def _checkpointer_habilitado() -> bool:
+    """Kill-switch de entorno: `VIGIA_CHECKPOINTER=off` vuelve al `.compile()` desnudo."""
+    return os.environ.get("VIGIA_CHECKPOINTER", "on").strip().lower() not in _CHECKPOINTER_OFF
+
+
+def _default_saver() -> Optional[Any]:
+    """Checkpointer por defecto, apuntando a la MISMA base que el resto del proyecto.
+
+    Soporte dual, igual que `db/connection.py`:
+
+    - `sqlite:///...`  -> `SqliteSaver` sobre el mismo archivo `.db`. LangGraph
+      crea sus propias tablas (`checkpoints`, `checkpoint_writes`, ...), que no
+      chocan con `db/schema.sql`.
+    - `postgresql://`  -> `PostgresSaver`, SOLO si `langgraph-checkpoint-postgres`
+      está instalado. No es una dependencia declarada del proyecto hoy, así que
+      si falta se devuelve `None` y el grafo compila sin checkpointer — el
+      comportamiento exacto de antes de esta fase, nunca un crash en arranque.
+
+    Cualquier fallo (import, permisos, disco) degrada a `None` con un warning:
+    el checkpointer es una mejora de resiliencia, jamás un punto de falla nuevo
+    para el pipeline.
+    """
+    if not _checkpointer_habilitado():
+        return None
+
+    url = os.environ.get("DATABASE_URL", "sqlite:///./ciberseguridad.db")
+    if url in _saver_cache:
+        return _saver_cache[url]
+
+    saver: Optional[Any] = None
+    try:
+        if url.startswith("postgresql://") or url.startswith("postgres://"):
+            try:
+                from langgraph.checkpoint.postgres import PostgresSaver  # type: ignore
+            except ImportError:
+                _logger.warning(
+                    "DATABASE_URL es Postgres pero langgraph-checkpoint-postgres no está "
+                    "instalado — el grafo corre SIN checkpointer (comportamiento previo)."
+                )
+            else:
+                import psycopg
+                from psycopg.rows import dict_row
+
+                conn = psycopg.connect(url, autocommit=True, row_factory=dict_row)
+                saver = PostgresSaver(conn)
+                saver.setup()
+        else:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+
+            path = _sqlite_path_from_url(url)
+            # `check_same_thread=False`: FastAPI corre los endpoints sync en un
+            # threadpool y APScheduler en su propio thread; el saver es un
+            # objeto de proceso, compartido entre ambos.
+            conn = sqlite3.connect(path, check_same_thread=False)
+            saver = SqliteSaver(conn)
+            saver.setup()
+    except Exception as exc:  # pragma: no cover - degradación defensiva
+        _logger.warning("No se pudo inicializar el checkpointer (%s); se sigue sin él.", exc)
+        saver = None
+
+    _saver_cache[url] = saver
+    return saver
+
+
+def _sqlite_path_from_url(url: str) -> str:
+    prefix = "sqlite:///"
+    if not url.startswith(prefix):
+        raise ValueError(f"DATABASE_URL no reconocida para el checkpointer: {url!r}")
+    return url[len(prefix):]
+
+
+def compile_graph(checkpointer: Optional[Any] = None) -> CompiledStateGraph:
+    """Compila el grafo para ejecución (`.invoke(...)` / `.stream(...)`).
+
+    Con checkpointer, cada `.invoke()` DEBE recibir
+    `config={"configurable": {"thread_id": scan_id}}` — el `scan_id` ya se
+    genera antes de invocar el grafo tanto en `api/main.py` como en
+    `api/scheduler.py`, así que es el identificador natural del hilo.
+    """
+    return build_graph().compile(checkpointer=checkpointer or _default_saver())

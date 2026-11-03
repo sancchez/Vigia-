@@ -18,15 +18,11 @@ from tools.antisuplantacion import run_dnstwist, run_sherlock, triar_lookalikes
 
 from ._llm import LLMNoDisponibleError, call_claude
 
-SYSTEM_PROMPT = (
-    "Buscas señales de que la marca/dominio del cliente está siendo suplantada: dominios\n"
-    "similares recién registrados (dnstwist + CertStream), perfiles en redes sociales\n"
-    "usando el mismo nombre o logo (Sherlock), URLs ya reportadas como maliciosas\n"
-    "(Safe Browsing). Para cada hallazgo, evalúas qué tan probable es que sea\n"
-    "suplantación real vs. coincidencia (empresa legítima con nombre parecido) y\n"
-    "explicas tu razonamiento. Adjuntas un borrador de solicitud de eliminación\n"
-    "(takedown) listo para enviar a la plataforma correspondiente."
-)
+from .prompts import get_prompt
+
+# Fase 3: fuente unica de prompts. El texto vive en
+# `eval/prompt_versions/v1_anti_suplantacion.md` (ver agents/prompts.py).
+SYSTEM_PROMPT = get_prompt("antisuplantacion")
 
 AGENTE = "antisuplantacion"
 

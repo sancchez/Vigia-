@@ -12,6 +12,8 @@ suite, mismo principio que el resto del proyecto (ver
 from __future__ import annotations
 
 import json
+import threading
+import time
 import uuid
 
 import api.main as main_module
@@ -94,6 +96,34 @@ def _mockear_nodo_y_probes(monkeypatch, *, con_señales: bool = True):
     monkeypatch.setattr(main_module, "capturar_screenshot", lambda _url, _out_dir, timeout=20: None)
 
 
+def correr_antisuplantacion(client, token: str, asset_id: str, *, timeout_s: float = 20.0) -> dict:
+    """Dispara `POST /antisuplantacion` (202) y hace polling del estado hasta
+    que la corrida en background termina, devolviendo el `AntisuplantacionRunOut`
+    final.
+
+    Existe porque desde 2026-08-02 el endpoint es asíncrono (ver el docstring
+    de `api/main.py::ejecutar_antisuplantacion`): el POST ya no trae el
+    resultado, así que todo test que necesite los hallazgos ya persistidos
+    tiene que esperar al thread. Falla ruidosamente si no termina a tiempo --
+    un flujo que se queda en 'corriendo' para siempre es un bug, no un test
+    lento.
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = client.post("/antisuplantacion", headers=headers, json={"asset_id": asset_id})
+    assert resp.status_code == 202, resp.text
+    scan_id = resp.json()["scan_id"]
+
+    limite = time.monotonic() + timeout_s
+    while True:
+        estado_resp = client.get(f"/antisuplantacion/runs/{scan_id}", headers=headers)
+        assert estado_resp.status_code == 200, estado_resp.text
+        data = estado_resp.json()
+        if data["estado"] != "corriendo":
+            return data
+        assert time.monotonic() < limite, f"la corrida {scan_id} nunca salió de 'corriendo'"
+        time.sleep(0.05)
+
+
 # ---------------------------------------------------------------------------
 # POST /antisuplantacion
 # ---------------------------------------------------------------------------
@@ -146,22 +176,32 @@ def test_post_antisuplantacion_crea_findings_con_score_en_raw_json(client, monke
     asset_id = _crear_asset(client, token, "dominio", "midominio-protegido.test")
     _verificar_asset_mock(client, token, asset_id, monkeypatch)
 
-    resp = client.post(
-        "/antisuplantacion",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"asset_id": asset_id},
-    )
+    data = correr_antisuplantacion(client, token, asset_id)
 
-    assert resp.status_code == 200
-    data = resp.json()
+    assert data["estado"] == "completado"
     assert data["scan_id"]
     assert len(data["dominios"]) == 1
     clon = data["dominios"][0]
     assert clon["endpoint"] == "clon-malicioso.test"
     assert clon["score"] == 3
     assert clon["scoring"] == {"dns_a": True, "mx": False, "ssl": True, "http": True}
-    assert clon["takedown"] == "Borrador de takedown de prueba: probable suplantación."
     assert clon["screenshot"] is None
+
+    # El borrador de takedown es DETERMINISTA y por dominio: se genera con
+    # `tools/takedown.py` a partir de los datos reales del hallazgo, sin
+    # depender de ninguna API key de LLM (la suite corre con
+    # `_sin_llm_real_por_defecto`, así que acá NO hay LLM disponible -- que es
+    # exactamente el escenario de un cliente que no configuró una key).
+    # Antes de esta fase el campo era `analisis_claude`, un único texto del
+    # LOTE repetido en cada fila, y `None` cuando no había LLM.
+    takedown = clon["takedown"]
+    assert takedown, "un hallazgo sin borrador de takedown no es accionable para el cliente"
+    assert "clon-malicioso.test" in takedown
+    assert "midominio-protegido.test" in takedown
+    assert "Solicitud de suspensión por suplantación de marca" in takedown
+    # Nada de texto de demo/placeholder en el camino que ve un cliente real.
+    for prohibido in ("demo", "ficticio", "reproducida", "mock"):
+        assert prohibido not in takedown.lower()
 
     # Confirma que el score/scoring de verdad viajó a `findings.raw_json`
     # (spec.md: "El desglose booleano por señal MUST guardarse en

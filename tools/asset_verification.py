@@ -34,7 +34,14 @@ declara explícita en `pyproject.toml` porque este módulo la importa
 directo, no solo a través de ese wrapper), HTTP vía `urllib.request` de la
 librería estándar -- cero dependencias nuevas para ese camino.
 
-## La excepción de localhost / IP privada -- por qué es segura, no un atajo
+## La excepción de localhost / IP privada -- SOLO en un entorno declarado local
+
+**Actualización (fix C-2, SSRF):** todo lo que sigue en esta sección
+describe por qué la exención tiene sentido en un LABORATORIO. Ya no aplica
+por default: requiere `VIGIA_ENTORNO=local` o
+`VIGIA_ALLOW_PRIVATE_TARGETS=true` (ver `tools/entorno.py`), y el rango
+link-local (169.254.0.0/16, metadata service del cloud) está prohibido en
+todo entorno, sin excepción. Ver `es_target_prohibido` más abajo.
 
 Este proyecto se prueba constantemente contra `localhost`, contenedores
 Docker locales (Juice Shop, DVWA) y dominios sintéticos (`miempresatest.com`)
@@ -78,6 +85,8 @@ import secrets
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
+
+from tools.entorno import permitir_targets_privados
 
 DNS_TXT_SUBDOMAIN = "_vigia-challenge"
 WELL_KNOWN_PATH = "/.well-known/vigia-verification.txt"
@@ -125,38 +134,123 @@ def _hostname_de(valor: str) -> str:
     return (urlparse(candidato).hostname or "").strip().lower()
 
 
+def _host_de(tipo: str, valor: str) -> str:
+    """Host literal del asset -- nunca resuelto por DNS (ver docstring del módulo, DNS rebinding)."""
+    valor = (valor or "").strip().lower()
+    if not valor:
+        return ""
+    if tipo == "ip":
+        return valor
+    host = _hostname_de(valor) or valor
+    return host.split(":")[0]  # 'localhost:3000' -> 'localhost'
+
+
+def _ip_o_none(host: str):
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
+
+
+def es_target_prohibido(tipo: str, valor: str) -> tuple[bool, str]:
+    """Targets que NUNCA deben escanearse, ni siquiera con el asset 'verificado'.
+
+    Este es el fix de SSRF (hallazgo C-2). Antes, cualquier IP privada,
+    loopback o link-local quedaba automáticamente EXENTA de verificación de
+    propiedad -- en producción eso significa que un tenant registraba
+    `169.254.169.254` (metadata service de AWS/GCP/Azure, credenciales de
+    instancia incluidas) o `10.0.0.5` (la red interna del proveedor de
+    hosting) como "activo propio" y el motor de escaneo lo alcanzaba desde
+    dentro del perímetro del servidor. La exención era fail-open.
+
+    Reglas, en orden:
+
+    - **Link-local (169.254.0.0/16, fe80::/10) está prohibido SIEMPRE**, en
+      cualquier entorno, sin variable de entorno que lo habilite. Ese rango
+      no tiene ningún uso legítimo como "activo del cliente" y sí es el
+      vector de metadata cloud más explotado. Fail closed sin excepción.
+    - **Privado / loopback está prohibido salvo que el entorno lo declare**
+      (`VIGIA_ENTORNO=local` o `VIGIA_ALLOW_PRIVATE_TARGETS=true`, ver
+      `tools/entorno.py`). Es lo que mantiene vivo el flujo de laboratorio
+      (Juice Shop/DVWA en Docker local) sin que ese mismo permiso viaje al
+      despliegue real por default.
+
+    Devuelve `(prohibido, motivo)`.
+    """
+    host = _host_de(tipo, valor)
+    if not host:
+        return True, "El activo no tiene un host/IP utilizable."
+
+    es_localhost = host == "localhost" or host.endswith(".localhost")
+    ip = _ip_o_none(host)
+
+    if ip is not None and ip.is_link_local:
+        return True, (
+            f"'{valor}' apunta a una dirección link-local ({host}). Ese rango "
+            "(169.254.0.0/16 / fe80::/10) incluye el metadata service de los proveedores "
+            "cloud y nunca se escanea, en ningún entorno."
+        )
+
+    if not permitir_targets_privados():
+        if es_localhost:
+            return True, (
+                f"'{valor}' apunta a localhost. Escanear la propia máquina del servicio solo se "
+                "permite en un entorno declarado como local (VIGIA_ENTORNO=local o "
+                "VIGIA_ALLOW_PRIVATE_TARGETS=true)."
+            )
+        if ip is not None and (ip.is_private or ip.is_loopback or ip.is_reserved):
+            return True, (
+                f"'{valor}' apunta a una IP privada/interna ({host}). En producción no se "
+                "escanea la red interna del propio despliegue; declara el entorno como local "
+                "(VIGIA_ENTORNO=local o VIGIA_ALLOW_PRIVATE_TARGETS=true) si es un laboratorio."
+            )
+
+    return False, ""
+
+
 def es_target_exento_de_verificacion(tipo: str, valor: str) -> bool:
     """True si `valor` no requiere verificación de propiedad -- ver docstring del módulo.
 
     Estrictamente: 'localhost' (o cualquier `*.localhost`, reservado por
     RFC 6761 para el propio host) o una IP que cae en rango
-    privado/loopback/link-local, ya sea declarada directo (`tipo == 'ip'`)
-    o como el host de un dominio/URL declarado (ej. un asset 'app' cuyo
-    valor es 'http://127.0.0.1:3000').
+    privado/loopback, ya sea declarada directo (`tipo == 'ip'`) o como el
+    host de un dominio/URL declarado (ej. un asset 'app' cuyo valor es
+    'http://127.0.0.1:3000').
+
+    **Solo cuando el entorno lo declara explícitamente** (ver
+    `es_target_prohibido` y `tools/entorno.py`). En producción esta función
+    devuelve False para todo target privado -- la exención dejó de ser
+    incondicional.
     """
-    valor = (valor or "").strip().lower()
-    if not valor:
+    if es_target_prohibido(tipo, valor)[0]:
         return False
 
-    if tipo == "ip":
-        host = valor
-    else:
-        host = _hostname_de(valor) or valor
-        host = host.split(":")[0]  # 'localhost:3000' -> 'localhost'
+    host = _host_de(tipo, valor)
+    if not host:
+        return False
+
+    if tipo != "ip":
         if host == "localhost" or host.endswith(".localhost"):
             return True
         if host in DOMINIOS_PUBLICOS_AUTORIZADOS:
             return True
 
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
+    ip = _ip_o_none(host)
+    if ip is None:
         return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local
+    return ip.is_private or ip.is_loopback
 
 
 def asset_autorizado_para_escanear(tipo: str, valor: str, verificado: bool) -> bool:
-    """La pregunta que de verdad importa para gatear un scan: verificado O exento."""
+    """La pregunta que de verdad importa para gatear un scan.
+
+    `(verificado O exento) Y NO prohibido`. El "Y NO prohibido" importa:
+    marcar `verificado=1` a mano en la DB (o un asset verificado cuyo valor
+    se reapunte después a una IP interna) no debe alcanzar para escanear el
+    metadata service del cloud.
+    """
+    if es_target_prohibido(tipo, valor)[0]:
+        return False
     return bool(verificado) or es_target_exento_de_verificacion(tipo, valor)
 
 

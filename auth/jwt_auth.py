@@ -8,6 +8,7 @@ FastAPI async en todo `api/main.py` de una sola vez.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -18,20 +19,59 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from db.connection import get_conn
+from tools.entorno import entorno_es_local
+
+logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
 
 _JWT_ALGO = "HS256"
 _TOKEN_TTL = timedelta(days=7)
 
+_SECRETO_DEV = "dev-only-insecure-secret-configura-JWT_SECRET-en-.env"
+
+_MENSAJE_SIN_SECRETO = (
+    "JWT_SECRET no está configurado y este entorno no está declarado como local. "
+    "Vigia se niega a arrancar firmando tokens de sesión con un secreto público: "
+    "cualquiera que lea el repositorio podría emitirse un token válido de cualquier "
+    "tenant. Configura JWT_SECRET (ej. `python -c \"import secrets;print(secrets.token_urlsafe(48))\"`) "
+    "en el entorno del despliegue, o declara VIGIA_ENTORNO=local si esto es una máquina de desarrollo."
+)
+
 
 def _jwt_secret() -> str:
+    """Secreto de firma. Falla cerrado: sin `JWT_SECRET` solo arranca un entorno local declarado.
+
+    Fix C-3. Antes esta función caía SIEMPRE a un literal hardcodeado y
+    público cuando faltaba la variable -- un despliegue real que la olvidara
+    quedaba con auth completamente falsificable y sin ninguna señal de que
+    algo estuviera mal. Ahora el fallback existe solo bajo
+    `VIGIA_ENTORNO=local` (ver `tools/entorno.py`) y grita en logs cada vez;
+    en cualquier otro entorno es `RuntimeError`, y
+    `verificar_configuracion_jwt()` lo hace explotar al boot (lifespan de
+    `api/main.py`) en vez de en el primer login.
+    """
     secret = os.environ.get("JWT_SECRET")
-    if not secret:
-        # Fallback SOLO para desarrollo local sin .env configurado — nunca usar
-        # este valor en un despliegue real. Configura JWT_SECRET en .env.
-        secret = "dev-only-insecure-secret-configura-JWT_SECRET-en-.env"
-    return secret
+    if secret:
+        return secret
+    if not entorno_es_local():
+        raise RuntimeError(_MENSAJE_SIN_SECRETO)
+    logger.warning(
+        "JWT_SECRET no configurado -- usando el secreto de DESARROLLO, público y conocido. "
+        "Esto solo se permite porque VIGIA_ENTORNO declara un entorno local. NUNCA en un despliegue real."
+    )
+    return _SECRETO_DEV
+
+
+def verificar_configuracion_jwt() -> None:
+    """Chequeo de arranque: revienta el proceso al boot si la config de auth es insegura.
+
+    Se llama desde el `lifespan` de `api/main.py`. Que falle aquí (el
+    proceso no levanta, el deploy se marca como fallido) es infinitamente
+    preferible a que falle en el primer request de un usuario real, o peor,
+    a que no falle nunca y se firme todo con el secreto de dev.
+    """
+    _jwt_secret()
 
 
 def get_password_hash(password: str) -> str:

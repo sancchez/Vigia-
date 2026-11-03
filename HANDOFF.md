@@ -14,6 +14,7 @@ Todo lo de abajo está **probado en vivo**, no solo escrito:
 - Nuclei + ZAP (baseline y activo) funcionando de verdad vía Docker, con los bugs reales que aparecieron ya arreglados (timeouts, volumen no montado, `localhost` vs `host.docker.internal`) — ver `eval/live_run_report.md` para el detalle completo de cada corrida.
 - Escaneo recurrente (`api/scheduler.py`) — cada N horas, recon pasivo sobre todos los dominios activos de todos los tenants.
 - Escaneo activo asíncrono (`POST /scan/activo` + `GET /scans/{id}`) — no bloquea el request, corre en background thread.
+- Protección de marca asíncrona (`POST /antisuplantacion` → 202 + `GET /antisuplantacion/runs/{id}`) — mismo patrón. **La corrida tarda MINUTOS, no segundos**: medido >15 min sobre un dominio con 45 lookalikes registrados (el costo es la verificación de infraestructura y la captura de evidencia de cada dominio sospechoso, detrás de los delays de cortesía de red `VIGIA_SONDEO_*`). Por eso es asíncrona: antes era síncrona y cualquier proxy con timeout normal le devolvía error al cliente aunque el trabajo terminara bien.
 - Repo público en GitHub, historial limpio de datos reales de terceros (se usó `git filter-repo` + force-push).
 
 ## Cómo levantar todo para verlo (puertos poco comunes, no chocan con otros proyectos)

@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from agents._llm import set_llm_context
+from agents.memoria import contexto_historico
 from api.notificaciones import enviar_notificacion
 from db.connection import dict_from_row, get_conn
 from orchestrator.graph import compile_graph
@@ -43,12 +44,18 @@ logger = logging.getLogger("vigia.scheduler")
 
 _scheduler: BackgroundScheduler | None = None
 _compiled_graph = None
+_compiled_graph_db_url = None
 
 
 def _get_graph():
-    global _compiled_graph
-    if _compiled_graph is None:
+    # Mismo criterio que `api/main.py::_get_graph`: el grafo compilado lleva un
+    # checkpointer atado a una `DATABASE_URL` concreta, así que la caché se
+    # invalida si esa URL cambia.
+    global _compiled_graph, _compiled_graph_db_url
+    url_actual = os.environ.get("DATABASE_URL", "sqlite:///./ciberseguridad.db")
+    if _compiled_graph is None or _compiled_graph_db_url != url_actual:
         _compiled_graph = compile_graph()
+        _compiled_graph_db_url = url_actual
     return _compiled_graph
 
 
@@ -90,9 +97,16 @@ def _ejecutar_ciclo_pasivo(grafo, activo, scan_id: str) -> None:
         scope={"dominios": [activo["valor"]], "apps": [], "ips": [], "notas": ""},
         contexto_negocio="",
         antisuplantacion_habilitado=False,
+        # Fase 3: memoria entre corridas. Un scan recurrente es justo donde más
+        # importa — es el que vuelve a ver el mismo hallazgo semana tras semana.
+        contexto_historico=contexto_historico(activo["tenant_id"], activo["valor"]),
     )
     try:
-        estado_final = grafo.invoke(estado_inicial)
+        # `thread_id = scan_id` (ver orchestrator/graph.py::_default_saver):
+        # el scan_id ya viene generado por el caller de este ciclo.
+        estado_final = grafo.invoke(
+            estado_inicial, config={"configurable": {"thread_id": scan_id}}
+        )
     except Exception:
         logger.exception("Ciclo de escaneo recurrente (pasivo) falló para activo %s", activo["valor"])
         return
@@ -102,10 +116,15 @@ def _ejecutar_ciclo_pasivo(grafo, activo, scan_id: str) -> None:
     try:
         conn.execute(
             """
+            -- `user_id` explícitamente NULL (fix H-4): este scan lo dispara el
+            -- scheduler, no una persona. Dejarlo NULL es el dato honesto -- la
+            -- trazabilidad de "quién autorizó" para el camino recurrente vive
+            -- en `assets.autorizado_por`/`autorizacion_doc_url`, escritas por
+            -- `POST /assets/{id}/autorizacion-activa`.
             INSERT INTO scans
-                (id, tenant_id, asset_id, target, autorizacion_firmada, estado,
+                (id, tenant_id, asset_id, user_id, target, autorizacion_firmada, estado,
                  reporte_final, trace_log_json, completed_at)
-            VALUES (?, ?, ?, ?, 0, 'completado', ?, ?, ?)
+            VALUES (?, ?, ?, NULL, ?, 0, 'completado', ?, ?, ?)
             """,
             (
                 scan_id,
@@ -142,8 +161,10 @@ def _ejecutar_ciclo_activo(activo, scan_id: str) -> None:
     try:
         conn.execute(
             """
-            INSERT INTO scans (id, tenant_id, asset_id, target, autorizacion_firmada, estado, trace_log_json)
-            VALUES (?, ?, ?, ?, 1, 'corriendo', '[]')
+            -- `user_id` NULL: disparado por el scheduler. Ver el comentario en
+            -- `_ejecutar_ciclo_pasivo`.
+            INSERT INTO scans (id, tenant_id, asset_id, user_id, target, autorizacion_firmada, estado, trace_log_json)
+            VALUES (?, ?, ?, NULL, ?, 1, 'corriendo', '[]')
             """,
             (scan_id, activo["tenant_id"], activo["id"], target_url),
         )
@@ -242,6 +263,263 @@ def run_scan_cycle_once() -> int:
         len(activos),
     )
     return procesados
+
+
+def _objetivos_de_marca() -> list[dict]:
+    """Targets de vigilancia de marca: dominios verificados + marcas ancladas a uno.
+
+    Dos fuentes, mismo gate legal que ya aplica el resto del sistema:
+
+    1. `assets` tipo `dominio`, activos, que pasan
+       `asset_autorizado_para_escanear` (verificados o exentos). Un dominio
+       registrado pero no verificado NO se vigila -- si no, bastaría con
+       escribir el dominio de un tercero para que Vigia hiciera
+       reconocimiento recurrente sobre su marca en nombre de quien lo cargó.
+    2. `watched_brands` activas CON `dominio_asociado` no vacío, es decir
+       ancladas a un dominio-activo ya verificado del tenant (el gate que
+       aplica `api/main.py::_dominio_verificado_para_marca` al registrarlas).
+       Mismo criterio exacto que `api/certstream_listener.py::_build_variant_map`,
+       a propósito: las dos vías de vigilancia continua tienen que vigilar el
+       mismo universo, o el cliente vería hallazgos distintos según qué
+       infraestructura tenga levantada.
+
+    Las marcas heredan `asset_id = None` (no hay un activo detrás; la columna
+    es nullable en `scans`).
+    """
+    conn = get_conn()
+    try:
+        activos = conn.execute(
+            "SELECT id, tenant_id, tipo, valor, verificado, scan_paused "
+            "FROM assets WHERE tipo = 'dominio' AND is_active = 1"
+        ).fetchall()
+        marcas = conn.execute(
+            """
+            SELECT tenant_id, marca FROM watched_brands
+            WHERE is_active = 1
+              AND dominio_asociado IS NOT NULL
+              AND TRIM(dominio_asociado) <> ''
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    objetivos: list[dict] = []
+    vistos: set[tuple[str, str]] = set()
+    for fila in activos:
+        activo = dict_from_row(fila)
+        if activo["scan_paused"]:
+            continue
+        if not asset_autorizado_para_escanear("dominio", activo["valor"], bool(activo["verificado"])):
+            continue
+        clave = (activo["tenant_id"], (activo["valor"] or "").strip().lower())
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        objetivos.append(
+            {"tenant_id": activo["tenant_id"], "asset_id": activo["id"], "target": activo["valor"]}
+        )
+
+    for fila in marcas:
+        marca = dict_from_row(fila)
+        # Misma normalización marca->dominio que usa el listener de CertStream
+        # (`_normalizar_marca_a_dominio`), importada de allí para que no haya
+        # dos definiciones del mismo criterio que puedan divergir.
+        from api.certstream_listener import _normalizar_marca_a_dominio
+
+        target = _normalizar_marca_a_dominio(marca["marca"])
+        clave = (marca["tenant_id"], target)
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        objetivos.append({"tenant_id": marca["tenant_id"], "asset_id": None, "target": target})
+
+    return objetivos
+
+
+def _marca_due(conn, tenant_id: str, target: str, horas: float) -> bool:
+    """¿Pasaron `horas` desde el último barrido de marca de este target?
+
+    Se mide sobre las filas `scans` que este mismo ciclo escribe
+    (`reporte_final` con el prefijo conocido), no sobre `findings`: si el
+    barrido anterior no encontró nada, igual corrió, y volver a correrlo cada
+    tick sería sondear infraestructura de terceros más seguido de lo que el
+    cliente pidió.
+    """
+    row = conn.execute(
+        """
+        SELECT MAX(created_at) AS ultimo FROM scans
+        WHERE tenant_id = ? AND target = ? AND reporte_final LIKE ?
+        """,
+        (tenant_id, target, f"{_PREFIJO_REPORTE_BARRIDO}%"),
+    ).fetchone()
+    ultimo = row["ultimo"] if row else None
+    if not ultimo:
+        return True
+    try:
+        ultimo_dt = datetime.strptime(str(ultimo)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - ultimo_dt).total_seconds() / 3600 >= horas
+
+
+_PREFIJO_REPORTE_BARRIDO = "Barrido programado de marca"
+
+
+def run_brand_cycle_once() -> int:
+    """Barrido PROGRAMADO de suplantación de marca sobre todos los tenants.
+
+    Por qué existe (el agujero que cierra)
+    --------------------------------------
+    Hasta esta función, "vigilancia continua de marca" era una promesa que el
+    sistema NO cumplía por ninguna vía:
+
+    * `run_scan_cycle_once` (el ciclo recurrente que sí existía) construye su
+      estado con `antisuplantacion_habilitado=False` -- literal, ver
+      `_ejecutar_ciclo_pasivo`. El barrido recurrente NUNCA miraba dominios
+      clon.
+    * `api/certstream_listener.py` sí vigila en vivo, pero apuntaba por
+      default a `wss://certstream.calidog.io`, un feed descontinuado que
+      acepta el handshake y no transmite nada. Sin levantar el feed
+      self-hosted (`deploy/certstream/docker-compose.yml`), el listener
+      arrancaba "sano" y se quedaba mudo para siempre.
+
+    Resultado: la única forma real de detectar un dominio clon era que una
+    persona apretara el botón "Proteger marca" (`POST /antisuplantacion`).
+    Eso es una herramienta bajo demanda, no vigilancia -- y el producto la
+    vendía como vigilancia.
+
+    Esta función es la vía que funciona SIN infraestructura extra: corre el
+    mismo `agents/antisuplantacion.py::node()` que el botón, sobre cada
+    objetivo de `_objetivos_de_marca()`, cada `VIGIA_BRAND_CYCLE_HOURS`
+    (default 24), y persiste los hallazgos por el mismo camino que
+    `POST /antisuplantacion` (`_extraer_findings_antisuplantacion` +
+    `_registrar_findings_con_ciclo_de_vida`), de modo que un clon detectado
+    de fondo entra al ciclo de vida, hereda SLA, dispara notificación y
+    aparece en el panel exactamente igual que uno detectado a mano.
+
+    Latencia honesta: horas (el intervalo), no minutos. CertStream sigue
+    siendo la vía de baja latencia cuando su feed está levantado; las dos
+    conviven porque la deduplicación de `_registrar_findings_con_ciclo_de_vida`
+    ya evita que el mismo dominio se cuente dos veces.
+
+    Cortesía de red: no se toca `VIGIA_SONDEO_DELAY_*` -- el sondeo real lo
+    hace `tools/antisuplantacion.py` con los defaults conservadores ya
+    configurados. Este ciclo solo decide CUÁNDO correr, no qué tan agresivo
+    es el sondeo.
+
+    Nunca lanza: un objetivo que falla se registra y el ciclo sigue con el
+    resto (mismo criterio que `run_scan_cycle_once`). Devuelve cuántos
+    objetivos se barrieron de verdad.
+    """
+    if os.environ.get("VIGIA_BRAND_CYCLE_ENABLED", "true").strip().lower() in ("0", "false", "no"):
+        logger.info("Barrido programado de marca deshabilitado por VIGIA_BRAND_CYCLE_ENABLED")
+        return 0
+
+    try:
+        horas = float(os.environ.get("VIGIA_BRAND_CYCLE_HOURS", "24"))
+    except ValueError:
+        horas = 24.0
+
+    # Import diferido: `api/main.py` importa este módulo en su lifespan, así
+    # que un import a nivel de módulo sería circular. Mismo patrón de
+    # reutilización deliberada -- estas tres funciones son el camino de
+    # persistencia YA probado de `POST /antisuplantacion`; reimplementarlas
+    # acá crearía una segunda verdad sobre cómo se guarda un hallazgo de marca.
+    from api.main import (
+        VIGIA_SCREENSHOT_DIR,
+        _enriquecer_dominios_clon,
+        _extraer_findings_antisuplantacion,
+        _registrar_findings_con_ciclo_de_vida,
+    )
+    from agents.antisuplantacion import node as antisuplantacion_node
+
+    objetivos = _objetivos_de_marca()
+    barridos = 0
+    for objetivo in objetivos:
+        tenant_id = objetivo["tenant_id"]
+        target = objetivo["target"]
+
+        conn = get_conn()
+        try:
+            due = _marca_due(conn, tenant_id, target, horas)
+        finally:
+            conn.close()
+        if not due:
+            logger.info("Marca %s omitida del barrido -- aún no cumple su frecuencia (%.1fh)", target, horas)
+            continue
+
+        scan_id = str(uuid.uuid4())
+        set_llm_context(tenant_id, scan_id)
+        try:
+            resultado = antisuplantacion_node(
+                new_state(target=target, antisuplantacion_habilitado=True)
+            )
+            señales = resultado.get("antisuplantacion_findings") or []
+            _enriquecer_dominios_clon(señales, VIGIA_SCREENSHOT_DIR, target)
+            filas = _extraer_findings_antisuplantacion(target, señales)
+        except Exception:  # noqa: BLE001 -- un objetivo roto no puede tumbar el ciclo
+            logger.exception("Barrido programado de marca falló para %s", target)
+            continue
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_conn()
+        try:
+            conn.execute(
+                """
+                -- `autorizacion_firmada = 0`: este barrido NO ejecuta escaneo
+                -- activo contra nadie, solo consulta DNS/RDAP y sondea de forma
+                -- pasiva. `user_id` NULL por la misma razón que el resto de los
+                -- jobs del scheduler: lo dispara el sistema, no una persona.
+                INSERT INTO scans
+                    (id, tenant_id, asset_id, user_id, target, autorizacion_firmada, estado,
+                     reporte_final, trace_log_json, completed_at)
+                VALUES (?, ?, ?, NULL, ?, 0, 'completado', ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    tenant_id,
+                    objetivo["asset_id"],
+                    target,
+                    f"{_PREFIJO_REPORTE_BARRIDO}: {len(filas)} hallazgo(s) de suplantación sobre {target}",
+                    json.dumps(resultado.get("trace_log") or [], default=str),
+                    now,
+                ),
+            )
+            hallazgos_normalizados = [
+                {
+                    "tipo": fila["tipo"],
+                    "severidad": fila["severidad"],
+                    "endpoint": fila["endpoint"],
+                    "confirmado": False,
+                    "raw_json": json.dumps(fila["raw_json"], default=str),
+                }
+                for fila in filas
+            ]
+            _registrar_findings_con_ciclo_de_vida(
+                conn, tenant_id, scan_id, objetivo["asset_id"], hallazgos_normalizados, now
+            )
+            conn.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("No se pudo persistir el barrido de marca de %s", target)
+            continue
+        finally:
+            conn.close()
+
+        barridos += 1
+        logger.info(
+            "Barrido programado de marca: %s -> %d hallazgo(s) (tenant=%s scan_id=%s)",
+            target,
+            len(filas),
+            tenant_id,
+            scan_id,
+        )
+
+    logger.info(
+        "Barrido programado de marca completado: %d/%d objetivo(s) barridos",
+        barridos,
+        len(objetivos),
+    )
+    return barridos
 
 
 _ESTADOS_TERMINALES_SLA = ("cerrado", "verificado", "aceptado_riesgo")
@@ -433,13 +711,29 @@ def start_scheduler() -> BackgroundScheduler:
         replace_existing=True,
     )
 
+    # Vigilancia continua de MARCA (ver `run_brand_cycle_once`): el ciclo de
+    # recon de arriba corre con `antisuplantacion_habilitado=False`, así que
+    # sin este job nadie vuelve a mirar los dominios clon salvo que una
+    # persona apriete el botón. Intervalo propio y largo por default (24h):
+    # cada corrida sondea infraestructura de terceros, y la cortesía de red
+    # importa tanto como la frescura.
+    brand_interval_hours = float(os.environ.get("VIGIA_BRAND_CYCLE_HOURS", "24"))
+    _scheduler.add_job(
+        run_brand_cycle_once,
+        "interval",
+        hours=brand_interval_hours,
+        id="vigia_barrido_marca",
+        replace_existing=True,
+    )
+
     _scheduler.start()
     logger.info(
         "Scheduler iniciado -- recon recurrente cada %.1fh, escalamiento de SLA cada %.1fh, "
-        "purga de screenshots cada %.1fh",
+        "purga de screenshots cada %.1fh, barrido de marca cada %.1fh",
         interval_hours,
         sla_interval_hours,
         purga_interval_hours,
+        brand_interval_hours,
     )
     return _scheduler
 

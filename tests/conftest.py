@@ -47,6 +47,15 @@ import pytest
 #   deliberadamente lenta; la suite no toca red real (todo mockeado), así que
 #   pagar esos segundos por test solo alargaría la corrida. El cálculo de la
 #   espera tiene su propio test dedicado, que sí setea delays reales.
+# - `VIGIA_ENTORNO=local`: la suite ES un entorno de laboratorio, y lo declara
+#   explícitamente en vez de depender de que el código sea permisivo por
+#   default (fix C-2/C-3: sin esta variable, `tools/asset_verification.py` deja
+#   de eximir localhost/IPs privadas y `auth/jwt_auth.py` exige `JWT_SECRET`
+#   real -- que es exactamente el comportamiento que queremos en producción).
+#   Los tests que verifican el comportamiento PRODUCTIVO lo hacen con
+#   `monkeypatch.delenv("VIGIA_ENTORNO")` explícito, ver
+#   tests/test_ssrf_targets_privados.py.
+os.environ.setdefault("VIGIA_ENTORNO", "local")
 os.environ.setdefault("VIGIA_RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("VIGIA_SONDEO_DELAY_SEGUNDOS", "0")
 os.environ.setdefault("VIGIA_SONDEO_DELAY_MISMO_HOST", "0")
@@ -99,6 +108,25 @@ def _sin_llm_real_por_defecto(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("VIGIA_LLM_PROVIDER", raising=False)
     monkeypatch.setattr("agents._llm.shutil.which", lambda _name: None)
+
+
+@pytest.fixture(autouse=True)
+def _sin_rdap_real_por_defecto(monkeypatch):
+    """Autouse: ningún test consulta el servicio RDAP público por accidente.
+
+    `tools.takedown.consultar_rdap` es best-effort y ya degrada a `{}` ante
+    cualquier fallo, así que un test que la alcanzara "pasaría" igual -- pero
+    habiendo hecho una petición HTTP real a rdap.org por cada dominio clon de
+    cada fixture, lo que vuelve la suite lenta y dependiente de la red. Mismo
+    principio que `_sin_llm_real_por_defecto`: el camino sin enriquecimiento
+    externo es el que se ejercita por defecto, y un test que quiera datos de
+    RDAP los inyecta explícitamente.
+
+    Se parchea el símbolo importado en `api.main` además del de origen, porque
+    `api/main.py` lo importa con `from tools.takedown import consultar_rdap`.
+    """
+    monkeypatch.setattr("tools.takedown.consultar_rdap", lambda *_a, **_k: {})
+    monkeypatch.setattr("api.main.consultar_rdap", lambda *_a, **_k: {})
 
 
 @pytest.fixture()

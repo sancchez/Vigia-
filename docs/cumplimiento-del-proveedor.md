@@ -325,12 +325,15 @@ La entrada en vigor plena de la Ley 2573 está prevista hacia noviembre de 2026.
 *Cierre:* revisión trimestral con responsable nombrado y registro de versiones;
 la primera, antes de esa fecha.
 
-**B12 — `JWT_SECRET` tiene fallback inseguro de desarrollo.**
-`auth/jwt_auth.py:28-34` cae a un secreto embebido si la variable de entorno no
-está configurada. Está documentado como "solo desarrollo", pero un despliegue
-mal configurado arranca igual, en silencio.
-*Cierre:* fallar el arranque si `JWT_SECRET` no está definido y el entorno no es
-de desarrollo explícito.
+**B12 — `JWT_SECRET` tenía fallback inseguro de desarrollo. CERRADA.**
+`auth/jwt_auth.py` caía a un secreto embebido si la variable de entorno no
+estaba configurada. Estaba documentado como "solo desarrollo", pero un
+despliegue mal configurado arrancaba igual, en silencio.
+*Cierre implementado:* `_jwt_secret()` lanza `RuntimeError` si `JWT_SECRET` no
+está definido y `VIGIA_ENTORNO` no declara un entorno local, y
+`verificar_configuracion_jwt()` se ejecuta en el `lifespan` de `api/main.py`,
+así que el proceso no levanta. En entorno local declarado sí usa el secreto de
+dev, con un warning en cada llamada.
 
 ### 3.4 Lo que este dossier NO cubre
 

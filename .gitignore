@@ -33,6 +33,16 @@ htmlcov/
 *.sqlite3
 *.db
 *.db.bak-*
+# Archivos auxiliares de SQLite en modo WAL. `*.db` NO los cubre (el nombre
+# real es `ciberseguridad.db-wal`, con guion, no `.db`), así que hasta ahora
+# aparecían como untracked y un `git add -A` los habría comiteado. El WAL
+# contiene páginas vivas de la base -- incluidos hallazgos de reconocimiento
+# sobre dominios de TERCEROS -- y este repo es público: es exactamente el tipo
+# de fuga que el commit 56099d4 ya tuvo que limpiar una vez.
+*.db-wal
+*.db-shm
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Logs
 *.log

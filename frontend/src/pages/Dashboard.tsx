@@ -152,6 +152,11 @@ export default function Dashboard() {
   // tras una corrida nueva (mismo patrón que `onChanged` de RemediationBoard,
   // pero como prop simple en vez de callback porque el panel se auto-alimenta).
   const [protegiendoMarca, setProtegiendoMarca] = useState<string | null>(null);
+  // Checkpoint en vivo de la corrida de marca en background (viene de
+  // `AntisuplantacionRunOut.progreso`). Separado de `progreso` (escaneo
+  // activo ZAP) a propósito: los dos flujos pueden estar corriendo sobre
+  // activos distintos al mismo tiempo y no deben pisarse el texto.
+  const [progresoMarca, setProgresoMarca] = useState<string | null>(null);
   const [refrescarProteccion, setRefrescarProteccion] = useState(0);
   // Fase 6a (openspec/changes/fase6-endurecimiento-produccion): programación
   // de escaneo por activo (frecuencia/pausa) y widget de costo de LLM.
@@ -287,24 +292,42 @@ export default function Dashboard() {
     }
   };
 
-  // Fase 3a: dispara SOLO la rama anti-suplantación sobre un asset dominio
-  // ya verificado (o exento) -- síncrono (segundos, no los minutos de un
-  // escaneo activo ZAP), así que no hace falta el patrón de polling de
-  // `correrScan` de arriba.
+  // Dispara SOLO la rama anti-suplantación sobre un asset dominio ya
+  // verificado (o exento). ASÍNCRONO: el POST devuelve 202 + `scan_id` en
+  // segundos y el trabajo real (dnstwist + verificación de infraestructura +
+  // captura de evidencia de cada lookalike) sigue corriendo en el backend
+  // durante MINUTOS -- medido: >15 min sobre un dominio con 45 variantes
+  // registradas. Se hace polling cada 5s del estado, exactamente el mismo
+  // patrón que `correrScan` de arriba (que consulta cada 3s; acá 5s porque
+  // la corrida es más larga y el checkpoint cambia por dominio, no por %).
   const protegerMarca = async (asset: Asset) => {
     setProtegiendoMarca(asset.valor);
     setMensaje(null);
+    setProgresoMarca("Iniciando búsqueda de suplantaciones…");
     try {
-      const resultado = await api.runAntisuplantacion(asset.id);
-      setMensaje(
-        `${asset.valor}: protección de marca ejecutada — ${resultado.dominios.length} dominio(s) clon y ` +
-          `${resultado.perfiles.length} perfil(es) detectados.`
-      );
+      const { scan_id } = await api.runAntisuplantacion(asset.id);
+      let corrida = await api.getAntisuplantacionRun(scan_id);
+      while (corrida.estado === "corriendo") {
+        setProgresoMarca(corrida.progreso ?? "Buscando suplantaciones…");
+        await new Promise((r) => setTimeout(r, 5000));
+        corrida = await api.getAntisuplantacionRun(scan_id);
+      }
+      if (corrida.estado === "completado") {
+        setMensaje(
+          `${asset.valor}: protección de marca completada — ${corrida.dominios.length} dominio(s) clon y ` +
+            `${corrida.perfiles.length} perfil(es) detectados.`
+        );
+      } else {
+        setMensaje(
+          `${asset.valor}: la protección de marca terminó con estado "${corrida.estado}". ${corrida.progreso ?? ""}`.trim()
+        );
+      }
       setRefrescarProteccion((n) => n + 1);
     } catch (err) {
       setMensaje(err instanceof ApiError ? err.message : "No se pudo ejecutar la protección de marca.");
     } finally {
       setProtegiendoMarca(null);
+      setProgresoMarca(null);
     }
   };
 
@@ -312,6 +335,17 @@ export default function Dashboard() {
     if (!progreso) return null;
     const m = progreso.match(/(\d+)%/);
     return m ? Math.min(100, Number(m[1])) : null;
+  })();
+
+  // El checkpoint de marca no trae un porcentaje sino "N de M (dominio)" --
+  // el backend cuenta dominios enriquecidos, no fracción de trabajo. Se
+  // convierte acá para poder mover la barra de verdad en vez de dejarla
+  // pulsando indefinidamente durante 15 minutos.
+  const progresoMarcaPct = (() => {
+    if (!progresoMarca) return null;
+    const m = progresoMarca.match(/(\d+) de (\d+)/);
+    if (!m || Number(m[2]) === 0) return null;
+    return Math.min(100, Math.round((Number(m[1]) / Number(m[2])) * 100));
   })();
 
   const descargarCumplimiento = async (formato: "pdf" | "docx") => {
@@ -633,6 +667,35 @@ export default function Dashboard() {
                           }}
                         >
                           {progreso ?? "Escaneando…"}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Corrida de protección de marca en background. No es un
+                        spinner mudo a propósito: tarda MINUTOS (medido >15 min
+                        sobre un dominio con 45 variantes registradas) y sin
+                        decirlo el usuario asume que se colgó y recarga. */}
+                    {protegiendoMarca === a.valor && (
+                      <div style={{ marginTop: 10 }}>
+                        <div style={{ height: 8, borderRadius: 999, background: "var(--bg-sunken)", overflow: "hidden" }}>
+                          <div
+                            style={{
+                              height: "100%",
+                              width: progresoMarcaPct !== null ? `${progresoMarcaPct}%` : "40%",
+                              background: "var(--accent)",
+                              borderRadius: 999,
+                              transition: "width 0.4s ease",
+                              animation: progresoMarcaPct === null ? "vigia-pulse 1.2s ease-in-out infinite" : undefined,
+                            }}
+                          />
+                        </div>
+                        <p style={{ marginTop: 6, fontSize: 12.5, fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
+                          {progresoMarca ?? "Buscando suplantaciones…"}
+                        </p>
+                        <p style={{ marginTop: 2, fontSize: 12, color: "var(--text-muted)" }}>
+                          Corre en el servidor y puede tardar varios minutos: se verifica infraestructura y se captura
+                          evidencia de cada dominio sospechoso, con pausas deliberadas entre consultas. Podés seguir
+                          usando el panel; los hallazgos quedan guardados aunque cierres esta pestaña.
                         </p>
                       </div>
                     )}

@@ -191,6 +191,17 @@ Esta sesión combinó ambos en **un solo contenedor deployable**:
   como dependencia (no se hizo en esta sesión — fuera del alcance de las 5
   tareas de esta corrida, que eran empaquetado/hosting, no cerrar gaps de
   dependencias de un feature ya implementado).
+- **Timeouts del proxy y trabajos largos.** Los dos trabajos pesados del
+  producto NO bloquean el request: `POST /scan/activo` (ZAP, 30-90 min) y
+  `POST /antisuplantacion` (protección de marca, **minutos** — medido >15 min
+  sobre un dominio con 45 lookalikes registrados) responden **202 con un
+  `scan_id`** y corren en un thread de fondo; el avance se consulta con
+  `GET /scans/{id}` y `GET /antisuplantacion/runs/{id}` respectivamente. Esto
+  importa para el despliegue: el timeout típico de un reverse proxy gestionado
+  (30-100s en Render/Railway/nginx por default) es MUY inferior a la duración
+  real de esos trabajos, así que ninguno puede depender de mantener la
+  conexión HTTP abierta. Nada que configurar en el proxy — pero sí hay que
+  saberlo antes de "arreglar" un supuesto cuelgue subiendo el timeout.
 - Nada de esto se probó desplegado de verdad en Railway o Render — solo
   local, en Docker real. La primera vez que corra contra la infraestructura
   real de cualquiera de las dos plataformas puede sacar a la luz algo que
@@ -208,7 +219,9 @@ esta sesión; esta tabla es la referencia real hasta que alguien lo actualice).
 
 | Variable | Dónde se usa | Obligatoria en producción | Notas |
 |---|---|---|---|
-| `JWT_SECRET` | `auth/jwt_auth.py` | **Sí** | Sin ella cae a un secreto de desarrollo hardcodeado — inaceptable para un cliente real. Generar con `py -c "import secrets; print(secrets.token_hex(32))"`. |
+| `JWT_SECRET` | `auth/jwt_auth.py` | **Sí — la app no arranca sin ella** | Desde el fix C-3, si falta y `VIGIA_ENTORNO` no declara un entorno local, el `lifespan` lanza `RuntimeError` y el proceso muere al boot (antes caía en silencio a un secreto hardcodeado y público). Generar con `py -c "import secrets; print(secrets.token_hex(32))"`. |
+| `VIGIA_ENTORNO` | `tools/entorno.py` | No — **dejar sin setear en producción** | `local`/`dev` habilita dos comportamientos de laboratorio: secreto JWT de desarrollo si falta `JWT_SECRET`, y exención de verificación de propiedad para `localhost`/IPs privadas. Setearla en un despliegue real reabre ambos agujeros. El rango link-local (metadata service cloud) queda prohibido en todo caso. |
+| `VIGIA_ALLOW_PRIVATE_TARGETS` | `tools/entorno.py` | No | Habilita SOLO la exención de targets privados sin tocar la exigencia de `JWT_SECRET` — pensado para un runner de CI que escanea contenedores locales. |
 | `DATABASE_URL` | `db/connection.py` | Recomendada | `sqlite:///./ciberseguridad.db` (default) o `postgresql://usuario:pass@host:puerto/db`. Ver sección de cada plataforma para las implicancias reales de dejarlo en SQLite. |
 | `ANTHROPIC_API_KEY` | `agents/_llm.py` | **Sí (o `OPENAI_API_KEY`), antes del primer cliente de pago** | Sin ella, `agents/_llm.py` cae al fallback `claude -p` (CLI) — no apto para carga concurrente real (ver Item 1 de `HANDOFF.md`), y **no disponible en absoluto dentro del contenedor desplegado** (requiere la CLI de Claude Code instalada y autenticada, que este `Dockerfile` no instala a propósito — ver Corrida 19 de `eval/live_run_report.md`: la CLI solo funciona en una máquina con Claude Code instalado y con sesión iniciada, nunca en Railway/Render). Para producción real hace falta esta key **o** `OPENAI_API_KEY` — ver las tres filas siguientes. **Fase 6a**: el fallback CLI tampoco expone conteo de tokens — `GET /costos` sí registra esas llamadas (para no subestimar cuántas hubo) pero con `costo_estimado=null`, nunca un número inventado; solo las llamadas reales a la API de Anthropic/OpenAI aportan a un costo medible. |
 | `VIGIA_CLAUDE_CLI_TIMEOUT` | `agents/_llm.py` | No | Solo aplica al fallback de CLI de arriba — irrelevante si `ANTHROPIC_API_KEY` está configurada. Default 300 (segundos). |
@@ -346,13 +359,26 @@ muerto (Corrida 13), así que hace falta:
    `ws://` (o `wss://` si el host da TLS) de ese servicio recién desplegado
    — mismo patrón que se probó local (`ws://localhost:48182` apuntando al
    contenedor de prueba de esa corrida).
-3. **Agregar la dependencia Python `certstream`** a `pyproject.toml` (no
-   incluida hoy — ver la sección "Lo que esto NO resuelve todavía" arriba).
-   Sin ella, el listener se deshabilita solo con un log claro, no crashea,
-   pero tampoco hace nada.
-4. Sin estos 3 pasos, Item 5 sigue siendo "mecanismo verificado, no
-   funcionalidad activa" en el deploy real — igual que ya lo documentaba
-   `docs/produccion-readiness.md` sección 6 antes de esta sesión.
+3. **Instalar el extra `vigilancia`** (`pip install -e '.[vigilancia]'`), que
+   trae la dependencia Python `certstream`. **Actualizado 2026-08-01:** ya
+   está declarada en `pyproject.toml` como extra opcional — antes no estaba
+   en ninguna parte y era una dependencia fantasma. Sigue siendo opcional a
+   propósito: sin ella el listener se deshabilita solo con un log claro, no
+   crashea.
+4. Sin estos 3 pasos no hay vigilancia **en vivo** — pero eso ya **no**
+   significa quedarse sin vigilancia continua: desde 2026-08-01,
+   `api/scheduler.py::run_brand_cycle_once()` hace barridos programados de
+   marca cada `VIGIA_BRAND_CYCLE_HOURS` (default 24h) sin depender de este
+   contenedor. La diferencia es la latencia de detección: **minutos**
+   (CertStream) vs. **horas** (barrido). Elegí cuál vendés, pero no prometas
+   la primera si solo desplegaste la segunda.
+
+**Estado de validación (2026-08-01):** el compose de
+`deploy/certstream/docker-compose.yml` se levantó de verdad y se verificó la
+cadena completa — el servidor procesa logs CT reales, el websocket emite el
+shape que Vigia parsea, el cliente Python lo consume, y el listener escribió
+un finding `dominio_variante_certstream` real. Ver la tabla de evidencia en
+`deploy/certstream/README.md`. Ya no es "mecanismo verificado en teoría".
 
 ## Lo que Claude NO puede hacer por ti
 

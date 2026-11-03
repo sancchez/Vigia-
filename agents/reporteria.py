@@ -16,23 +16,21 @@ from __future__ import annotations
 import json
 
 from orchestrator.state import PipelineState, make_trace_event
+from tools.reporte_determinista import construir_reporte_determinista
 
 from ._llm import LLMNoDisponibleError, call_claude
 
 # Open-core: el prompt real (plantilla editorial de Vigia) vive en
 # `vigia_core_private` (ver docs/open-core.md). Fallback genérico si el
 # paquete no está instalado.
+# Fase 3: el override privado NO cambió; el texto del fallback público ahora
+# sale de `eval/prompt_versions/v2_reporteria.md` (ver agents/prompts.py).
 try:
     from vigia_core_private.reporteria import SYSTEM_PROMPT
 except ImportError:
-    SYSTEM_PROMPT = (
-        "Compilas todo el flujo (recon, hallazgos verificados, prioridad, "
-        "remediación) en un reporte único, claro, sin tecnicismos "
-        "innecesarios. Estructura básica: resumen de lo encontrado, qué "
-        "hacer primero, y detalle técnico. Esta es la versión community: "
-        "no usa la plantilla editorial pulida de reportes ejecutivos de "
-        "Vigia (esa capa es parte del paquete privado)."
-    )
+    from .prompts import get_prompt
+
+    SYSTEM_PROMPT = get_prompt("reporteria")
 
 AGENTE = "reporteria"
 
@@ -64,21 +62,53 @@ def node(state: PipelineState) -> dict:
         "antisuplantacion_findings": state.get("antisuplantacion_findings") or [],
     }
 
+    # Fase 3 (memoria entre corridas): permite que el reporte diga "esto se
+    # viene reportando desde hace N scans y sigue sin cerrarse" en vez de
+    # presentar todo como novedad. Aditivo: sin historial el prompt no cambia.
+    historico = (state.get("contexto_historico") or "").strip()
+    bloque_historico = (
+        f"{historico}\n\nUsa ese historial para distinguir lo NUEVO de lo "
+        "REINCIDENTE en el reporte; si un hallazgo lleva varios scans abierto, "
+        "dilo explícitamente.\n\n"
+        if historico
+        else ""
+    )
+
     try:
         cuerpo = call_claude(
             SYSTEM_PROMPT,
-            "Datos del pipeline para compilar el reporte final (JSON):\n"
+            bloque_historico
+            + "Datos del pipeline para compilar el reporte final (JSON):\n"
             + json.dumps(resumen_datos, ensure_ascii=False, indent=2, default=str),
         )
-    except LLMNoDisponibleError as exc:
-        cuerpo = (
-            "[Reporte narrativo pendiente — LLM no disponible: "
-            f"{exc}]\n\nDatos crudos disponibles para armar el reporte manualmente:\n"
-            + json.dumps(resumen_datos, ensure_ascii=False, indent=2, default=str)
-        )
+        fuente = "llm"
+    except LLMNoDisponibleError:
+        # Fase 4: antes esto era un placeholder ("[Reporte narrativo
+        # pendiente...]") seguido del JSON crudo del estado -- honesto, pero
+        # inentregable a un cliente. Ahora se compila un documento real con los
+        # mismos datos, sin LLM (ver tools/reporte_determinista.py). El propio
+        # documento declara que se generó sin análisis de modelo.
+        cuerpo = construir_reporte_determinista(resumen_datos)
+        fuente = "determinista_sin_llm"
 
     partes.append(cuerpo)
     reporte_final = "\n".join(partes)
+
+    validos = sum(
+        1
+        for h in (state.get("verified_findings") or [])
+        if h.get("estado_validez") != "falso_positivo_declarado"
+    )
+    if motivo:
+        resultado = "reporte generado con aviso de bloqueo de autorización"
+    else:
+        resultado = (
+            f"reporte generado con flujo completo: {validos} hallazgos válidos, "
+            f"{len(state.get('prioritized_findings') or [])} priorizados, "
+            f"{len(state.get('remediations') or [])} con remediación"
+        )
+    if fuente == "determinista_sin_llm":
+        resultado += "; compilado de forma determinista (LLM no disponible)"
 
     return {
         "reporte_final": reporte_final,
@@ -86,11 +116,7 @@ def node(state: PipelineState) -> dict:
             make_trace_event(
                 agente=AGENTE,
                 accion="compilar_reporte_final",
-                resultado=(
-                    "reporte generado con aviso de bloqueo de autorización"
-                    if motivo
-                    else "reporte generado con flujo completo"
-                ),
+                resultado=resultado,
             )
         ],
     }

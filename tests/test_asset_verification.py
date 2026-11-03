@@ -466,6 +466,14 @@ def test_scan_activo_permite_ip_privada_exenta_sin_verificar(client, monkeypatch
     # `_esperar_scan_terminado` (ver informe de la regresión medida de esta
     # sesión). Mismo patrón que el mock de ZAP arriba.
     monkeypatch.setattr(main_module, "run_nuclei", lambda *_a, **_k: _ResultadoFalso())
+    # Fase 5 (motor de detección dirigida): `_correr_escaneo_activo_en_background`
+    # ahora corre un Motor 3 (`ejecutar_checks_dirigidos`) que envía tráfico HTTP
+    # real contra el target. Sin este mock, corre de verdad contra la IP privada
+    # inexistente (172.17.0.5) y el thread se cuelga en timeouts de conexión, así
+    # que el scan no termina a tiempo para `_esperar_scan_terminado`. Mismo patrón
+    # que los mocks de ZAP/Nuclei de arriba (este test verifica el GATE de IP
+    # exenta, no el motor de detección).
+    monkeypatch.setattr(main_module, "ejecutar_checks_dirigidos", lambda *_a, **_k: [])
 
     token_auth = _registrar_tenant(client, "Pyme Scan Activo IP", "scanactivoip@scanverif.test")
     client.post(

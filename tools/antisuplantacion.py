@@ -209,8 +209,12 @@ def generate_domain_variants(domain: str) -> set[str]:
     no `subprocess`) y SIN resolución DNS. `run_dnstwist()` dispara el
     binario `dnstwist` vía `run_command` porque, dentro del pipeline bajo
     demanda, sí queremos que resuelva DNS y confirme qué variantes están
-    realmente registradas (`registered_only=True`) — eso tarda segundos
-    por dominio.
+    realmente registradas (`registered_only=True`) — eso tarda decenas de
+    segundos por dominio (medido 2026-08-02: ~80s para un dominio bancario
+    real con 35 lookalikes de terceros, contando también Sherlock). Sigue
+    siendo la parte BARATA del flujo bajo demanda: el grueso de la latencia
+    está después, en el enriquecimiento por dominio de
+    `api/main.py::_enriquecer_dominios_clon`.
 
     Este helper existe para el caso de uso opuesto: el listener de
     CertStream (`api/certstream_listener.py`, Item 5 del backlog) necesita

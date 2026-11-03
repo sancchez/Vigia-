@@ -102,6 +102,16 @@ CREATE TABLE IF NOT EXISTS scans (
     id                      TEXT PRIMARY KEY,
     tenant_id               TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     asset_id                TEXT REFERENCES assets(id) ON DELETE SET NULL,
+    -- Quién disparó este scan. NULLABLE a propósito: los scans que nacen del
+    -- scheduler o del listener de CertStream no tienen un usuario humano
+    -- detrás. Para los que sí (POST /scan, /scan/activo, /antisuplantacion)
+    -- esta columna es la mitad que faltaba de la trazabilidad de autorización:
+    -- `assets.autorizado_por` dice quién autorizó el escaneo activo del
+    -- activo, y `scans.user_id` dice quién lo ejecutó. Sin ella no se puede
+    -- responder "¿quién lanzó este escaneo contra este tercero?" ante un
+    -- reclamo. Migración para bases existentes en db/connection.py
+    -- (`_SCANS_USER_COLUMNS`).
+    user_id                 TEXT REFERENCES users(id) ON DELETE SET NULL,
     target                  TEXT NOT NULL,
     autorizacion_firmada    INTEGER NOT NULL DEFAULT 0,
     estado                  TEXT NOT NULL DEFAULT 'completado'

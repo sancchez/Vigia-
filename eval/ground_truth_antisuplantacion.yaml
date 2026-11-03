@@ -53,14 +53,32 @@
 # titular (nombres reales omitidos por la anonimizacion) -- consistente con
 # ser terceros no relacionados.
 #
-# Los 22 "tercero" restantes (marcados senal: circular abajo) NO se verificaron
-# uno por uno via RDAP por costo/tiempo de esta corrida -- para ellos la unica
-# senal disponible en este eval es la misma que usa el codigo (no compartir NS
-# con el legitimo). Se documentan asi, honestamente, en vez de inventarles una
-# verificacion que no se hizo. El eval SIGUE siendo util para estos: protege que
-# no se filtren a "defensivo" por error (regresion de la logica de particion), y
-# la clase "urgente" (la que mas importa para severidad) esta 100% verificada
-# independientemente.
+# ACTUALIZACION 2026-08-01 -- se cerro la brecha circular (21 de 22)
+# ------------------------------------------------------------------
+# La version anterior de este archivo decia que los 22 "tercero" restantes NO
+# se habian verificado via RDAP "por costo/tiempo". Esa explicacion resulto ser
+# incorrecta: al reintentarlos, 21 de 22 devolvieron registrador sin ningun
+# problema. Lo que habia fallado en la corrida original fue el RATE LIMIT de
+# rdap.org con un delay de ~2s entre consultas -- subiendolo a ~4s las mismas
+# consultas responden HTTP 200. No era un limite de costo, era un artefacto de
+# la medicion, y estuvo 6 dias documentado como si fuera una limitacion real
+# del eval.
+#
+# Resultado de la reverificacion (rdap.org, 2026-08-01, misma via que la
+# corrida original): los 21 dominios devolvieron un registrador REAL y NINGUNO
+# coincide con el del titular. Aparecen registradores distintos entre si
+# (varios operadores comerciales de dominios distintos, nombres reales omitidos
+# por la anonimizacion) -- consistente con ser terceros no relacionados, con
+# una senal (RDAP) que el codigo NO usa.
+#
+# Queda 1 entrada `senal: circular`, y se deja marcada como tal a proposito:
+# no es un dominio registrable propio sino un host bajo otro apex, y ese apex
+# tampoco publica datos RDAP -- no hay via independiente disponible para ella.
+# NO se borro para que el conteo del eval siga siendo 45 y no un numero
+# maquillado.
+#
+# Estado real del eval hoy: 44/45 entradas con senal independiente, 1/45
+# circular y declarada. Antes: 23/45 independientes.
 #
 # Que protege realmente este eval:
 #   1. Regresion del pipeline completo variantes -> deteccion de registro ->
@@ -83,12 +101,11 @@ dominios:
       ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v02.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v03.com"
     etiqueta: defensivo
     senal: independiente
@@ -97,28 +114,25 @@ dominios:
       (mismo registrador real; NO es la senal de NS que usa el codigo).
   - domain: "bancoejemplo-v04.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v05.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v06.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v07.com"
     etiqueta: tercero
     senal: independiente
@@ -145,12 +159,11 @@ dominios:
       ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v11.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v12.com"
     etiqueta: urgente
     senal: independiente
@@ -159,12 +172,11 @@ dominios:
       ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v13.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v14.com"
     etiqueta: defensivo
     senal: independiente
@@ -197,20 +209,18 @@ dominios:
       (mismo registrador real; NO es la senal de NS que usa el codigo).
   - domain: "bancoejemplo-v19.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v20.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v21.com"
     etiqueta: urgente
     senal: independiente
@@ -225,12 +235,11 @@ dominios:
       ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v23.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v24.com"
     etiqueta: defensivo
     senal: independiente
@@ -251,44 +260,39 @@ dominios:
       ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v27.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v28.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v29.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v30.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v31.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v32.com"
     etiqueta: urgente
     senal: independiente
@@ -309,68 +313,63 @@ dominios:
       ("Registrador-Titular (ficticio)"); confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v35.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v36.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v37.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v38.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v39.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v40.com"
     etiqueta: tercero
     senal: circular
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      NO verificable por RDAP: no es un dominio registrable propio sino un
+      host bajo otro apex, y ese apex tampoco devuelve datos en rdap.org
+      (consultado 2026-08-01). Unica senal disponible: no comparte NS con
+      el legitimo -- la MISMA que usa el codigo, asi que esta entrada no
+      discrimina de forma independiente. Se deja marcada como circular a
+      proposito en vez de borrarla para que el conteo del eval no mienta.
   - domain: "bancoejemplo-v41.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v42.com"
     etiqueta: tercero
-    senal: circular
+    senal: independiente
     evidencia: >
-      No comparte NS con el legitimo (misma senal que usa el codigo para
-      excluirlo de "defensivo"); no se verifico registrador via RDAP en
-      esta corrida -- no discrimina de forma independiente, documentado
-      honestamente como limite de este eval.
+      RDAP registrar = "Registrador-Tercero-N (ficticio)", DISTINTO al de
+      bancoejemplo.com ("Registrador-Titular (ficticio)"); verificado en vivo
+      el 2026-08-01, confirma que es de un tercero no relacionado.
   - domain: "bancoejemplo-v43.com"
     etiqueta: defensivo
     senal: independiente

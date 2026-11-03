@@ -59,9 +59,32 @@ handshake de websocket pero NO transmite ningún mensaje — el servicio fue
 descontinuado. A julio 2026 no existe un feed público gratuito de
 CertStream mantenido; las alternativas activas (`certstream-server-go`,
 `certstream-server-rust`, `go-certstream` de LeakIX) son todas
-self-hosted. `VIGIA_CERTSTREAM_URL` es configurable por esto — apuntar a
-una instancia propia (Docker) es el paso pendiente para vigilancia
-verdaderamente en vivo.
+self-hosted.
+
+RESUELTO (2026-08-01) — el feed self-hosted YA NO es teoría. Se levantó
+`deploy/certstream/docker-compose.yml` de verdad en esta máquina y se
+comprobó, contra el servidor corriendo, que:
+
+* `certstream-server-go` se conecta a los logs CT públicos reales y procesa
+  miles de entradas por minuto (`ct-watcher.go: Processed N entries`);
+* `ws://localhost:8080/full-stream` emite mensajes `message_type =
+  "certificate_update"` con `data.leaf_cert.all_domains` poblado — el shape
+  exacto que `procesar_mensaje_certstream` ya parseaba, cero cambios de
+  parsing;
+* el cliente Python `certstream` (`listen_for_events`) consume ese endpoint
+  sin adaptador.
+
+Por eso `_DEFAULT_URL` ahora apunta al feed local en vez de al muerto, y
+`certstream` está declarado como extra instalable (`pip install -e
+'.[vigilancia]'`, ver pyproject.toml) en vez de ser una dependencia
+fantasma que nadie instala.
+
+Vigilancia continua SIN CertStream: si un despliegue no quiere levantar el
+contenedor, `api/scheduler.py::run_brand_cycle_once()` hace barridos
+programados de marca (dnstwist bajo demanda cada N horas). Es más lento en
+detectar (horas, no minutos) pero no depende de infraestructura extra —
+ver el docstring de esa función. Las dos vías escriben hallazgos de marca
+reales; ninguna de las dos es una promesa vacía.
 """
 
 from __future__ import annotations
@@ -87,7 +110,20 @@ _variant_map: dict[str, tuple[str, str | None, str]] = {}
 _variant_map_lock = threading.Lock()
 _variant_map_built_at: float = 0.0
 
-_DEFAULT_URL = "wss://certstream.calidog.io"
+# Default = el feed SELF-HOSTED que levanta `deploy/certstream/docker-compose.yml`,
+# NO el público histórico de Cali Dog (`wss://certstream.calidog.io`), que está
+# descontinuado: acepta el handshake pero no transmite ni un mensaje, así que
+# dejarlo como default hacía que el listener arrancara "bien", se quedara mudo
+# para siempre, y el producto prometiera vigilancia continua sin cumplirla —
+# exactamente el falso verde que este default evita. Con el default apuntando a
+# `localhost:8080`, si nadie levantó el feed la conexión FALLA de forma ruidosa
+# y visible en el log, en vez de fingir que funciona.
+#
+# VERIFICADO EN VIVO (2026-08-01, ver `deploy/certstream/README.md`): la imagen
+# `0rickyy0/certstream-server-go` levantada con ese compose emite mensajes
+# `certificate_update` reales con `data.leaf_cert.all_domains` poblado — el
+# shape exacto que parsea `procesar_mensaje_certstream`, sin adaptador.
+_DEFAULT_URL = "ws://localhost:8080/full-stream"
 
 
 def _refresh_seconds() -> float:

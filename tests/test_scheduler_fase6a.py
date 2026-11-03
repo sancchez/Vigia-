@@ -98,8 +98,13 @@ def test_sin_autorizacion_activa_corre_pasivo(test_db, monkeypatch):
         llamado["zap"] = True
         raise AssertionError("no debía invocar Escaneo Activo sin autorizacion_activa=1")
 
-    def _grafo_espia(estado):
+    # Fase 3: el grafo lleva checkpointer, así que el scheduler invoca con
+    # `config={"configurable": {"thread_id": scan_id}}`. El espía lo captura
+    # para verificar que el thread_id sea el scan_id real de esta corrida
+    # (si fuera otro, dos scans distintos compartirían hilo de checkpoint).
+    def _grafo_espia(estado, config=None):
         llamado["grafo"] = True
+        llamado["thread_id"] = (config or {}).get("configurable", {}).get("thread_id")
         return {**estado, "reporte_final": "recon pasivo ok", "trace_log": []}
 
     monkeypatch.setattr(scheduler_module, "run_checkpointed_active_scan", _zap_espia)
@@ -120,6 +125,8 @@ def test_sin_autorizacion_activa_corre_pasivo(test_db, monkeypatch):
     finally:
         conn.close()
     assert fila["autorizacion_firmada"] == 0
+    # El hilo de checkpoint es el scan_id que quedó persistido, no otro.
+    assert llamado["thread_id"] == fila["id"]
 
 
 def test_no_verificado_se_omite_del_ciclo(test_db, monkeypatch):

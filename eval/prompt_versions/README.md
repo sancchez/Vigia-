@@ -90,9 +90,36 @@ publicar una nueva version de un prompt es:
 |---|---|---|---|
 | Orquestador | v1 | 2026-07-14 | `v1_orquestador.md` |
 | Recon (pasivo) | v1 | 2026-07-14 | `v1_recon.md` |
-| Escaneo (activo) | v1 | 2026-07-14 | `v1_escaneo.md` |
+| Escaneo (activo) | v2 | 2026-08-01 | `v2_escaneo.md` |
 | Verificacion | v1 | 2026-07-14 | `v1_verificacion.md` |
-| Priorizacion | v1 | 2026-07-14 | `v1_priorizacion.md` |
-| Remediacion | v1 | 2026-07-14 | `v1_remediacion.md` |
-| Reporteria | v1 | 2026-07-14 | `v1_reporteria.md` |
+| Priorizacion | v2 | 2026-08-01 | `v2_priorizacion.md` |
+| Remediacion | v2 | 2026-08-01 | `v2_remediacion.md` |
+| Reporteria | v2 | 2026-08-01 | `v2_reporteria.md` |
 | Anti-Suplantacion | v1 | 2026-07-14 | `v1_anti_suplantacion.md` |
+
+## Estos archivos SI se leen desde el codigo (Fase 3)
+
+Hasta Fase 3 esta carpeta era documentacion pura: cada `agents/*.py` llevaba su
+propio `SYSTEM_PROMPT` como literal Python y los dos textos se desincronizaron
+sin que nada lo notara. Desde Fase 3, `agents/prompts.py` parsea estos archivos
+y es la unica fuente de verdad:
+
+```python
+from agents.prompts import get_prompt
+SYSTEM_PROMPT = get_prompt("recon")   # lee eval/prompt_versions/v1_recon.md
+```
+
+Consecuencias practicas:
+
+- **La version vigente es un pin explicito**, no "la mas alta que exista": vive
+  en `_VERSION_VIGENTE` de `agents/prompts.py` y debe coincidir con la tabla de
+  arriba. Crear un `v{N+1}` NO lo despliega — eso respeta el punto 4 de la
+  seccion "Relacion con el loop de evaluacion".
+- **El parseo es rigido**: se toma el primer bloque con fences (```) que
+  aparezca bajo el encabezado `## Prompt`. Romper esa estructura rompe el
+  arranque del agente; `tests/test_prompts_fuente_unica.py` lo cubre.
+- **Open-core**: los agentes con capa privada (`priorizacion`, `remediacion`,
+  `reporteria`) siguen prefiriendo `vigia_core_private` y solo caen a
+  `get_prompt(...)` si ese paquete no esta instalado. Por eso el `v2` de esos
+  tres documenta explicitamente que es la version community — el texto del
+  paquete privado nunca vive en este repo.

@@ -1,0 +1,52 @@
+{
+  "findings": [
+    {
+      "id": "DIR-0",
+      "tipo": "sql_injection",
+      "ubicacion": "/rest/user/login",
+      "severidad": "critical",
+      "confidence": 1.0,
+      "description": "Bypass de autenticación por inyección SQL en el login: el payload \"' OR 1=1--\" en el campo email devuelve un token de sesión válido sin credenciales."
+    },
+    {
+      "id": "DIR-1",
+      "tipo": "broken_access_control",
+      "ubicacion": "/rest/basket/{id}",
+      "severidad": "high",
+      "confidence": 1.0,
+      "description": "IDOR: el token del usuario A recupera la cesta del usuario B (basket id=20, UserId=38) sin verificación de propiedad del recurso."
+    },
+    {
+      "id": "DIR-2",
+      "tipo": "broken_access_control",
+      "ubicacion": "/#/administration",
+      "severidad": "critical",
+      "confidence": 1.0,
+      "description": "Control de acceso roto en administración: un usuario NO admin recién creado recupera datos de 38 usuarios vía el endpoint admin-only de detalles de autenticación."
+    },
+    {
+      "id": "DIR-3",
+      "tipo": "jwt_vuln",
+      "ubicacion": "/rest/user/login",
+      "severidad": "high",
+      "confidence": 1.0,
+      "description": "El servidor acepta un JWT forjado con `alg:none` (sin firma): un token basura es rechazado (401/403) pero el forjado con la identidad manipulada es aceptado (200)."
+    },
+    {
+      "id": "DIR-4",
+      "tipo": "sensitive_data_exposure",
+      "ubicacion": "/ftp/",
+      "severidad": "high",
+      "confidence": 1.0,
+      "description": "Directorio ftp expone públicamente archivos sensibles (indicadores hallados en el listado: .bak, acquisitions, coupons, package.json, .md.bak, eastere)."
+    },
+    {
+      "id": "DIR-5",
+      "tipo": "path_traversal",
+      "ubicacion": "/ftp/:file",
+      "severidad": "high",
+      "confidence": 1.0,
+      "description": "Bypass de whitelist de extensión por byte nulo: /ftp/package.json.bak está bloqueado (403) pero /ftp/package.json.bak%2500.md descarga el archivo (200)."
+    }
+  ]
+}

@@ -53,13 +53,33 @@ solo — el resto de la API sigue funcionando con normalidad (ver
 `api/certstream_listener.py::_run_listener`, mismo comportamiento de
 degradación que ya existía antes de este change).
 
-## Estado de validación
+## Estado de validación — VERIFICADO EN VIVO (2026-08-01)
 
-Este compose fue escrito y revisado en este change (`sdd-apply` de
-`fase3b-vigilancia-continua-certstream`) pero su levantamiento real
-(imagen construyendo, servidor emitiendo certificados de verdad, el
-listener conectándose y escribiendo un finding) debe confirmarse en un
-host con acceso de salida a internet suficiente para clonar el repo de
-build y para que `certstream-server-go` alcance los logs CT públicos —
-verificalo en tu entorno de despliegue antes de depender de él en
-producción.
+Ya no es teoría. Este compose se levantó de verdad y se comprobó cada
+eslabón de la cadena, no solo que el contenedor arranque:
+
+| Eslabón | Cómo se comprobó | Resultado |
+|---|---|---|
+| El servidor alcanza los logs CT reales | `docker logs vigia-certstream-server-go` | `ct-watcher.go: Starting worker for CT log: https://mon.sycamore.ct.letsencrypt.org/2026h2` (y ~20 logs más), luego `Processed 7000 entries \| Queue length: 0` a los ~15 s |
+| El websocket emite el shape que Vigia parsea | cliente `websocket-client` contra `ws://localhost:8080/full-stream` | 3/3 mensajes con `message_type = "certificate_update"` y `data.leaf_cert.all_domains` poblado (p. ej. `['*.677889.cc', '677889.cc']`) |
+| El cliente Python `certstream` consume ese endpoint | `certstream.listen_for_events(cb, url="ws://localhost:8080/full-stream")` | 3 mensajes `certificate_update` recibidos por el mismo callback que usa `api/certstream_listener.py::_run_listener` |
+| El healthcheck del compose es ejecutable | `docker exec ... wget -q --spider http://localhost:8080/example.json` | exit 0 (`wget` está en la imagen) |
+
+Se cambió el `build:` desde git por `image: 0rickyy0/certstream-server-go:latest`
+justamente porque esa imagen es la que se verificó (y evita 5 minutos de
+build y una toolchain Go en el host del cliente).
+
+Lo único que sigue dependiendo de tu entorno: **salida a internet** hacia los
+logs CT públicos. Si tu red la bloquea, el contenedor arranca igual pero
+`Processed N entries` nunca sube — mirá los logs antes de dar la vigilancia
+por buena.
+
+## Si NO vas a levantar este feed
+
+No pasa nada, pero entonces **la vigilancia continua de marca la hace el
+barrido programado**, no CertStream: `api/scheduler.py::run_brand_cycle_once()`
+corre dnstwist sobre cada dominio verificado y cada marca vigilada cada
+`VIGIA_BRAND_CYCLE_HOURS` horas (default 24) y escribe los mismos hallazgos
+`dominio_variante`. La diferencia real es la latencia de detección: minutos
+(CertStream, en cuanto se emite el certificado) vs. horas (barrido). Decí eso
+al cliente, no "monitoreo en tiempo real", si no levantaste este contenedor.

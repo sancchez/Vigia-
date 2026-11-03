@@ -414,6 +414,8 @@ export function filtrarFindingsCertstream(findings: Finding[]): Finding[] {
 // Contrato real: `DominioClonOut` en el backend.
 export type DominioClon = {
   finding_id: string;
+  /** `dominio_variante` (scoring de infraestructura aplica) | `perfil_red_social` (no aplica). */
+  tipo: "dominio_variante" | "perfil_red_social" | string;
   endpoint: string;
   severidad: "critical" | "high" | "medium" | "low" | "info";
   estado: EstadoHallazgo | string;
@@ -422,10 +424,34 @@ export type DominioClon = {
   screenshot: string | null;
   takedown: string | null;
   primera_vez_visto: string | null;
+  // Ciclo de vida aplicado a marca. `estado` sigue siendo el estado interno
+  // genérico (`en_progreso`, `cerrado`, ...); `etapa_marca` es la traducción
+  // que se le muestra al cliente ("Takedown enviado", "Resuelto — clon dado de
+  // baja"). El backend la calcula, no la persiste -- no confiar en ella para
+  // lógica, solo para mostrar.
+  takedown_enviado_en: string | null;
+  takedown_destinatario: string | null;
+  registrador_sin_respuesta: number;
+  etapa_marca: string;
 };
 
+// Respuesta 202 de `POST /antisuplantacion` -- solo el id para hacer polling
+// (mismo contrato de forma que `ActiveScanAccepted`).
+export type AntisuplantacionRunAccepted = {
+  scan_id: string;
+  estado: string;
+};
+
+// Respuesta de `GET /antisuplantacion/runs/{scan_id}`. Mientras
+// `estado === "corriendo"`, las listas vienen vacías/parciales y `progreso`
+// trae el checkpoint legible del backend ("Verificando infraestructura y
+// capturando evidencia: 12 de 35 (clon.com)").
 export type AntisuplantacionRunResult = {
   scan_id: string;
+  estado: "corriendo" | "completado" | "error" | string;
+  progreso: string | null;
+  target: string | null;
+  completed_at: string | null;
   dominios: DominioClon[];
   perfiles: DominioClon[];
 };
@@ -681,15 +707,34 @@ export const api = {
       body: JSON.stringify({ marca, dominio_asociado: dominioAsociado }),
     }),
   deleteWatchedBrand: (id: string) => request<void>(`/watched-brands/${id}`, { method: "DELETE" }),
-  // Fase 3a: dispara SOLO la rama anti-suplantación sobre un asset dominio
-  // ya verificado (o exento) -- síncrono, dnstwist+Sherlock bajo demanda
-  // tardan segundos, no los minutos de un escaneo activo ZAP.
+  // Dispara SOLO la rama anti-suplantación sobre un asset dominio ya
+  // verificado (o exento). ASÍNCRONO (202 + `scan_id`): la corrida real
+  // contra un dominio con muchas variantes tarda MINUTOS (medido: >15 min
+  // con 45 lookalikes), así que el backend la corre en background y acá se
+  // hace polling con `getAntisuplantacionRun`, igual que `startActiveScan`.
   runAntisuplantacion: (assetId: string) =>
-    request<AntisuplantacionRunResult>("/antisuplantacion", {
+    request<AntisuplantacionRunAccepted>("/antisuplantacion", {
       method: "POST",
       body: JSON.stringify({ asset_id: assetId }),
     }),
+  getAntisuplantacionRun: (scanId: string) =>
+    request<AntisuplantacionRunResult>(`/antisuplantacion/runs/${scanId}`),
   getDominiosClon: () => request<DominioClon[]>("/antisuplantacion/dominios"),
+  // Acciones del ciclo de vida de marca (ver el bloque "Ciclo de vida APLICADO
+  // A MARCA" en api/main.py). `marcarTakedownEnviado` avanza el hallazgo hasta
+  // `en_progreso` y guarda la evidencia del envío; `marcarSinRespuesta` NO
+  // cambia el estado, solo incrementa el contador auditado de silencios del
+  // registrador (409 si nunca se registró un envío).
+  marcarTakedownEnviado: (findingId: string, body: { destinatario?: string; nota?: string } = {}) =>
+    request<DominioClon>(`/antisuplantacion/dominios/${findingId}/takedown-enviado`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  marcarSinRespuesta: (findingId: string, body: { dias_esperados?: number; nota?: string } = {}) =>
+    request<DominioClon>(`/antisuplantacion/dominios/${findingId}/sin-respuesta`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   getAntisuplantacionKpis: () => request<AntisuplantacionKpis>("/antisuplantacion/kpis"),
   // El screenshot es una imagen binaria detrás de auth -- un <img src="...">
   // plano no puede mandar el header Authorization, así que se descarga como

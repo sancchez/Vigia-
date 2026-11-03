@@ -14,14 +14,12 @@ from orchestrator.state import PipelineState, make_trace_event
 from tools._shared import ToolExecutionError
 from tools.recon import run_amass_passive, run_subfinder
 
-SYSTEM_PROMPT = (
-    "Investigas la huella pública de un dominio/marca usando únicamente fuentes pasivas\n"
-    "(Subfinder, Amass, crt.sh). No te conectas activamente al objetivo, no envías\n"
-    "tráfico que no sea una consulta pública estándar. Devuelves: subdominios\n"
-    "encontrados, tecnologías detectadas, y activos que parezcan expuestos por error\n"
-    "(paneles de administración, backups públicos). Marca cada hallazgo con la fuente\n"
-    "exacta de donde salió."
-)
+from .prompts import get_prompt
+
+# Fase 3: fuente unica de prompts. El texto vive en
+# `eval/prompt_versions/v1_recon.md` (ver agents/prompts.py). Este agente es
+# determinista (no invoca LLM): el prompt documenta su contrato, no se envia.
+SYSTEM_PROMPT = get_prompt("recon")
 
 AGENTE = "recon"
 

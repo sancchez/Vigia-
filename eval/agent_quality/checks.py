@@ -48,7 +48,15 @@ def _rango(severidad: str) -> int:
 # ---------------------------------------------------------------------------
 
 _CAMPOS_PRIORIZACION = {"urgencia_negocio", "justificacion"}
-_URGENCIAS_VALIDAS = {"alta", "media", "baja", "sin_evaluar", "sin_parsear"}
+# Fase 4: se agrega "informativa" -- un hallazgo con `riskcode 0` de ZAP llega
+# al reporte, pero NO con la misma urgencia que un riesgo real (ver
+# `tools/triage.py::_URGENCIA_POR_SEVERIDAD`). "sin_evaluar"/"sin_parsear"
+# quedan en el conjunto por compatibilidad con salidas ya persistidas: el
+# fallback de `agents/priorizacion.py` ya no las produce (ahora cae a la
+# urgencia determinista, que sí es accionable).
+_URGENCIAS_VALIDAS = {
+    "alta", "media", "baja", "informativa", "sin_evaluar", "sin_parsear",
+}
 
 
 def validar_esquema_priorizacion(salida: list[dict]) -> list[str]:

@@ -12,11 +12,31 @@ real, correr la rama anti-suplantación (`agents/antisuplantacion.py`),
 enriquecer cada dominio clon con scoring, y persistir los hallazgos vía el
 ciclo de vida existente (`_registrar_findings_con_ciclo_de_vida`).
 
+ENMIENDA (2026-08-02) — el contrato original de esta fase exigía respuesta
+SÍNCRONA (200 con la lista ya resuelta). Se cambió a asíncrono con evidencia
+medida en contra: una corrida real contra un dominio bancario con 45
+lookalikes registrados tardó **más de 15 minutos** (el costo está en el
+enriquecimiento por dominio: probes DNS/MX/SSL/HTTP + screenshot, detrás de
+los delays de cortesía de red), y detrás de un reverse proxy con timeout
+típico (30-100s) la respuesta síncrona **nunca llegaba al cliente** aunque el
+trabajo terminara bien. El endpoint MUST responder 202 con `scan_id`
+inmediatamente y correr el trabajo en background; el estado y el resultado
+MUST ser consultables en `GET /antisuplantacion/runs/{scan_id}` (mismo patrón
+que `POST /scan/activo` + `GET /scans/{id}`). Las validaciones de
+propiedad/verificación del activo siguen siendo síncronas y previas al 202.
+
 #### Scenario: Dominio verificado dispara la protección
 
 - GIVEN un asset `tipo=dominio`, `verificado=1` del tenant
 - WHEN el usuario llama `POST /antisuplantacion` con ese `asset_id`
-- THEN responde 200 con `scan_id` y la lista de dominios clon detectados (cada uno con `score`)
+- THEN responde 202 con `scan_id` y `estado="corriendo"`, en segundos
+
+#### Scenario: Consulta de estado mientras la corrida avanza
+
+- GIVEN una corrida disparada con `POST /antisuplantacion`
+- WHEN se llama `GET /antisuplantacion/runs/{scan_id}` antes de que termine
+- THEN responde 200 con `estado="corriendo"` y un `progreso` legible
+- AND al terminar responde `estado="completado"` con la lista de dominios clon (cada uno con `score`)
 
 #### Scenario: Asset no verificado se rechaza
 

@@ -1,5 +1,59 @@
 # Corridas en vivo del pipeline — 2026-07-15 a 2026-07-19
 
+## Corrida 21 (2026-08-02) — `POST /antisuplantacion` asíncrono, verificado contra un dominio real
+
+**Qué se estaba arreglando.** El endpoint era síncrono. La corrida del
+2026-08-01 contra un dominio bancario real con 45 lookalikes registrados
+tardó **más de 15 minutos** y el cliente HTTP cortó antes de que el servidor
+terminara. Detrás de un reverse proxy con timeout típico (30-100s en
+Render/Railway/nginx por default) eso es un error para el cliente aunque el
+trabajo se complete bien del lado del servidor. Era el último gap medido del
+producto prioritario (protección de marca).
+
+**Qué se cambió.** El trabajo pasó a un thread de fondo (mismo patrón que
+`POST /scan/activo`: `_correr_antisuplantacion_en_background`, fila `scans`
+como registro de estado/progreso) y el endpoint responde 202 con `scan_id`.
+Estado y resultado se consultan en `GET /antisuplantacion/runs/{scan_id}`.
+Deliberadamente NO se metió el flujo por el grafo LangGraph con checkpointer:
+no existe una rama "solo antisuplantación" ejecutable de forma aislada, y la
+granularidad útil no está entre nodos (hay uno solo) sino DENTRO del
+enriquecimiento, dominio por dominio.
+
+**Corrida real** (laboratorio: `VIGIA_ENTORNO=local`, SQLite de laboratorio
+aparte, delays de cortesía de red en sus valores reales 2s/10s, dnstwist y
+Sherlock reales; verificaciones HTTP con PowerShell):
+
+| Medición | Antes | Ahora |
+|---|---|---|
+| Respuesta del `POST` | >15 min → timeout del cliente | **202 en 0.33 s** |
+| Visibilidad del avance | ninguna | checkpoint por dominio, consultable |
+| Trabajo perdido si el cliente corta | ninguno (ya se persistía), pero el cliente veía un error | ninguno, y el cliente ve `estado`/`progreso` reales |
+
+Checkpoints observados en `GET /antisuplantacion/runs/{id}` durante la
+corrida (35 lookalikes de terceros, el mismo orden de magnitud que la
+medición del 2026-07-25):
+
+```
+t+0s    corriendo   [busqueda]  Generando variantes del dominio y buscando perfiles…
+t+90s   corriendo   [evidencia] Verificando infraestructura y capturando evidencia: 1 de 35
+t+270s  corriendo   [evidencia] … 12 de 35
+t+451s  corriendo   [evidencia] … 24 de 35
+t+601s  corriendo   [evidencia] … 35 de 35
+t+631s  completado  Protección de marca: 35 dominio(s) clon y 42 perfil(es) para revisión.
+```
+
+**Resultado final (10 min 31 s de trabajo de fondo, cliente nunca bloqueado):**
+35 dominios clon persistidos — **28 `high` + 7 `critical`**, exactamente la
+misma partición que la medición manual del 2026-07-25 (los 10 registros
+defensivos del propio titular siguen excluidos por `triar_lookalikes`), 34 de
+35 con score de infraestructura ≥2, 32 con captura del sitio, **35 de 35 con
+borrador de takedown determinista**. 42 perfiles de redes sociales en `info`
+para revisión humana.
+
+El gate de propiedad sigue siendo síncrono y previo al 202: el mismo POST
+contra el activo **sin verificar** devolvió 403 antes de crear ninguna fila
+ni lanzar ningún thread.
+
 ## Corrida 20 (2026-07-21) — Backend + frontend en un solo contenedor deployable
 
 Objetivo del usuario: hoy desplegar en Railway significaba correr backend y

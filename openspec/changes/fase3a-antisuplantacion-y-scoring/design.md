@@ -156,10 +156,17 @@ gracia si faltan — no son requisito de arranque. `git revert` sin downtime.
 
 ## Open Questions
 
-- [ ] ¿`POST /antisuplantacion` corre síncrono (dnstwist tarda segundos-minutos)
+- [x] ¿`POST /antisuplantacion` corre síncrono (dnstwist tarda segundos-minutos)
   o en background como `POST /scan/activo` (devuelve `scan_id`, la UI hace poll)?
   Recomendación para `sdd-apply`: **background**, reusando el patrón de
   `_correr_escaneo_activo_en_background`, para no bloquear el request. No bloquea el diseño.
+  **RESUELTO 2026-08-02 — la recomendación original era la correcta.** Se
+  implementó síncrono (ver tarea 2.3) porque spec.md exigía 200 con la lista
+  resuelta, y con el supuesto de que "dnstwist tarda segundos". Ese supuesto
+  se midió y es falso para un target real: >15 min sobre un dominio con 45
+  lookalikes (el costo está en el enriquecimiento por dominio, no en
+  dnstwist). Ahora es background + 202 + `GET /antisuplantacion/runs/{id}`,
+  exactamente el patrón recomendado acá.
 - [ ] ¿El screenshot se guarda en disco (`VIGIA_SCREENSHOT_DIR`) o como data-URI
   en `raw_json`? Recomendación: disco + ruta servida (evita inflar `raw_json`/DB).
 - [ ] Umbral `clones_activos` (score ≥ 2) es informativo; confirmar el corte con

@@ -124,6 +124,8 @@ def construir_markdown_ejecutivo(
     postura_por_activo: dict[str, dict[str, int]],
     kpis: dict,
     generado_en: str,
+    dominios_clon: list[dict] | None = None,
+    kpis_marca: dict | None = None,
 ) -> str:
     """Compone el markdown consolidado multi-activo del export ejecutivo
     (Fase 6c, `openspec/changes/fase6-endurecimiento-produccion`).
@@ -138,6 +140,16 @@ def construir_markdown_ejecutivo(
 
     `assets` es una lista de filas crudas de la tabla `assets` (dicts con al
     menos `id`, `tipo`, `valor`, `verificado`, `autorizacion_activa`).
+
+    `dominios_clon` / `kpis_marca` (opcionales) alimentan la sección
+    "Exposición de marca": son, respectivamente, la salida de
+    `api/main.py::_dominio_clon_out_de_row` (dicts con `endpoint`, `severidad`,
+    `estado`, `score`, `scoring`, `screenshot`, `takedown`) y la de
+    `GET /antisuplantacion/kpis`. Se pasan ya resueltos, este módulo no
+    consulta la base -- mismo criterio que el resto de la función. Si vienen
+    vacíos, la sección declara explícitamente que no hay vigilancia de marca
+    corrida todavía, en vez de omitirse en silencio: un reporte que no
+    menciona la marca es indistinguible de uno donde la marca está limpia.
     """
     lineas: list[str] = []
     lineas.append("# Reporte Ejecutivo — Vigia")
@@ -167,7 +179,22 @@ def construir_markdown_ejecutivo(
         lineas.append("Todavía no hay activos registrados para este tenant.")
     for asset in assets:
         estado_verif = "verificado" if asset.get("verificado") else "sin verificar"
-        estado_autor = "autorizado para escaneo activo" if asset.get("autorizacion_activa") else "solo escaneo pasivo"
+        # Fix H-4: antes esta línea era engañosa por construcción -- ningún
+        # endpoint escribía `autorizacion_activa`, así que TODO activo salía
+        # como "solo escaneo pasivo" incluso si se le había corrido un ZAP
+        # activo por `POST /scan/activo`. Ahora la columna sí se escribe
+        # (`POST /assets/{id}/autorizacion-activa`) y la frase se acota a lo
+        # que la columna realmente significa: si el escaneo activo RECURRENTE
+        # está habilitado, no si alguna vez hubo un escaneo activo.
+        if asset.get("autorizacion_activa"):
+            estado_autor = "con autorización firmada para escaneo activo recurrente"
+            if asset.get("autorizado_por"):
+                estado_autor += f" (autorizó: {asset.get('autorizado_por')})"
+        else:
+            estado_autor = (
+                "sin autorización firmada para escaneo activo recurrente "
+                "(el ciclo programado solo hace recon pasivo)"
+            )
         lineas.append(f"### {asset.get('valor')} ({asset.get('tipo')})")
         lineas.append(f"- Estado: {estado_verif}, {estado_autor}")
         conteo = postura_por_activo.get(asset.get("id"), {sev: 0 for sev in _SEVERIDADES_ORDEN})
@@ -181,7 +208,136 @@ def construir_markdown_ejecutivo(
                     lineas.append(f"- {_SEVERIDAD_LABEL[sev]}: {n}")
         lineas.append("")
 
+    lineas.extend(_seccion_exposicion_marca(dominios_clon or [], kpis_marca or {}))
+
     return "\n".join(lineas)
+
+
+# Señales del scoring 0-4 de `tools/antisuplantacion.py::InfraScore`, en el
+# orden en que se explican al cliente (de la más básica a la más específica).
+_SEÑALES_SCORING: tuple[tuple[str, str], ...] = (
+    ("dns_a", "DNS"),
+    ("mx", "correo (MX)"),
+    ("ssl", "certificado TLS"),
+    ("http", "sitio web respondiendo"),
+)
+
+
+def _seccion_exposicion_marca(dominios_clon: list[dict], kpis_marca: dict) -> list[str]:
+    """Sección "Exposición de marca" del export ejecutivo.
+
+    Antes de esta sección el único export descargable del producto
+    (`GET /reports/ejecutivo/download`) contenía exclusivamente KPIs de
+    remediación técnica -- ni un dominio clon, ni su score, ni el borrador de
+    takedown, pese a que la protección de marca es la capa que el producto
+    vende. Un cliente que descargaba "el reporte" no veía nada de eso.
+
+    Solo se listan datos ya calculados aguas arriba. En particular NO se
+    recalcula el score ni se reescribe el borrador: se transcribe lo que ya
+    está persistido en `findings.raw_json`, para que el PDF y el panel web
+    nunca puedan discrepar.
+    """
+    lineas: list[str] = []
+    lineas.append("## Exposición de marca")
+    lineas.append("")
+
+    total = kpis_marca.get("total_clones")
+    activos = kpis_marca.get("clones_activos")
+    if total is not None:
+        lineas.append(f"- **Suplantaciones detectadas:** {total}")
+    if activos is not None:
+        lineas.append(f"- **Con infraestructura activa:** {activos}")
+    mttd = kpis_marca.get("mttd_dias")
+    if mttd is not None:
+        lineas.append(f"- **MTTD (tiempo medio hasta detección):** {mttd} día(s) (aproximado)")
+    tttd = kpis_marca.get("tttd_dias")
+    if tttd is not None:
+        lineas.append(f"- **TTTD (tiempo medio hasta takedown):** {tttd} día(s)")
+    if total is not None or activos is not None:
+        lineas.append("")
+
+    if not dominios_clon:
+        lineas.append(
+            "No hay vigilancia de marca ejecutada para este tenant todavía. "
+            "Ejecute la protección de marca sobre un dominio verificado "
+            "(`POST /antisuplantacion`) para poblar esta sección."
+        )
+        lineas.append("")
+        return lineas
+
+    lineas.append(
+        "Cada dominio se puntúa 0-4 contando cuántas señales de infraestructura activa "
+        "responden: DNS, correo (MX), certificado TLS y sitio web. Un 4/4 es un clon "
+        "operativo; un 0/4 es un dominio registrado pero sin servicios levantados."
+    )
+    lineas.append("")
+
+    # Los más peligrosos primero: score alto = clon operativo.
+    ordenados = sorted(
+        dominios_clon,
+        key=lambda d: (-(d.get("score") or 0), str(d.get("endpoint") or "")),
+    )
+    for d in ordenados:
+        endpoint = d.get("endpoint") or "(sin dominio)"
+        score = d.get("score") or 0
+        lineas.append(f"### {endpoint}")
+        # `etapa_marca` (calculada por `api/main.py::_etapa_marca`) es la misma
+        # etiqueta que ve el cliente en el panel. Mostrar acá el `estado` crudo
+        # ("en_progreso") hacía que el PDF y la pantalla dijeran cosas
+        # distintas sobre el mismo hallazgo. Fallback al estado crudo para
+        # hallazgos proyectados por código anterior a este campo.
+        lineas.append(
+            f"- Severidad: {_SEVERIDAD_LABEL.get(str(d.get('severidad')), d.get('severidad'))}"
+            f" · Estado: {d.get('etapa_marca') or d.get('estado')}"
+        )
+        lineas.append(f"- Score de infraestructura activa: {score}/4")
+        scoring = d.get("scoring") if isinstance(d.get("scoring"), dict) else {}
+        if scoring:
+            activas = [etiqueta for clave, etiqueta in _SEÑALES_SCORING if scoring.get(clave)]
+            lineas.append(
+                "- Señales activas: " + (", ".join(activas) if activas else "ninguna")
+            )
+            if scoring.get("mx"):
+                lineas.append(
+                    "- **Riesgo de correo:** el dominio tiene servidores de correo "
+                    "configurados y puede enviar mensajes que aparenten ser de su organización."
+                )
+        if d.get("primera_vez_visto"):
+            lineas.append(f"- Detectado por primera vez: {d.get('primera_vez_visto')}")
+        # Trazabilidad de la gestión, no solo de la detección: si el cliente ya
+        # mandó el takedown, el reporte tiene que poder probarlo (fecha,
+        # destinatario) y dejar constancia del silencio del registrador -- es
+        # exactamente la evidencia que se necesita para escalar a un tercero
+        # (el registro del TLD, la marca, o un abogado).
+        if d.get("takedown_enviado_en"):
+            destinatario = d.get("takedown_destinatario")
+            lineas.append(
+                f"- Solicitud de eliminación enviada: {d.get('takedown_enviado_en')}"
+                + (f" a {destinatario}" if destinatario else "")
+            )
+            sin_respuesta = d.get("registrador_sin_respuesta") or 0
+            if sin_respuesta:
+                lineas.append(
+                    f"- **El registrador no respondió** ({sin_respuesta} seguimiento(s) registrado(s))."
+                )
+        lineas.append(
+            "- Evidencia visual: "
+            + (
+                "captura de pantalla disponible en el panel"
+                if d.get("screenshot")
+                else "sin captura (el sitio no respondió o la captura no está habilitada)"
+            )
+        )
+        if d.get("takedown"):
+            lineas.append("- Borrador de solicitud de eliminación (takedown):")
+            lineas.append("")
+            for linea_takedown in str(d["takedown"]).splitlines():
+                # Prefijo de cita: el parser markdown de este módulo no maneja
+                # bloques `>`, así que se indenta como texto plano legible.
+                lineas.append(f"    {linea_takedown}" if linea_takedown.strip() else "")
+        lineas.append("")
+
+    return lineas
 
 
 def _add_runs(paragraph, text: str) -> None:

@@ -15,14 +15,11 @@ from orchestrator.state import PipelineState, make_trace_event
 
 from ._llm import LLMNoDisponibleError, call_claude
 
-SYSTEM_PROMPT = (
-    "Eres el orquestador de un pipeline de evaluación de seguridad. Tu única función es\n"
-    "decidir el siguiente paso del flujo según el estado actual (qué se ha descubierto,\n"
-    "qué falta, si hay autorización firmada para el objetivo).\n"
-    "Nunca ejecutas escaneos tú mismo. Nunca avanzas a la fase de Escaneo Activo si el\n"
-    "campo `autorizacion_firmada` del estado no es `true`. Si no existe autorización,\n"
-    "detén el flujo y reporta que falta el documento firmado."
-)
+from .prompts import get_prompt
+
+# Fase 3: fuente unica de prompts. El texto vive en
+# `eval/prompt_versions/v1_orquestador.md` (ver agents/prompts.py).
+SYSTEM_PROMPT = get_prompt("orquestador")
 
 AGENTE = "orquestador"
 

@@ -151,7 +151,24 @@ def ubicacion_relativa(ubicacion: str) -> str:
       ser un nombre de parámetro suelto como `"sid"`), `urlparse` la trata
       como el `path` completo y la devuelve sin cambios -- no hay
       comportamiento nuevo para lo que ya funcionaba.
+    - **Rutas SPA con fragmento** (`/#/administration`): `urlparse` parte el
+      `#` como fragmento y devuelve `path='/'`, perdiendo la ruta real. El
+      ground truth de Juice Shop usa esa convención para el panel de admin
+      (VULN-005), y los chequeos dirigidos (`tools/deteccion_dirigida.py`)
+      reportan el activo afectado con esa misma ruta. Sin preservar el
+      fragmento, un hallazgo de control de acceso en /#/administration se
+      colapsaría a `/` y jamás matchearía. Solo se preserva para referencias
+      RELATIVAS (sin esquema/host): una URL absoluta que un escáner reporta
+      nunca lleva fragmento (el servidor no ve el `#`), así que ese caso sigue
+      devolviendo solo el `path` como antes.
     """
     if not ubicacion:
         return ""
-    return urlparse(str(ubicacion).strip()).path
+    partido = urlparse(str(ubicacion).strip())
+    if partido.scheme or partido.netloc:
+        # URL absoluta: solo el path (comportamiento original intacto).
+        return partido.path
+    # Referencia relativa: preservar el fragmento de rutas SPA (drop de query).
+    if partido.fragment:
+        return f"{partido.path}#{partido.fragment}"
+    return partido.path

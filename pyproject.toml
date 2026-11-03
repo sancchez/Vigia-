@@ -6,7 +6,14 @@ requires-python = ">=3.12"
 readme = "README.md"
 dependencies = [
     "langgraph>=0.3",
+    # Checkpointer del grafo (Fase 3). Persiste el estado de cada scan por
+    # `thread_id = scan_id` en la MISMA base SQLite del proyecto. Si
+    # `DATABASE_URL` apunta a Postgres, `orchestrator/graph.py` intenta
+    # `langgraph-checkpoint-postgres` (NO declarado acá a propósito: es opcional,
+    # y si falta el grafo corre sin checkpointer en vez de fallar al arrancar).
+    "langgraph-checkpoint-sqlite",
     "langchain-anthropic",
+    "langchain-core",
     "langchain-openai",
     "fastapi",
     "uvicorn[standard]",
@@ -32,6 +39,20 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
+]
+# Vigilancia continua de marca vía CertStream (api/certstream_listener.py).
+# Extra y no dependencia base a propósito: sin el feed self-hosted levantado
+# (deploy/certstream/docker-compose.yml) este cliente no tiene a qué
+# conectarse, y la vigilancia de marca igual funciona por barrido programado
+# (api/scheduler.py::run_brand_cycle_once). Instalar con:
+#     pip install -e '.[vigilancia]'
+# Antes esto no estaba declarado en ninguna parte: el listener importaba
+# `certstream` dentro de un try/except y se apagaba solo con un warning, así
+# que un despliegue "correcto" según pyproject.toml se quedaba sin vigilancia
+# en vivo y nadie se enteraba. Declararlo hace que la capacidad sea instalable
+# a propósito en vez de depender de que alguien lo haya instalado a mano.
+vigilancia = [
+    "certstream",
 ]
 
 [build-system]

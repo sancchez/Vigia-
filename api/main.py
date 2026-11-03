@@ -33,7 +33,7 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from pathlib import Path
 
@@ -42,7 +42,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from auth.jwt_auth import (
     UserContext,
@@ -50,11 +50,13 @@ from auth.jwt_auth import (
     get_current_user,
     get_password_hash,
     require_role,
+    verificar_configuracion_jwt,
     verify_password,
 )
 from agents.antisuplantacion import node as antisuplantacion_node
 from agents._llm import set_llm_context
 from agents.cumplimiento import generar_reporte_cumplimiento
+from agents.memoria import contexto_historico
 from agents.revision_ia import revisar_codigo
 from agents.verificacion import verificar_un_hallazgo
 from api.certstream_listener import start_certstream_listener, stop_certstream_listener
@@ -86,7 +88,10 @@ from tools.report_export import (
     markdown_to_docx_bytes,
     markdown_to_pdf_bytes,
 )
+from tools.deteccion_dirigida import ejecutar_checks_dirigidos
 from tools.scan import run_nuclei
+from tools.takedown import consultar_rdap, generar_borrador_takedown
+from tools.triage import FALSO_POSITIVO_DECLARADO
 from tools.zap_api import run_checkpointed_active_scan, run_single_target_verification
 from urllib.parse import urlparse
 
@@ -202,6 +207,7 @@ AVISO_LEGAL = (
 )
 
 _compiled_graph: Any = None
+_compiled_graph_db_url: Any = None
 
 
 def _get_graph() -> Any:
@@ -211,15 +217,27 @@ def _get_graph() -> Any:
     no tiene estado propio entre invocaciones (`PipelineState` viaja como
     argumento de `.invoke()`), así que un solo `CompiledStateGraph` es
     seguro de reutilizar entre requests concurrentes.
+
+    Desde Fase 3 el grafo SÍ lleva un checkpointer colgado (ver
+    `orchestrator/graph.py::_default_saver`), y ese checkpointer está atado a
+    una `DATABASE_URL` concreta — por eso la caché se invalida si la URL
+    cambia (la suite de tests apunta a un SQLite temporal distinto por test).
     """
-    global _compiled_graph
-    if _compiled_graph is None:
+    global _compiled_graph, _compiled_graph_db_url
+    url_actual = os.environ.get("DATABASE_URL", "sqlite:///./ciberseguridad.db")
+    if _compiled_graph is None or _compiled_graph_db_url != url_actual:
         _compiled_graph = compile_graph()
+        _compiled_graph_db_url = url_actual
     return _compiled_graph
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fix C-3: PRIMERO de todo -- si `JWT_SECRET` falta y el entorno no está
+    # declarado como local, esto lanza `RuntimeError` y el proceso no
+    # arranca. Antes, la app levantaba feliz firmando todos los tokens de
+    # sesión con un literal hardcodeado que está en el repositorio público.
+    verificar_configuracion_jwt()
     # Compila el grafo al arrancar (falla rápido si algo del ensamblaje del
     # StateGraph está roto, en vez de fallar en el primer /scan).
     _get_graph()
@@ -269,20 +287,30 @@ app.add_middleware(
 
 
 class ScopeIn(BaseModel):
-    """Espejo de `orchestrator.state.Scope` — solo forma, sin reglas de negocio."""
+    """Subconjunto de `orchestrator.state.Scope` que un tenant PUEDE declarar por HTTP.
+
+    Fix C-1. `orchestrator.state.Scope` también tiene `codigo_paths`
+    (rutas del sistema de archivos que `agents/escaneo.py` le pasa a
+    Semgrep) e `imagenes` (referencias que se le pasan a Trivy/Grype, lo
+    que implica un `docker pull` arbitrario). Esos DOS campos son
+    parámetros de OPERADOR, no de tenant: aceptarlos desde el body de
+    `POST /scan` le daba a cualquier usuario autenticado lectura de
+    archivos arbitrarios del servidor (`codigo_paths: ["/etc"]`,
+    `["C:/Users"]`) y pull/ejecución de imágenes arbitrarias. Se eliminan
+    del modelo HTTP a propósito -- el nodo de escaneo los sigue soportando
+    para uso interno/CLI, donde se inyectan server-side.
+
+    `extra="forbid"`: mandarlos igual ahora es un 422 explícito, no un
+    campo ignorado en silencio (que dejaría al cliente creyendo que
+    funcionó).
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     dominios: list[str] = Field(default_factory=list)
     apps: list[str] = Field(default_factory=list)
     ips: list[str] = Field(default_factory=list)
     notas: str = ""
-    codigo_paths: list[str] = Field(
-        default_factory=list,
-        description="Rutas locales de código fuente para SAST (Semgrep). No son URLs.",
-    )
-    imagenes: list[str] = Field(
-        default_factory=list,
-        description="Referencias de imagen de contenedor para SCA/CVE (Trivy+Grype). No son URLs.",
-    )
 
 
 class ScanRequest(BaseModel):
@@ -407,6 +435,16 @@ class AssetOut(BaseModel):
     # intervalo global de VIGIA_SCAN_INTERVAL_HOURS".
     scan_frequency_hours: Optional[int] = None
     scan_paused: bool = False
+    # Fix H-4: estas cuatro columnas existían en `db/schema.sql` y se LEÍAN en
+    # `api/scheduler.py` y `tools/report_export.py`, pero ningún endpoint las
+    # escribía nunca -- el escaneo activo recurrente era, en la práctica,
+    # imposible de habilitar, y el reporte ejecutivo decía "solo escaneo
+    # pasivo" para el 100% de los activos por construcción. Ahora se escriben
+    # en `POST /assets/{id}/autorizacion-activa` y se exponen aquí.
+    autorizacion_activa: bool = False
+    autorizacion_doc_url: Optional[str] = None
+    autorizado_por: Optional[str] = None
+    autorizado_en: Optional[str] = None
 
 
 class VerificarAssetIn(BaseModel):
@@ -621,6 +659,7 @@ def _asset_out_de_row(d: dict) -> AssetOut:
             "exento_de_verificacion": exento,
             "instrucciones_verificacion": instrucciones,
             "scan_paused": bool(d.get("scan_paused") or 0),
+            "autorizacion_activa": bool(d.get("autorizacion_activa") or 0),
         }
     )
 
@@ -735,6 +774,34 @@ def verificar_asset_endpoint(
         conn.close()
 
 
+class AutorizacionActivaIn(BaseModel):
+    """Evidencia de la autorización firmada para escaneo ACTIVO de un activo (fix H-4).
+
+    No es un booleano suelto a propósito: activar escaneo activo recurrente
+    significa que Vigia va a lanzar ZAP contra ese sistema cada N horas sin
+    que nadie apriete un botón, y `legal/autorizacion-pruebas-seguridad.md`
+    exige un documento firmado. Si algún día llega un reclamo ("¿quién
+    autorizó atacar este servidor?"), la respuesta tiene que estar en la
+    fila del activo, no en la memoria de alguien -- de ahí que
+    `autorizacion_doc_url` y `autorizado_por` sean obligatorios para
+    ACTIVAR (para revocar no se pide nada: apagar siempre debe ser más
+    fácil que encender).
+    """
+
+    activa: bool = Field(
+        default=True,
+        description="true habilita el escaneo activo recurrente; false lo revoca (y limpia la evidencia).",
+    )
+    autorizacion_doc_url: Optional[str] = Field(
+        default=None,
+        description="URL/referencia del documento de autorización firmado. Obligatorio si activa=true.",
+    )
+    autorizado_por: Optional[str] = Field(
+        default=None,
+        description="Nombre/cargo/email de quien firma la autorización por parte del cliente. Obligatorio si activa=true.",
+    )
+
+
 class AssetScheduleIn(BaseModel):
     """Fase 6a (openspec/changes/fase6-endurecimiento-produccion) -- ver
     design.md, Decisión 6a.4. Ambos campos opcionales: solo los presentes en
@@ -745,6 +812,110 @@ class AssetScheduleIn(BaseModel):
         default=None, ge=1, description="Horas entre escaneos de este activo. Omitir para usar el intervalo global."
     )
     scan_paused: Optional[bool] = Field(default=None, description="true para saltar este activo en el ciclo recurrente.")
+
+
+@app.post("/assets/{asset_id}/autorizacion-activa", response_model=AssetOut)
+def registrar_autorizacion_activa(
+    asset_id: str,
+    payload: AutorizacionActivaIn,
+    user: UserContext = Depends(require_role("owner")),
+) -> AssetOut:
+    """Escribe (o revoca) la autorización de ESCANEO ACTIVO de un activo -- fix H-4.
+
+    Cierra el agujero de "columna que se lee y nunca se escribe": las cuatro
+    columnas `assets.autorizacion_activa/autorizacion_doc_url/autorizado_por/
+    autorizado_en` ya gobernaban si `api/scheduler.py::run_scan_cycle_once`
+    lanza ZAP contra el activo, pero no existía forma de setearlas por API.
+    En la práctica el escaneo activo recurrente estaba muerto, y el gate
+    "real" (columna persistida) había quedado degradado al booleano
+    `autorizacion_firmada` que el propio cliente manda en cada request.
+
+    Tres controles, todos en el mismo lugar:
+
+    1. **Solo el `owner` del tenant.** Un `member` (o incluso un `admin`)
+       no puede comprometer a la empresa con una autorización de pruebas de
+       intrusión. Es el rol más restrictivo que usa este proyecto.
+    2. **El activo tiene que estar verificado (o exento).** Se reusa
+       `asset_autorizado_para_escanear`, el mismo gate que `/scan`,
+       `/scan/activo`, `/antisuplantacion` y el scheduler -- autorizar
+       escaneo activo sobre un dominio cuya propiedad no se probó sería el
+       bypass anterior con otro nombre.
+    3. **Evidencia obligatoria para activar.** Ver `AutorizacionActivaIn`.
+
+    La escritura es atómica: las cuatro columnas se actualizan en un solo
+    `UPDATE`, así que nunca queda `autorizacion_activa=1` sin saber quién ni
+    con qué documento.
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM assets WHERE id = ? AND tenant_id = ?", (asset_id, user.tenant_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Activo no encontrado para este tenant.")
+        asset = dict_from_row(row)
+
+        if payload.activa:
+            if not asset_autorizado_para_escanear(
+                asset["tipo"], asset["valor"], bool(asset["verificado"])
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"El activo '{asset['valor']}' (id={asset['id']}) no está verificado "
+                        "(ni exento). No se puede autorizar escaneo ACTIVO sobre un activo cuya "
+                        "propiedad no se ha demostrado: verifícalo primero con "
+                        f"POST /assets/{asset['id']}/verify."
+                    ),
+                )
+            doc_url = (payload.autorizacion_doc_url or "").strip()
+            autorizado_por = (payload.autorizado_por or "").strip()
+            if not doc_url or not autorizado_por:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Para activar el escaneo activo se exigen 'autorizacion_doc_url' (referencia "
+                        "al documento firmado, ver legal/autorizacion-pruebas-seguridad.md) y "
+                        "'autorizado_por' (quién firma por parte del cliente)."
+                    ),
+                )
+            conn.execute(
+                """
+                UPDATE assets
+                   SET autorizacion_activa = 1,
+                       autorizacion_doc_url = ?,
+                       autorizado_por = ?,
+                       autorizado_en = ?
+                 WHERE id = ? AND tenant_id = ?
+                """,
+                (
+                    doc_url,
+                    autorizado_por,
+                    datetime.now(timezone.utc).isoformat(),
+                    asset_id,
+                    user.tenant_id,
+                ),
+            )
+        else:
+            # Revocar limpia también la evidencia: dejar el documento colgando
+            # con `autorizacion_activa=0` sugeriría que la autorización sigue
+            # vigente "pero pausada", y no es eso lo que significa.
+            conn.execute(
+                """
+                UPDATE assets
+                   SET autorizacion_activa = 0,
+                       autorizacion_doc_url = NULL,
+                       autorizado_por = NULL,
+                       autorizado_en = NULL
+                 WHERE id = ? AND tenant_id = ?
+                """,
+                (asset_id, user.tenant_id),
+            )
+        conn.commit()
+        row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    finally:
+        conn.close()
+    return _asset_out_de_row(dict_from_row(row))
 
 
 @app.put("/assets/{asset_id}/schedule", response_model=AssetOut)
@@ -1943,8 +2114,24 @@ def reporte_ejecutivo_download(
         ).fetchall()
         kpis = _kpis_de_tenant(conn, user.tenant_id)
         postura = _postura_abierta_por_activo(conn, user.tenant_id)
+        # Sección "Exposición de marca": los mismos hallazgos que sirve
+        # `GET /antisuplantacion/dominios`, proyectados con el MISMO helper
+        # (`_dominio_clon_out_de_row`) para que el PDF y el panel web no
+        # puedan discrepar. Antes el export ejecutivo era exclusivamente
+        # técnico -- ni un dominio clon, ni score, ni borrador de takedown.
+        clon_rows = conn.execute(
+            """
+            SELECT * FROM findings
+            WHERE tenant_id = ? AND tipo IN ('dominio_variante', 'perfil_red_social')
+            ORDER BY created_at DESC
+            """,
+            (user.tenant_id,),
+        ).fetchall()
     finally:
         conn.close()
+
+    dominios_clon = [_dominio_clon_out_de_row(dict_from_row(r)).model_dump() for r in clon_rows]
+    kpis_marca = obtener_kpis_antisuplantacion(user).model_dump()
 
     tenant_nombre = tenant_row["name"] if tenant_row else ""
     assets = [dict_from_row(r) for r in asset_rows]
@@ -1955,6 +2142,8 @@ def reporte_ejecutivo_download(
         postura_por_activo=postura,
         kpis=kpis.model_dump(),
         generado_en=generado_en,
+        dominios_clon=dominios_clon,
+        kpis_marca=kpis_marca,
     )
     titulo = "Reporte Ejecutivo — Vigia"
 
@@ -2857,9 +3046,15 @@ def scan(
     subfinder/amass) contra un target no autorizado, además de cerrar el
     hueco de autorización en sí.
     """
+    # Fix C-1: se valida `target` Y cada objetivo de `scope` (ver
+    # `_autorizar_todos_los_objetivos`). Validar solo `target` era el bypass:
+    # `agents/escaneo.py` escanea `scope.dominios`, no `target`, cuando el
+    # scope viene poblado.
     conn_check = get_conn()
     try:
-        autorizado, motivo, asset = _asset_verificado_para_target(conn_check, user.tenant_id, payload.target)
+        autorizado, motivo, asset = _autorizar_todos_los_objetivos(
+            conn_check, user.tenant_id, payload.target, payload.scope.model_dump()
+        )
     finally:
         conn_check.close()
     if not autorizado:
@@ -2871,6 +3066,11 @@ def scan(
         scope=payload.scope.model_dump(),
         contexto_negocio=payload.contexto_negocio,
         antisuplantacion_habilitado=payload.antisuplantacion_habilitado,
+        # Fase 3: memoria entre corridas. Se lee ANTES de invocar el grafo (no
+        # dentro de un nodo) para que la lectura de base viva en la capa que ya
+        # sabe el `tenant_id` autenticado, y no haya que pasarle credenciales de
+        # tenant al grafo. Devuelve "" para un cliente nuevo.
+        contexto_historico=contexto_historico(user.tenant_id, payload.target),
     )
 
     # Fase 6a: scan_id generado ANTES de invocar el grafo (no después, como
@@ -2881,7 +3081,12 @@ def scan(
     set_llm_context(user.tenant_id, scan_id)
 
     grafo = _get_graph()
-    estado_final = grafo.invoke(estado_inicial)
+    # `thread_id = scan_id`: cada scan es un hilo propio del checkpointer, así
+    # que el estado intermedio de cada superstep queda persistido y una corrida
+    # se puede inspeccionar/reanudar después (ver orchestrator/graph.py).
+    estado_final = grafo.invoke(
+        estado_inicial, config={"configurable": {"thread_id": scan_id}}
+    )
 
     verified = estado_final.get("verified_findings") or []
     now = datetime.now(timezone.utc).isoformat()
@@ -2890,8 +3095,8 @@ def scan(
         conn.execute(
             """
             INSERT INTO scans
-                (id, tenant_id, asset_id, target, autorizacion_firmada, estado, reporte_final, trace_log_json, completed_at)
-            VALUES (?, ?, ?, ?, ?, 'completado', ?, ?, ?)
+                (id, tenant_id, asset_id, user_id, target, autorizacion_firmada, estado, reporte_final, trace_log_json, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'completado', ?, ?, ?)
             """,
             (
                 scan_id,
@@ -2903,6 +3108,9 @@ def scan(
                 # nunca se poblaba, dejando el drift de fase2a sin llave de scoping
                 # (ver design.md, "Poblar scans.asset_id").
                 asset["id"] if asset else None,
+                # Fix H-4: quién ejecutó el scan queda registrado, no solo el
+                # tenant. Complementa `assets.autorizado_por` (quién autorizó).
+                user.user_id,
                 estado_final.get("target", payload.target),
                 int(bool(estado_final.get("autorizacion_firmada", payload.autorizacion_firmada))),
                 estado_final.get("reporte_final"),
@@ -2917,6 +3125,22 @@ def scan(
         # INSERT (ver comentario histórico sobre el bug de severidad/endpoint
         # en tools/_shared.py::normalize_severity), ahora centralizado para
         # aplicar también SLA + drift antes de tocar `findings`.
+        #
+        # Fase 4: `tipo`/`endpoint` ahora vienen poblados por
+        # `tools/triage.py` (vía `agents/verificacion.py`). Antes, ninguna de
+        # esas dos claves existía en la salida de verificación, así que TODO
+        # hallazgo del grafo se persistía como `tipo="desconocido"` con el
+        # dominio como endpoint -- mismo patrón de bug que el ya documentado
+        # para `severidad` en `tools/_shared.py::normalize_severity`. Ahora se
+        # guarda el nombre real de la alerta y la URI concreta afectada, que
+        # es lo que hace al hallazgo verificable por el cliente.
+        #
+        # Las alertas que la PROPIA herramienta declaró falso positivo
+        # (`confidence: "0"` de ZAP) NO entran a `findings`: presentarlas en el
+        # panel sería presentarlas como hallazgo activo. No se pierden -- viajan
+        # en la respuesta de `POST /scan`, quedan contadas en el `trace_log`
+        # persistido en `scans.trace_log_json` y se listan en su propia sección
+        # del reporte, así que la corrida sigue siendo auditable.
         hallazgos_normalizados = [
             {
                 "tipo": hallazgo.get("tipo") or hallazgo.get("type") or "desconocido",
@@ -2926,13 +3150,26 @@ def scan(
                 "raw_json": json.dumps(hallazgo),
             }
             for hallazgo in verified
+            if hallazgo.get("estado_validez") != FALSO_POSITIVO_DECLARADO
         ]
 
         # Cierra la brecha documentada en docs/cumplimiento.md / HANDOFF.md
         # (Item 6): las señales reales de dnstwist/Sherlock bajo demanda
         # ahora también se persisten, colgadas del mismo scan_id real.
+        #
+        # El enriquecimiento (scoring 0-4 + screenshot + RDAP + borrador de
+        # takedown) corre ACÁ también, no solo en `POST /antisuplantacion`:
+        # antes este camino persistía dominios clon con `score=0` y sin
+        # borrador -- el mismo hallazgo entrado por otro endpoint quedaba
+        # inaccionable en el panel de marca. Ver `_enriquecer_dominios_clon`.
+        target_antisup = estado_final.get("target", payload.target)
+        _enriquecer_dominios_clon(
+            estado_final.get("antisuplantacion_findings") or [],
+            VIGIA_SCREENSHOT_DIR,
+            target_antisup,
+        )
         antisuplantacion_rows = _extraer_findings_antisuplantacion(
-            estado_final.get("target", payload.target),
+            target_antisup,
             estado_final.get("antisuplantacion_findings") or [],
         )
         hallazgos_normalizados.extend(
@@ -3136,6 +3373,57 @@ def _asset_verificado_para_target(conn, tenant_id: str, target_url: str) -> tupl
     )
 
 
+def _autorizar_todos_los_objetivos(
+    conn, tenant_id: str, target: str, scope: dict | None
+) -> tuple[bool, str, dict | None]:
+    """Gate de propiedad sobre TODOS los objetivos de un scan, no solo `target`.
+
+    Fix C-1 -- el bypass más grave que encontró la auditoría. `POST /scan`
+    validaba únicamente `payload.target`, pero `agents/escaneo.py` no usa
+    `target` cuando `scope.dominios` trae algo: itera esa lista y le pasa
+    cada entrada a `run_nuclei` y `run_zap_baseline`, que son escaneos
+    ACTIVOS contra infraestructura ajena. El PoC era trivial: registrar y
+    verificar un dominio propio, ponerlo en `target`, y meter el dominio de
+    un tercero en `scope.dominios`. El gate saludaba al primero mientras el
+    motor atacaba al segundo.
+
+    La regla ahora es "todo o nada": cada objetivo declarado (`target` +
+    cada entrada de `scope.dominios`/`apps`/`ips`) tiene que resolver a un
+    asset verificado (o exento) DE ESTE TENANT. Si uno solo falla, la
+    request entera se rechaza con 403 -- nunca se filtra la lista en
+    silencio, porque un scope silenciosamente recortado le haría creer al
+    cliente que cubrimos algo que no cubrimos.
+
+    Devuelve `(autorizado, motivo, asset_del_target)` -- la misma forma que
+    `_asset_verificado_para_target`, para que quien llama siga usando el
+    asset del target principal como `scans.asset_id`.
+    """
+    autorizado, motivo, asset = _asset_verificado_para_target(conn, tenant_id, target)
+    if not autorizado:
+        return False, motivo, asset
+
+    scope = scope or {}
+    vistos = {(target or "").strip().lower()}
+    for campo in ("dominios", "apps", "ips"):
+        for objetivo in scope.get(campo) or []:
+            objetivo = (objetivo or "").strip()
+            if not objetivo or objetivo.lower() in vistos:
+                continue
+            vistos.add(objetivo.lower())
+            ok, motivo_objetivo, _ = _asset_verificado_para_target(conn, tenant_id, objetivo)
+            if not ok:
+                return (
+                    False,
+                    (
+                        f"scope.{campo} incluye '{objetivo}', que no es un activo verificado de este "
+                        f"tenant. El escaneo se rechaza completo (no se recorta el scope en silencio). "
+                        f"Detalle: {motivo_objetivo}"
+                    ),
+                    asset,
+                )
+    return True, "", asset
+
+
 def _persistir_progreso_checkpoint(scan_id: str, progreso) -> None:
     """Guarda un checkpoint incremental de progreso mientras el escaneo sigue `corriendo`.
 
@@ -3149,9 +3437,21 @@ def _persistir_progreso_checkpoint(scan_id: str, progreso) -> None:
     persistir un checkpoint individual no debe tumbar el escaneo real —
     el próximo checkpoint lo intenta de nuevo.
     """
+    _persistir_progreso_texto(scan_id, f"[{progreso.fase}] {progreso.detalle}")
+
+
+def _persistir_progreso_texto(scan_id: str, texto: str) -> None:
+    """Escribe un texto de progreso en `scans.reporte_final` mientras el scan
+    sigue `corriendo` — best-effort (un fallo acá nunca tumba el trabajo real).
+
+    Extraído de `_persistir_progreso_checkpoint` (que solo sabía formatear el
+    objeto `ProgresoEscaneo` de `tools/zap_api.py`) para que el camino de
+    anti-suplantación en background pueda reportar su propio progreso
+    ("enriqueciendo 12/35 dominios…") por el mismo canal que ya lee
+    `GET /scans/{id}` y ahora también `GET /antisuplantacion/runs/{id}`.
+    """
     conn = get_conn()
     try:
-        texto = f"[{progreso.fase}] {progreso.detalle}"
         conn.execute("UPDATE scans SET reporte_final = ? WHERE id = ?", (texto, scan_id))
         conn.commit()
     except Exception:  # noqa: BLE001 — best-effort, ver docstring
@@ -3197,6 +3497,7 @@ def _correr_escaneo_activo_en_background(
     hallazgos_normalizados: list[dict] = []
     partes_reporte: list[str] = []
     algun_motor_ok = False
+    descartados_falso_positivo = 0
 
     # --- Motor 1: ZAP (spider + ajax spider opcional + escaneo activo) ---
     try:
@@ -3219,6 +3520,12 @@ def _correr_escaneo_activo_en_background(
         for hallazgo in resultado.findings:
             hallazgo_verificado = verificar_un_hallazgo(hallazgo)
             hallazgo_verificado["_motor"] = "zap"
+            # Fase 4: mismo criterio que `scan()` -- una alerta que ZAP mismo
+            # marcó `confidence: "0"` ("False Positive") no se persiste como
+            # hallazgo activo. Queda contada en el reporte del scan.
+            if hallazgo_verificado.get("estado_validez") == FALSO_POSITIVO_DECLARADO:
+                descartados_falso_positivo += 1
+                continue
             hallazgos_normalizados.append(
                 {
                     "tipo": hallazgo_verificado.get("name", "desconocido"),
@@ -3271,7 +3578,53 @@ def _correr_escaneo_activo_en_background(
     except Exception as exc:  # noqa: BLE001
         partes_reporte.append(f"Nuclei falló con un error inesperado: {exc}")
 
+    # --- Motor 3: Chequeos dirigidos (escaneo activo de alta confianza) ---
+    # Fase 5 (subir recall del motor): ZAP+Nuclei genéricos miden recall 0.0
+    # contra las clases de lógica de negocio/control de acceso del ground truth
+    # (ver eval/failure_log.md). Estos chequeos envían tráfico de ataque
+    # dirigido y SOLO reportan con evidencia concreta de explotación exitosa
+    # (recibió datos de otro usuario, token forjado aceptado, bypass de
+    # whitelist descargó el archivo). Es escaneo ACTIVO: legítimo solo aquí,
+    # detrás del mismo gate `autorizacion_firmada` + `_asset_verificado_para_target`
+    # que ya protege a ZAP/Nuclei en este camino. NUNCA como @tool (ver
+    # tools/registry.py). Nunca lanza hacia acá (degradación con gracia interna).
+    try:
+        hallazgos_dirigidos = ejecutar_checks_dirigidos(payload.target_url)
+        if hallazgos_dirigidos:
+            algun_motor_ok = True
+            partes_reporte.append(
+                f"Chequeos dirigidos: {len(hallazgos_dirigidos)} hallazgo(s) confirmado(s)."
+            )
+        for hd in hallazgos_dirigidos:
+            raw = {
+                "name": hd.tipo,
+                "ubicacion": hd.ubicacion,
+                "descripcion": hd.descripcion,
+                "evidencia": hd.evidencia,
+                "confianza": hd.confianza,
+                "_motor": "dirigido",
+            }
+            hallazgos_normalizados.append(
+                {
+                    "tipo": hd.tipo,
+                    "severidad": hd.severidad,
+                    # El activo afectado ES la ubicación persistida (el detalle
+                    # exacto del request probado queda en raw_json.evidencia).
+                    "endpoint": hd.ubicacion,
+                    # Confirmado por explotación exitosa, no por CVE/Exploit-DB.
+                    "confirmado": True,
+                    "raw_json": json.dumps(raw, default=str),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001 — un fallo aquí no debe tumbar el scan
+        partes_reporte.append(f"Chequeos dirigidos fallaron con un error inesperado: {exc}")
+
     estado_final = "completado" if algun_motor_ok else "error"
+    if descartados_falso_positivo:
+        partes_reporte.append(
+            f"{descartados_falso_positivo} alerta(s) descartada(s) por confidence=0 "
+            "(falso positivo declarado por la propia herramienta)."
+        )
     reporte = " | ".join(partes_reporte) if partes_reporte else "Escaneo activo sin resultado."
 
     now = datetime.now(timezone.utc).isoformat()
@@ -3311,10 +3664,10 @@ def escaneo_activo_async(
             raise HTTPException(status_code=403, detail=motivo)
         conn.execute(
             """
-            INSERT INTO scans (id, tenant_id, asset_id, target, autorizacion_firmada, estado, trace_log_json)
-            VALUES (?, ?, ?, ?, 1, 'corriendo', '[]')
+            INSERT INTO scans (id, tenant_id, asset_id, user_id, target, autorizacion_firmada, estado, trace_log_json)
+            VALUES (?, ?, ?, ?, ?, 1, 'corriendo', '[]')
             """,
-            (scan_id, user.tenant_id, asset["id"] if asset else None, payload.target_url),
+            (scan_id, user.tenant_id, asset["id"] if asset else None, user.user_id, payload.target_url),
         )
         conn.commit()
     finally:
@@ -3353,23 +3706,80 @@ VIGIA_SCREENSHOT_DIR = os.environ.get("VIGIA_SCREENSHOT_DIR", "data/screenshots"
 NUCLEI_TIMEOUT_ACTIVO_SEGUNDOS = int(os.environ.get("VIGIA_NUCLEI_TIMEOUT_ACTIVO_SEGUNDOS", "180"))
 
 
-def _enriquecer_dominios_clon(antisuplantacion_findings: list[dict], out_dir: str) -> None:
-    """Enriquece cada señal `dominio_variante` con scoring + screenshot, mutando `señal` in place.
+def _señal_sera_persistida(señal: dict, target: str) -> bool:
+    """Espejo exacto de los filtros de `_extraer_findings_antisuplantacion`
+    para señales `dominio_variante`.
+
+    Existe para no gastar sondeos de red (scoring + screenshot + RDAP) en
+    señales que esa función va a descartar de todos modos: el propio dominio
+    del cliente (`*original`), variantes no registradas, y los registros
+    DEFENSIVOS del propio titular. Además de ser desperdicio de tiempo, sondear
+    infraestructura de terceros sin que el resultado se vaya a usar contradice
+    directamente la política de cortesía de red documentada al inicio de
+    `tools/antisuplantacion.py`. Medido contra un caso real: de 46 entradas de
+    dnstwist solo 35 se persisten -- 11 sondeos evitados por corrida.
+    """
+    if señal.get("fuzzer") == "*original":
+        return False
+    if (señal.get("dominio") or "").strip().lower() == (target or "").strip().lower():
+        return False
+    if not señal.get("registrado"):
+        return False
+    if señal.get("es_defensivo"):
+        return False
+    return True
+
+
+def _enriquecer_dominios_clon(
+    antisuplantacion_findings: list[dict],
+    out_dir: str,
+    target: str = "",
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> None:
+    """Enriquece cada señal `dominio_variante` con scoring, screenshot, RDAP y
+    borrador de takedown determinista, mutando `señal` in place.
 
     `antisuplantacion_findings` es la salida cruda de
     `agents/antisuplantacion.py::node()` (`state["antisuplantacion_findings"]`
     -- una lista de `{"señales_crudas": [...], "analisis_claude": ...}`).
     `_extraer_findings_antisuplantacion` (más arriba) ya empaqueta cada
     `señal` completa dentro de `raw_json["señal"]` al persistir, así que
-    agregar aquí las claves `scoring`/`score`/`ssl_not_before`/`screenshot`
-    a la señal misma es suficiente para que viajen a `findings.raw_json`
-    sin ninguna columna SQL nueva (ver design.md, Architecture Decisions).
+    agregar aquí las claves `scoring`/`score`/`ssl_not_before`/`screenshot`/
+    `rdap`/`takedown` a la señal misma es suficiente para que viajen a
+    `findings.raw_json` sin ninguna columna SQL nueva (ver design.md,
+    Architecture Decisions).
 
     Solo se enriquecen señales `tipo == "dominio_variante"` -- un
     `perfil_red_social` no tiene un dominio del que hacer scoring de
     infraestructura ni una URL apta para un screenshot representativo del
     "sitio clon" (spec.md no lo exige para ese tipo).
+
+    `takedown` es DETERMINISTA y no depende de ninguna API key de LLM: se
+    arma con el registrador y el contacto de abuso reales que devuelve RDAP,
+    más la evidencia DNS/TLS ya recolectada (ver `tools/takedown.py` para el
+    razonamiento completo). El análisis del LLM, cuando está configurado,
+    sigue viajando aparte en `raw_json["analisis_claude"]` y se usa como
+    respaldo si por alguna razón no hubo borrador determinista.
+
+    `on_progress(hecho, total, dominio)` es opcional y se invoca ANTES de
+    sondear cada dominio. Existe porque este bucle es el que domina la
+    latencia real del flujo (medido: >15 min para ~35 lookalikes, entre
+    probes DNS/MX/SSL/HTTP, screenshot con Playwright y los delays de
+    cortesía de `VIGIA_SONDEO_*`), así que sin él la corrida en background
+    sería una caja negra para quien está haciendo polling. Nunca se le pide
+    al callback que no falle: un error dentro del callback NO debe abortar
+    el enriquecimiento (mismo criterio best-effort que
+    `_persistir_progreso_checkpoint`).
+
+    Este enriquecimiento corre en TODO camino que produce señales de
+    antisuplantación reales -- `POST /antisuplantacion` y `POST /scan` con
+    `antisuplantacion_habilitado=true` -- no en un solo endpoint: un hallazgo
+    con `score=0` y sin borrador de takedown no es accionable para el cliente,
+    sin importar por qué endpoint entró.
     """
+    # Se materializa la lista de trabajo antes del bucle para poder informar
+    # un total real ("12 de 35") en vez de un contador sin denominador.
+    pendientes: list[tuple[dict, dict, str]] = []
     for hallazgo in antisuplantacion_findings or []:
         for señal in hallazgo.get("señales_crudas") or []:
             if señal.get("tipo") != "dominio_variante":
@@ -3377,16 +3787,35 @@ def _enriquecer_dominios_clon(antisuplantacion_findings: list[dict], out_dir: st
             dominio = (señal.get("dominio") or "").strip()
             if not dominio:
                 continue
-            infra = puntuar_infra_lookalike(dominio)
-            señal["scoring"] = {
-                "dns_a": infra.dns_a,
-                "mx": infra.mx,
-                "ssl": infra.ssl,
-                "http": infra.http,
-            }
-            señal["score"] = infra.score
-            señal["ssl_not_before"] = infra.ssl_not_before
-            señal["screenshot"] = capturar_screenshot(dominio, out_dir)
+            if not _señal_sera_persistida(señal, target):
+                continue
+            pendientes.append((hallazgo, señal, dominio))
+
+    total = len(pendientes)
+    for indice, (hallazgo, señal, dominio) in enumerate(pendientes):
+        if on_progress is not None:
+            try:
+                on_progress(indice, total, dominio)
+            except Exception:  # noqa: BLE001 — reportar progreso nunca aborta el trabajo real
+                pass
+        infra = puntuar_infra_lookalike(dominio)
+        señal["scoring"] = {
+            "dns_a": infra.dns_a,
+            "mx": infra.mx,
+            "ssl": infra.ssl,
+            "http": infra.http,
+        }
+        señal["score"] = infra.score
+        señal["ssl_not_before"] = infra.ssl_not_before
+        señal["screenshot"] = capturar_screenshot(dominio, out_dir)
+        rdap = consultar_rdap(dominio)
+        señal["rdap"] = rdap
+        señal["takedown"] = generar_borrador_takedown(
+            dominio_clon=dominio,
+            dominio_legitimo=target or (hallazgo.get("target") or ""),
+            señal=señal,
+            rdap=rdap,
+        )
 
 
 class AntisuplantacionRunIn(BaseModel):
@@ -3395,6 +3824,13 @@ class AntisuplantacionRunIn(BaseModel):
 
 class DominioClonOut(BaseModel):
     finding_id: str
+    # `dominio_variante` | `perfil_red_social`. El endpoint que sirve esta
+    # proyección devuelve ambos tipos en la misma lista, y solo el primero
+    # tiene scoring de infraestructura (un perfil de red social no tiene MX
+    # ni certificado TLS propio) -- sin este campo el frontend mostraba
+    # "score 0/4" sobre perfiles, que se lee como "clon inofensivo" cuando en
+    # realidad la métrica no aplica.
+    tipo: str = "dominio_variante"
     endpoint: str
     severidad: str
     estado: str
@@ -3403,12 +3839,44 @@ class DominioClonOut(BaseModel):
     screenshot: Optional[str] = None
     takedown: Optional[str] = None
     primera_vez_visto: Optional[str] = None
+    # Ciclo de vida aplicado a marca (ver el bloque "Ciclo de vida APLICADO A
+    # MARCA" más abajo). `etapa_marca` es la traducción del `estado` genérico
+    # al vocabulario que el cliente entiende sobre un dominio clon: el estado
+    # interno sigue siendo `en_progreso`, pero mostrarle "En progreso" a quien
+    # acaba de mandar una carta a un registrador no le dice nada.
+    takedown_enviado_en: Optional[str] = None
+    takedown_destinatario: Optional[str] = None
+    registrador_sin_respuesta: int = 0
+    etapa_marca: str = "Detectado"
 
 
 class AntisuplantacionRunOut(BaseModel):
+    """Resultado de una corrida de protección de marca — ahora también su
+    ESTADO, porque la corrida es asíncrona (ver `ejecutar_antisuplantacion`).
+
+    Mientras `estado == "corriendo"`, `dominios`/`perfiles` vienen vacíos o
+    parciales y `progreso` trae el checkpoint legible ("Enriqueciendo 12 de
+    35 dominios…"). El contrato de las listas es idéntico al que devolvía la
+    versión síncrona, así que el frontend no tuvo que reinterpretar nada:
+    solo esperar a que `estado` deje de ser `corriendo`.
+    """
+
     scan_id: str
+    estado: str = "completado"
+    progreso: Optional[str] = None
+    target: Optional[str] = None
+    completed_at: Optional[str] = None
     dominios: list[DominioClonOut] = Field(default_factory=list)
     perfiles: list[DominioClonOut] = Field(default_factory=list)
+
+
+class AntisuplantacionAccepted(BaseModel):
+    """Respuesta 202 de `POST /antisuplantacion` — mismo contrato de forma que
+    `ActiveScanAccepted` (`POST /scan/activo`): un id para hacer polling, no
+    el resultado."""
+
+    scan_id: str
+    estado: str = "corriendo"
 
 
 class AntisuplantacionKpiOut(BaseModel):
@@ -3418,6 +3886,37 @@ class AntisuplantacionKpiOut(BaseModel):
     mttd_precision: str = "aproximado"
     total_clones: int = 0
     clones_activos: int = 0
+
+
+def _etapa_marca(estado: str, takedown_enviado_en: object, sin_respuesta: int) -> str:
+    """Traduce el `estado` genérico del ciclo de vida al vocabulario de marca.
+
+    La máquina de estados es la misma para un SQLi y para un dominio clon
+    (`TRANSICIONES_VALIDAS`), y eso está bien por dentro -- pero "Mitigado" no
+    es lo que un cliente entiende cuando su dominio clon dejó de responder, y
+    "En progreso" no le dice que la carta ya salió. Esta función NO cambia
+    ningún dato: es solo la capa de lenguaje, calculada, nunca persistida (si
+    mañana cambia la redacción, no hay que migrar ninguna fila).
+    """
+    if estado == "cerrado":
+        return "Resuelto — clon dado de baja"
+    if estado == "aceptado_riesgo":
+        return "Desestimado — riesgo aceptado"
+    if estado == "verificado":
+        return "Baja confirmada"
+    if estado == "mitigado":
+        return "El clon dejó de responder"
+    if estado == "en_progreso" and takedown_enviado_en:
+        return (
+            f"Takedown enviado — sin respuesta ({sin_respuesta})"
+            if sin_respuesta
+            else "Takedown enviado"
+        )
+    if estado in ("en_progreso", "asignado"):
+        return "En gestión"
+    if estado == "triage":
+        return "En triage"
+    return "Detectado"
 
 
 def _dominio_clon_out_de_row(d: dict) -> DominioClonOut:
@@ -3438,26 +3937,163 @@ def _dominio_clon_out_de_row(d: dict) -> DominioClonOut:
     score = señal.get("score") if isinstance(señal.get("score"), int) else 0
     screenshot_path = señal.get("screenshot")
     screenshot_url = f"/antisuplantacion/dominios/{d['id']}/screenshot" if screenshot_path else None
+    # Preferencia deliberada: el borrador DETERMINISTA por dominio
+    # (`tools/takedown.py`, con registrador y contacto de abuso reales vía
+    # RDAP) gana sobre `analisis_claude`, que es un análisis del LOTE completo
+    # de señales -- el mismo texto repetido en cada fila, sin el destinatario
+    # concreto de ese dominio. `analisis_claude` queda como respaldo para
+    # hallazgos anteriores a esta fase, que no tienen `señal["takedown"]`.
+    takedown = señal.get("takedown") or raw.get("analisis_claude")
+    sin_respuesta = raw.get("registrador_sin_respuesta")
+    sin_respuesta = sin_respuesta if isinstance(sin_respuesta, int) else 0
     return DominioClonOut(
+        takedown_enviado_en=raw.get("takedown_enviado_en"),
+        takedown_destinatario=raw.get("takedown_destinatario"),
+        registrador_sin_respuesta=sin_respuesta,
+        etapa_marca=_etapa_marca(d.get("estado") or "descubierto", raw.get("takedown_enviado_en"), sin_respuesta),
         finding_id=d["id"],
+        tipo=d.get("tipo") or "dominio_variante",
         endpoint=d["endpoint"],
         severidad=d["severidad"],
         estado=d["estado"],
         score=score,
         scoring=scoring,
         screenshot=screenshot_url,
-        takedown=raw.get("analisis_claude"),
+        takedown=takedown,
         primera_vez_visto=d.get("primera_vez_visto"),
     )
 
 
-@app.post("/antisuplantacion", response_model=AntisuplantacionRunOut)
+def _proyectar_corrida_antisuplantacion(
+    conn, tenant_id: str, target: str
+) -> tuple[list[DominioClonOut], list[DominioClonOut]]:
+    """Separa en (dominios, perfiles) los hallazgos de marca del tenant que
+    corresponden a ESTE `target`.
+
+    Se filtra por `raw_json["target"]` -- que `_extraer_findings_antisuplantacion`
+    escribe en toda fila de marca -- y NO por `findings.scan_id`, por la misma
+    razón que ya documentaba la versión síncrona de este endpoint:
+    `_registrar_findings_con_ciclo_de_vida` no reasigna `scan_id` a un
+    hallazgo que ya existía de una corrida anterior (drift), así que filtrar
+    por scan escondería justamente los clones que llevan más tiempo activos.
+    """
+    rows = conn.execute(
+        """
+        SELECT * FROM findings
+        WHERE tenant_id = ? AND tipo IN ('dominio_variante', 'perfil_red_social')
+        ORDER BY created_at DESC
+        """,
+        (tenant_id,),
+    ).fetchall()
+
+    objetivo = (target or "").strip().lower()
+    dominios: list[DominioClonOut] = []
+    perfiles: list[DominioClonOut] = []
+    for row in rows:
+        d = dict_from_row(row)
+        try:
+            raw = json.loads(d.get("raw_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        if str(raw.get("target") or "").strip().lower() != objetivo:
+            continue
+        proyeccion = _dominio_clon_out_de_row(d)
+        if d.get("tipo") == "perfil_red_social":
+            perfiles.append(proyeccion)
+        else:
+            dominios.append(proyeccion)
+    return dominios, perfiles
+
+
+def _correr_antisuplantacion_en_background(scan_id: str, tenant_id: str, asset: dict) -> None:
+    """Corre la rama anti-suplantación completa en un thread y deja el
+    resultado en la fila `scans` -- espejo de
+    `_correr_escaneo_activo_en_background` (mismo patrón, misma tabla, mismo
+    canal de progreso, mismo criterio de captura total de errores).
+
+    Nunca lanza hacia el llamador: no hay ninguno esperando. Cualquier fallo
+    queda como `estado='error'` con el motivo en `reporte_final`, legible por
+    `GET /scans/{id}` y `GET /antisuplantacion/runs/{id}`.
+    """
+    # Mismo detalle que en el escaneo activo: los contextvars NO se heredan de
+    # un `threading.Thread` padre, hay que poblar el contexto de costo DENTRO
+    # del thread (ver docstring de agents/_llm.py).
+    set_llm_context(tenant_id, scan_id)
+    target = asset["valor"]
+
+    try:
+        _persistir_progreso_texto(
+            scan_id,
+            "[busqueda] Generando variantes del dominio y buscando perfiles con el nombre de la marca…",
+        )
+        estado_inicial = new_state(target=target, antisuplantacion_habilitado=True)
+        resultado_nodo = antisuplantacion_node(estado_inicial)
+        señales_crudas = resultado_nodo.get("antisuplantacion_findings") or []
+
+        def _reportar(hecho: int, total: int, dominio: str) -> None:
+            _persistir_progreso_texto(
+                scan_id,
+                f"[evidencia] Verificando infraestructura y capturando evidencia: "
+                f"{hecho + 1} de {total} ({dominio})",
+            )
+
+        _enriquecer_dominios_clon(
+            señales_crudas, VIGIA_SCREENSHOT_DIR, target, on_progress=_reportar
+        )
+
+        filas = _extraer_findings_antisuplantacion(target, señales_crudas)
+        hallazgos_normalizados = [
+            {
+                "tipo": fila["tipo"],
+                "severidad": fila["severidad"],
+                "endpoint": fila["endpoint"],
+                "confirmado": False,
+                "raw_json": json.dumps(fila["raw_json"], default=str),
+            }
+            for fila in filas
+        ]
+        n_dominios = sum(1 for f in filas if f["tipo"] == "dominio_variante")
+        n_perfiles = len(filas) - n_dominios
+        resumen = (
+            f"Protección de marca sobre {target}: {n_dominios} dominio(s) clon y "
+            f"{n_perfiles} perfil(es) para revisión."
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_conn()
+        try:
+            _registrar_findings_con_ciclo_de_vida(
+                conn, tenant_id, scan_id, asset["id"], hallazgos_normalizados, now
+            )
+            conn.execute(
+                "UPDATE scans SET estado = 'completado', reporte_final = ?, completed_at = ? WHERE id = ?",
+                (resumen, now, scan_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 — este thread es el último punto de captura posible
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_conn()
+        try:
+            conn.execute(
+                "UPDATE scans SET estado = 'error', reporte_final = ?, completed_at = ? WHERE id = ?",
+                (f"La protección de marca falló: {exc}", now, scan_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+@app.post("/antisuplantacion", response_model=AntisuplantacionAccepted, status_code=202)
 @limiter.limit(RATE_LIMIT_ANTISUPLANTACION)
 def ejecutar_antisuplantacion(
     request: Request,
     payload: AntisuplantacionRunIn,
     user: UserContext = Depends(get_current_user),
-) -> AntisuplantacionRunOut:
+) -> AntisuplantacionAccepted:
     """Dispara SOLO la rama anti-suplantación sobre un asset dominio ya
     verificado (o exento) del tenant -- ver design.md, Data Flow.
 
@@ -3467,11 +4103,27 @@ def ejecutar_antisuplantacion(
     recon/escaneo técnico/verificación/priorización/remediación -- más
     barato y permite disparar la protección de marca por sí sola.
 
-    Síncrono a propósito (spec.md exige 200 con la lista de dominios ya
-    resuelta en la misma respuesta, no un `scan_id` para hacer polling) --
-    dnstwist+Sherlock bajo demanda tardan segundos, no los 20-180 minutos de
-    un escaneo activo ZAP que sí justifica el patrón background de
-    `POST /scan/activo`.
+    ASÍNCRONO (202 + `scan_id`), desde 2026-08-02. Antes era síncrono y
+    devolvía 200 con la lista ya resuelta; el motivo del cambio está MEDIDO,
+    no es preferencia de estilo: una corrida real contra un dominio bancario
+    con 45 lookalikes registrados tardó más de 15 minutos y el cliente HTTP
+    cortó antes de que el servidor terminara. El costo no está en dnstwist
+    (rápido) sino en `_enriquecer_dominios_clon`: por cada lookalike de
+    tercero hace probes DNS/MX/SSL/HTTP + screenshot con Playwright
+    (timeout 20s c/u), serializados detrás de los delays de cortesía de red
+    (`VIGIA_SONDEO_*`, deliberadamente conservadores y que NO se tocan para
+    "ir más rápido"). Detrás de cualquier reverse proxy con timeout típico
+    (30-100s en Render/Railway/nginx por default) la versión síncrona
+    devolvía error al cliente aunque el trabajo terminara bien del lado del
+    servidor.
+
+    El trabajo corre en un thread (`_correr_antisuplantacion_en_background`)
+    y el estado se consulta con `GET /antisuplantacion/runs/{scan_id}`
+    -- exactamente el patrón que ya usaba `POST /scan/activo`. Las
+    validaciones de propiedad/verificación del activo siguen siendo SÍNCRONAS
+    y previas al 202 (404/422/403): lanzar un trabajo de 15 minutos contra un
+    activo ajeno o sin verificar y recién después contarlo sería peor que la
+    latencia que se está arreglando.
     """
     conn = get_conn()
     try:
@@ -3497,62 +4149,64 @@ def ejecutar_antisuplantacion(
                 ),
             )
 
-        estado_inicial = new_state(target=asset["valor"], antisuplantacion_habilitado=True)
-        resultado_nodo = antisuplantacion_node(estado_inicial)
-        señales_crudas = resultado_nodo.get("antisuplantacion_findings") or []
-
-        _enriquecer_dominios_clon(señales_crudas, VIGIA_SCREENSHOT_DIR)
-
         scan_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             """
             INSERT INTO scans
-                (id, tenant_id, asset_id, target, autorizacion_firmada, estado, completed_at)
-            VALUES (?, ?, ?, ?, 1, 'completado', ?)
+                (id, tenant_id, asset_id, user_id, target, autorizacion_firmada, estado, trace_log_json)
+            VALUES (?, ?, ?, ?, ?, 1, 'corriendo', '[]')
             """,
-            (scan_id, user.tenant_id, asset["id"], asset["valor"], now),
-        )
-
-        filas = _extraer_findings_antisuplantacion(asset["valor"], señales_crudas)
-        hallazgos_normalizados = [
-            {
-                "tipo": fila["tipo"],
-                "severidad": fila["severidad"],
-                "endpoint": fila["endpoint"],
-                "confirmado": False,
-                "raw_json": json.dumps(fila["raw_json"], default=str),
-            }
-            for fila in filas
-        ]
-        _registrar_findings_con_ciclo_de_vida(
-            conn, user.tenant_id, scan_id, asset["id"], hallazgos_normalizados, now
+            (scan_id, user.tenant_id, asset["id"], user.user_id, asset["valor"]),
         )
         conn.commit()
-
-        # `_registrar_findings_con_ciclo_de_vida` no reasigna `scan_id` a un
-        # hallazgo que ya existía de una corrida anterior (drift) -- por eso
-        # la respuesta se arma buscando por (tenant, tipo, endpoint), no por
-        # `scan_id`, igual que hace `GET /antisuplantacion/dominios` (scoped
-        # a todo el tenant, no a un solo scan).
-        dominios: list[DominioClonOut] = []
-        perfiles: list[DominioClonOut] = []
-        for fila in filas:
-            fila_row = conn.execute(
-                "SELECT * FROM findings WHERE tenant_id = ? AND tipo = ? AND endpoint = ?",
-                (user.tenant_id, fila["tipo"], fila["endpoint"]),
-            ).fetchone()
-            if fila_row is None:
-                continue
-            proyeccion = _dominio_clon_out_de_row(dict_from_row(fila_row))
-            if fila["tipo"] == "dominio_variante":
-                dominios.append(proyeccion)
-            else:
-                perfiles.append(proyeccion)
     finally:
         conn.close()
 
-    return AntisuplantacionRunOut(scan_id=scan_id, dominios=dominios, perfiles=perfiles)
+    hilo = threading.Thread(
+        target=_correr_antisuplantacion_en_background,
+        args=(scan_id, user.tenant_id, asset),
+        daemon=True,
+    )
+    hilo.start()
+
+    return AntisuplantacionAccepted(scan_id=scan_id, estado="corriendo")
+
+
+@app.get("/antisuplantacion/runs/{scan_id}", response_model=AntisuplantacionRunOut)
+def estado_corrida_antisuplantacion(
+    scan_id: str, user: UserContext = Depends(get_current_user)
+) -> AntisuplantacionRunOut:
+    """Estado + resultado de una corrida de `POST /antisuplantacion`.
+
+    Es el equivalente de `GET /scans/{id}` para el flujo de marca: existe
+    aparte porque el frontend necesita las proyecciones `DominioClonOut`
+    (score, screenshot, borrador de takedown, etapa de marca), no las filas
+    `FindingOut` genéricas que devuelve aquel. `GET /scans/{id}` sigue
+    funcionando sobre el mismo `scan_id` para quien quiera la vista cruda.
+
+    Tenant-scoped: 404 si el scan es de otro tenant.
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM scans WHERE id = ? AND tenant_id = ?", (scan_id, user.tenant_id)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Corrida de protección de marca no encontrada")
+        scan = dict_from_row(row)
+        dominios, perfiles = _proyectar_corrida_antisuplantacion(conn, user.tenant_id, scan["target"])
+    finally:
+        conn.close()
+
+    return AntisuplantacionRunOut(
+        scan_id=scan_id,
+        estado=scan["estado"],
+        progreso=scan.get("reporte_final"),
+        target=scan["target"],
+        completed_at=scan.get("completed_at"),
+        dominios=dominios,
+        perfiles=perfiles,
+    )
 
 
 @app.get("/antisuplantacion/dominios", response_model=list[DominioClonOut])
@@ -3601,6 +4255,249 @@ def obtener_screenshot_clon(finding_id: str, user: UserContext = Depends(get_cur
     if not ruta or not os.path.isfile(ruta):
         raise HTTPException(status_code=404, detail="Sin screenshot disponible para este hallazgo")
     return FileResponse(ruta, media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Ciclo de vida APLICADO A MARCA (acciones sobre un dominio clon)
+# ---------------------------------------------------------------------------
+# El ciclo de vida genérico (8 estados, `TRANSICIONES_VALIDAS`) ya cubría los
+# hallazgos de marca porque viven en la misma tabla `findings` -- pero nunca
+# había sido ejercitado para un clon, y le faltaba lo único que un cliente
+# realmente hace con uno: MANDAR el takedown y después perseguirlo. Sin esto,
+# el panel mostraba un borrador con un botón "Copiar" y ahí se terminaba el
+# producto: la pregunta "¿y después de que me avisan, qué?" no tenía respuesta
+# dentro del sistema, solo fuera de él.
+#
+# Decisión: NO se agregan valores nuevos a `findings.estado`. Ese campo tiene
+# un CHECK constraint en `db/schema.sql:148-149`, y agregarle 'takedown_enviado'
+# obliga a reconstruir la tabla en SQLite (ALTER no puede tocar un CHECK) --
+# una migración destructiva sobre la tabla central del producto, para ganar una
+# etiqueta. En su lugar:
+#
+#   * "Takedown enviado"  -> `en_progreso` (el estado que ya significa "alguien
+#     está trabajando en remediar esto"), MÁS la evidencia de qué se envió, a
+#     quién y cuándo, guardada en `raw_json`. Es estrictamente más información
+#     que un estado nuevo vacío: un estado dice "se envió", esto dice "se envió
+#     ESTE texto a ESTA dirección el DÍA TAL".
+#   * "El registrador no respondió" -> NO es un estado, es un evento que puede
+#     repetirse N veces sobre el mismo hallazgo. Se registra como fila de
+#     auditoría en `finding_transiciones` sin cambio de estado (columnas
+#     `estado_anterior`/`estado_nuevo` NULL, ya soportado por el schema y por
+#     el propio `PATCH /findings/{id}` para cambios de solo dueño) más un
+#     contador en `raw_json`. Modelarlo como estado habría sido incorrecto:
+#     un hallazgo esperando la tercera respuesta del registrador NO está en un
+#     estado distinto al que esperaba la primera.
+#
+# El vocabulario de cara al cliente ("Takedown enviado", "Sin respuesta del
+# registrador") lo pone el panel a partir de estos datos -- ver
+# `etapa_marca` abajo y `BrandProtectionPanel.tsx`.
+
+_TIPOS_MARCA = ("dominio_variante", "perfil_red_social", "dominio_variante_certstream")
+
+# Camino hop-a-hop hasta `en_progreso`. Se recorre paso a paso, respetando
+# `TRANSICIONES_VALIDAS`, en vez de un UPDATE directo: así el historial de
+# `finding_transiciones` queda íntegro y `GET /kpis` (MTTR) sigue midiendo
+# sobre transiciones reales, no sobre un salto sintético.
+_RUTA_HASTA_EN_PROGRESO = ("triage", "asignado", "en_progreso")
+
+
+def _finding_marca_o_404(conn, finding_id: str, tenant_id: str) -> dict:
+    """Fila `findings` de marca de este tenant, o 404 -- mismo criterio
+    404-no-403 que el resto de endpoints por-hallazgo (no se confirma la
+    existencia de un recurso ajeno)."""
+    row = conn.execute(
+        "SELECT * FROM findings WHERE id = ? AND tenant_id = ?", (finding_id, tenant_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Hallazgo no encontrado")
+    d = dict_from_row(row)
+    if d.get("tipo") not in _TIPOS_MARCA:
+        raise HTTPException(
+            status_code=422,
+            detail="Este endpoint solo aplica a hallazgos de suplantación de marca.",
+        )
+    return d
+
+
+def _mutar_raw_json(conn, finding_id: str, cambios: dict) -> None:
+    """Aplica `cambios` sobre `findings.raw_json` preservando todo lo demás.
+
+    Tolerante igual que `_dominio_clon_out_de_row`: un `raw_json` corrupto se
+    reemplaza por uno nuevo con los cambios en vez de romper la acción del
+    cliente (perder la evidencia previa es malo, pero dejarlo sin poder
+    registrar el takedown es peor, y el caso solo ocurre si algo ya escribió
+    basura ahí)."""
+    row = conn.execute("SELECT raw_json FROM findings WHERE id = ?", (finding_id,)).fetchone()
+    try:
+        raw = json.loads((row["raw_json"] if row else None) or "{}")
+    except (json.JSONDecodeError, TypeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    raw.update(cambios)
+    conn.execute(
+        "UPDATE findings SET raw_json = ? WHERE id = ?", (json.dumps(raw, default=str), finding_id)
+    )
+
+
+class TakedownEnviadoIn(BaseModel):
+    # Opcionales a propósito: el cliente puede haber usado el borrador tal cual
+    # (y entonces el destinatario ya está en `señal["rdap"]["abuse_email"]`) o
+    # haberlo mandado por el formulario web del registrador, que no tiene email.
+    destinatario: Optional[str] = None
+    texto_enviado: Optional[str] = None
+    nota: Optional[str] = None
+
+
+class SinRespuestaIn(BaseModel):
+    dias_esperados: Optional[int] = None
+    nota: Optional[str] = None
+
+
+@app.post("/antisuplantacion/dominios/{finding_id}/takedown-enviado", response_model=DominioClonOut)
+def marcar_takedown_enviado(
+    finding_id: str,
+    payload: TakedownEnviadoIn,
+    user: UserContext = Depends(get_current_user),
+) -> DominioClonOut:
+    """Registra que el cliente YA envió la solicitud de takedown de este clon.
+
+    Avanza el hallazgo hasta `en_progreso` recorriendo la máquina de estados
+    paso a paso (`descubierto`->`triage`->`asignado`->`en_progreso`), dejando
+    una fila de auditoría por cada salto, y guarda la evidencia de lo enviado
+    (destinatario, texto, timestamp) en `raw_json`.
+
+    Idempotente hacia adelante: si el hallazgo ya está en `en_progreso` o más
+    allá, no retrocede ni duplica saltos -- solo actualiza la evidencia del
+    último envío (un cliente que reenvía la carta tras el silencio del
+    registrador es el caso normal, no un error).
+
+    409 solo si el hallazgo está en un estado TERMINAL (`cerrado` /
+    `aceptado_riesgo`): mandar un takedown por algo que ya se cerró o cuyo
+    riesgo se aceptó formalmente es una contradicción que el cliente debería
+    resolver reabriendo, no un registro que este endpoint deba inventar.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        finding = _finding_marca_o_404(conn, finding_id, user.tenant_id)
+        estado = finding["estado"]
+        if estado in ("cerrado", "aceptado_riesgo"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"El hallazgo está en estado terminal ('{estado}'); no se puede registrar "
+                    "un takedown enviado sobre algo ya cerrado o con riesgo aceptado."
+                ),
+            )
+
+        nota_base = payload.nota or "Solicitud de takedown enviada al registrador."
+        if estado in _RUTA_HASTA_EN_PROGRESO or estado == "descubierto":
+            # Avanza solo los saltos que faltan: si ya está en `triage`, no
+            # vuelve a pasar por `triage`.
+            try:
+                desde = _RUTA_HASTA_EN_PROGRESO.index(estado) + 1
+            except ValueError:
+                desde = 0  # 'descubierto'
+            for siguiente in _RUTA_HASTA_EN_PROGRESO[desde:]:
+                conn.execute("UPDATE findings SET estado = ? WHERE id = ?", (siguiente, finding_id))
+                _registrar_transicion_verificacion(
+                    conn, finding_id, user.tenant_id, user.user_id, estado, siguiente, nota_base, now
+                )
+                estado = siguiente
+
+        destinatario = payload.destinatario
+        if not destinatario:
+            try:
+                señal = (json.loads(finding.get("raw_json") or "{}") or {}).get("señal") or {}
+                destinatario = (señal.get("rdap") or {}).get("abuse_email")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                destinatario = None
+
+        _mutar_raw_json(
+            conn,
+            finding_id,
+            {
+                "takedown_enviado_en": now,
+                "takedown_destinatario": destinatario,
+                "takedown_texto_enviado": payload.texto_enviado,
+                "takedown_enviado_por": user.user_id,
+            },
+        )
+        conn.commit()
+
+        fila = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+        salida = _dominio_clon_out_de_row(dict_from_row(fila))
+    finally:
+        conn.close()
+
+    logger.info("Takedown registrado como enviado para %s (finding=%s)", salida.endpoint, finding_id)
+    return salida
+
+
+@app.post("/antisuplantacion/dominios/{finding_id}/sin-respuesta", response_model=DominioClonOut)
+def marcar_registrador_sin_respuesta(
+    finding_id: str,
+    payload: SinRespuestaIn,
+    user: UserContext = Depends(get_current_user),
+) -> DominioClonOut:
+    """Registra que el registrador NO respondió a la solicitud enviada.
+
+    No cambia el estado (ver el bloque de decisión arriba: esperar la
+    respuesta N veces no es un estado distinto de esperarla la primera), pero
+    sí deja rastro auditable: fila en `finding_transiciones` con
+    `estado_anterior`/`estado_nuevo` NULL y la nota, más un contador
+    `registrador_sin_respuesta` en `raw_json` que el panel usa para mostrar
+    "Sin respuesta (Nº intentos)" y justificar el escalamiento.
+
+    409 si el takedown nunca se registró como enviado: "no respondió" no
+    significa nada si nadie preguntó -- y aceptarlo en silencio produciría un
+    historial que miente sobre lo que el cliente hizo.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        finding = _finding_marca_o_404(conn, finding_id, user.tenant_id)
+        try:
+            raw = json.loads(finding.get("raw_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            raw = {}
+        if not isinstance(raw, dict) or not raw.get("takedown_enviado_en"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Este hallazgo no tiene un takedown registrado como enviado. "
+                    "Registralo primero con POST /antisuplantacion/dominios/{id}/takedown-enviado."
+                ),
+            )
+
+        intentos = raw.get("registrador_sin_respuesta")
+        intentos = (intentos if isinstance(intentos, int) else 0) + 1
+        nota = payload.nota or (
+            f"El registrador no respondió"
+            + (f" tras {payload.dias_esperados} día(s)" if payload.dias_esperados else "")
+            + f" (intento {intentos})."
+        )
+
+        _registrar_transicion_verificacion(
+            conn, finding_id, user.tenant_id, user.user_id, None, None, nota, now
+        )
+        _mutar_raw_json(
+            conn,
+            finding_id,
+            {"registrador_sin_respuesta": intentos, "registrador_sin_respuesta_en": now},
+        )
+        conn.commit()
+
+        fila = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+        salida = _dominio_clon_out_de_row(dict_from_row(fila))
+    finally:
+        conn.close()
+
+    logger.info(
+        "Registrador sin respuesta (intento %d) para %s (finding=%s)", intentos, salida.endpoint, finding_id
+    )
+    return salida
 
 
 @app.get("/antisuplantacion/kpis", response_model=AntisuplantacionKpiOut)

@@ -62,10 +62,29 @@ def test_priorizacion_fallback_esquema_y_orden_por_severidad(monkeypatch):
     assert checks.validar_orden_por_severidad(salida) == []
 
 
-def test_priorizacion_fallback_detecta_orden_incorrecto(monkeypatch):
+def test_check_de_orden_es_capaz_de_fallar():
     """El check en sí debe ser capaz de FALLAR ante una salida mal ordenada
     -- si esto no fallara nunca, el check anterior no estaría probando
-    nada real."""
+    nada real.
+
+    Fase 4: antes esta capacidad se ejercitaba pasándole al nodo una
+    respuesta de LLM desordenada, pero `agents/priorizacion.py` ya no puede
+    producir esa salida (ordena de forma determinista ANTES de llamar al
+    modelo, ver `tools/triage.py::ordenar_por_riesgo`). Que el nodo ya no
+    pueda desordenarse es la mejora, no la pérdida del test: el check se
+    ejercita ahora contra una lista mal ordenada construida a mano, y el
+    test de abajo cubre el caso real que reemplazó a este.
+    """
+    mal_ordenada = [
+        {"severidad": "low", "urgencia_negocio": "baja", "justificacion": "x"},
+        {"severidad": "critical", "urgencia_negocio": "alta", "justificacion": "x"},
+    ]
+    assert checks.validar_orden_por_severidad(mal_ordenada) != []
+
+
+def test_priorizacion_ignora_el_orden_propuesto_por_el_llm(monkeypatch):
+    """Un LLM que devuelve los hallazgos desordenados (el más leve primero)
+    NO puede desordenar la salida: el orden lo fija `ordenar_por_riesgo`."""
     dataset = _cargar("dataset_priorizacion.json")
     fixture = _cargar("fixture_respuesta_priorizacion.json")
     state = {"verified_findings": dataset["verified_findings"]}
@@ -78,7 +97,12 @@ def test_priorizacion_fallback_detecta_orden_incorrecto(monkeypatch):
     salida = resultado["prioritized_findings"]
 
     assert checks.validar_esquema_priorizacion(salida) == []
-    assert checks.validar_orden_por_severidad(salida) != []
+    assert checks.validar_orden_por_severidad(salida) == []
+    assert [h["severidad"] for h in salida] == ["critical", "high", "medium", "low"]
+    # La respuesta no conforme pedía urgencia "alta" para un hallazgo `low`:
+    # se acota al techo determinista en vez de inflarse.
+    por_severidad = {h["severidad"]: h["urgencia_negocio"] for h in salida}
+    assert por_severidad["low"] == "baja"
 
 
 def test_remediacion_fallback_esquema_y_sin_sobre_promesa(monkeypatch):

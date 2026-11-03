@@ -20,15 +20,32 @@
 # Uso: ver README.md de este mismo directorio.
 services:
   certstream-server-go:
-    # Build desde el repo oficial (no hay un tag estable y verificado en un
-    # registry público al momento de este change -- ver design.md, Open
-    # Question "Imagen concreta de certstream-server-go (repo/tag)"). Si tu
-    # organización publica su propia imagen en un registry privado,
-    # reemplazá este bloque `build:` por `image: tu-registry/certstream-server-go:tag`.
-    build:
-      context: https://github.com/d-Rickyy-b/certstream-server-go.git
+    # Imagen oficial del proyecto en Docker Hub. Antes esto era un
+    # `build: context: https://github.com/...git` porque no había una imagen
+    # verificada; se cambió tras VERIFICARLA EN VIVO el 2026-08-01 (ver
+    # "Estado de validación" en el README de este directorio): `docker run` de
+    # esta imagen se conecta a los logs CT reales y emite `certificate_update`
+    # con `all_domains` poblado en menos de un minuto. Usar la imagen en vez de
+    # construir desde git quita ~5 minutos de build, la dependencia de tener
+    # `git` + toolchain Go en el host, y el riesgo de que un cambio en `main`
+    # rompa el arranque en casa del cliente.
+    #
+    # Si tu organización exige un registry propio, reemplazá esta línea por
+    # `image: tu-registry/certstream-server-go:tag` (o volvé al bloque
+    # `build:` — el listener no distingue).
+    image: 0rickyy0/certstream-server-go:latest
     container_name: vigia-certstream-server-go
     restart: unless-stopped
+    healthcheck:
+      # El servidor expone el websocket en 8080; si el proceso está vivo y
+      # escuchando, el puerto acepta conexión. Sin healthcheck, un contenedor
+      # arrancado-pero-mudo se ve igual que uno sano desde `docker ps`, que es
+      # justo la ambigüedad que este módulo intenta eliminar.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/example.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     ports:
       # Puerto local del websocket que consume api/certstream_listener.py.
       # `/full-stream` expone el shape completo compatible con el CertStream

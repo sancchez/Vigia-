@@ -353,14 +353,25 @@ por escaneo) antes de fijar precio, dado el rango de $49-299 USD/mes que
 
 ### 6. Feed real de CertStream
 
-Documentado ya en Item 5 de `HANDOFF.md` como brecha conocida: el feed
-público gratuito (`wss://certstream.calidog.io`) está descontinuado —
-vigilancia continua real de suplantación de dominio no funciona hoy sin
-levantar una instancia propia de `certstream-server-go`/`-rust`
-(self-hosted) y apuntar `VIGIA_CERTSTREAM_URL` a ella. Sin esto, Item 5 es
-un mecanismo verificado pero no una funcionalidad activa — vale la pena
-resolverlo antes de vender "monitoreo continuo" como parte del pitch, o
-ajustar el pitch para no prometerlo hasta que lo esté.
+✅ **RESUELTO (2026-08-01).** El feed público gratuito
+(`wss://certstream.calidog.io`) sigue descontinuado, pero el camino
+self-hosted dejó de ser teoría: `deploy/certstream/docker-compose.yml` se
+levantó de verdad y se verificó la cadena completa (servidor procesando logs
+CT reales → websocket con el shape correcto → cliente Python → finding
+`dominio_variante_certstream` escrito en la BD). Ver la tabla de evidencia en
+`deploy/certstream/README.md`. El compose ahora usa la imagen verificada en
+vez de construir desde git, `certstream` está declarado como extra
+`[vigilancia]` en `pyproject.toml`, y `_DEFAULT_URL` apunta al feed local —
+si nadie lo levantó, falla ruidosamente en vez de fingir que vigila.
+
+**Además se cerró un agujero mayor que este documento no registraba:** el
+ciclo de escaneo recurrente corría con `antisuplantacion_habilitado=False`,
+así que la vigilancia de marca **tampoco** existía por la vía programada. Hoy
+`api/scheduler.py::run_brand_cycle_once()` la hace cada
+`VIGIA_BRAND_CYCLE_HOURS` (default 24h) sin depender de ningún contenedor
+extra. Vender "monitoreo continuo" ya es honesto; lo que NO se puede prometer
+sin levantar CertStream es "tiempo real" (la latencia del barrido es de
+horas, no de minutos) — ver `PRICING.md`, nota bajo la tabla de planes.
 
 ### 7. Verificación real de propiedad de dominio
 

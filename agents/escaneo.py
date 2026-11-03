@@ -8,6 +8,22 @@ en profundidad: si alguien llama `node()` directamente (fuera del grafo,
 en un test, en un notebook), el nodo igual se niega a escanear sin
 autorización — nunca depende únicamente de que el flujo del grafo se haya
 construido bien.
+
+SEGUNDA PRECONDICIÓN (fix C-1): `scope.dominios`/`ips`/`apps` son objetivos
+REALES de escaneo activo -- este nodo se los pasa directo a Nuclei y ZAP --,
+así que quien construye el `PipelineState` es responsable de haber pasado
+CADA UNO por el gate de propiedad de activo, no solo `target`. Para el
+camino HTTP eso lo hace `api/main.py::_autorizar_todos_los_objetivos` antes
+de invocar el grafo. Este nodo no puede verificarlo por sí mismo (no tiene
+acceso a la DB ni al tenant), y esa asimetría es exactamente la que produjo
+el bypass: `POST /scan` validaba `target` mientras este nodo escaneaba
+`scope.dominios`.
+
+`scope.codigo_paths` y `scope.imagenes` son parámetros de OPERADOR: rutas
+del filesystem del servidor y referencias de imagen para `docker pull`.
+NUNCA deben llegar desde el body de un request de un tenant -- por eso
+`api/main.py::ScopeIn` ya no los declara (y rechaza con 422 si se mandan).
+El soporte sigue aquí para uso interno/CLI, donde se inyectan server-side.
 """
 
 from __future__ import annotations
@@ -16,17 +32,12 @@ from orchestrator.state import PipelineState, make_trace_event
 from tools._shared import ToolExecutionError
 from tools.scan import run_grype, run_nuclei, run_semgrep, run_trivy_image, run_zap_baseline
 
-SYSTEM_PROMPT = (
-    "Ejecutas Nuclei y OWASP ZAP contra el objetivo especificado en `scope.dominios`,\n"
-    "y Semgrep/Trivy/Grype contra `scope.codigo_paths`/`scope.imagenes` cuando estén\n"
-    "presentes. Mismo agente, misma puerta de autorización — la única diferencia es\n"
-    "el tipo de objetivo (URL vs ruta de código/imagen de contenedor), no la capa a\n"
-    "la que pertenecen (sección 3.1 del plan: siguen siendo 'Agente de Escaneo').\n"
-    "PRECONDICIÓN OBLIGATORIA: si `autorizacion_firmada` no es true, rechaza la tarea\n"
-    "y no ejecutes nada. Reporta cada hallazgo crudo con: plantilla/regla que lo\n"
-    "disparó, endpoint/archivo/paquete afectado, severidad reportada por la\n"
-    "herramienta. No interpretes ni prioricés todavía — eso lo hace otro agente."
-)
+from .prompts import get_prompt
+
+# Fase 3: fuente unica de prompts. El texto vive en
+# `eval/prompt_versions/v2_escaneo.md` (ver agents/prompts.py). Este agente es
+# determinista (no invoca LLM): el prompt documenta su contrato, no se envia.
+SYSTEM_PROMPT = get_prompt("escaneo")
 
 AGENTE = "escaneo"
 

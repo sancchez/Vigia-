@@ -87,6 +87,14 @@ class PipelineState(TypedDict, total=False):
     antisuplantacion_habilitado: bool
     """Activa la rama opcional de Anti-Suplantación (sección 4, módulo Anti-Suplantación)."""
 
+    contexto_historico: str
+    """Memoria entre corridas (Fase 3): qué se encontró antes para este mismo
+    tenant+target, qué hallazgos son reincidentes, qué ya cerró o descartó el
+    cliente. Lo produce `agents/memoria.py::contexto_historico` LEYENDO la base
+    (nunca lo escribe un nodo del grafo) y lo consumen Priorización y
+    Reportería como contexto extra de su prompt. String vacío = cliente nuevo,
+    caso normal: el pipeline se comporta exactamente como antes de Fase 3."""
+
     # --- Hallazgos crudos ---
     recon_findings: list[dict]
     """Salida cruda del Agente de Recon (subdominios, tecnologías, fuente)."""
@@ -130,8 +138,14 @@ def new_state(
     scope: Optional[Scope] = None,
     contexto_negocio: str = "",
     antisuplantacion_habilitado: bool = False,
+    contexto_historico: str = "",
 ) -> PipelineState:
-    """Construye un `PipelineState` inicial válido para arrancar el grafo."""
+    """Construye un `PipelineState` inicial válido para arrancar el grafo.
+
+    `contexto_historico` es aditivo y opcional: su default `""` reproduce
+    exactamente el comportamiento anterior a Fase 3 (sin memoria entre
+    corridas), así que ningún caller existente necesita cambiar.
+    """
     return PipelineState(
         target=target,
         autorizacion_firmada=autorizacion_firmada,
@@ -139,6 +153,7 @@ def new_state(
         or Scope(dominios=[], apps=[], ips=[], notas="", codigo_paths=[], imagenes=[]),
         contexto_negocio=contexto_negocio,
         antisuplantacion_habilitado=antisuplantacion_habilitado,
+        contexto_historico=contexto_historico,
         recon_findings=[],
         scan_findings=[],
         antisuplantacion_findings=[],

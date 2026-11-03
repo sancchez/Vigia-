@@ -12,6 +12,26 @@ de Exploit-DB (`tools/exploit_intel.py::find_exploits_for_cve`) — la
 "segunda consulta controlada" del prompt de sección 7 es, en esta
 implementación, la búsqueda determinista en ese índice local (no una
 llamada de red ni un juicio de un modelo).
+
+Fase 4 — dos ejes, no uno
+-------------------------
+Hasta esta fase, el ÚNICO eje era `confirmado` (hay exploit público para el
+CVE reportado). Medido contra Juice Shop real: 10 hallazgos verdaderos, 0
+con CVE, y `agents/priorizacion.py` filtraba por `confirmado=True` -> el
+cliente recibía un reporte con remediación vacía. Falso verde.
+
+Ahora este nodo emite DOS ejes independientes, ambos deterministas:
+
+    confirmado / exploit_publico  -> ¿hay PoC pública para un CVE real?
+    estado_validez               -> ¿el hallazgo entra al flujo?
+
+`confirmado` y `estado_verificacion` conservan EXACTAMENTE su semántica y
+sus valores anteriores (hay tests de regresión que los fijan). Lo que se
+agrega es el triage determinista de `tools/triage.py`: severidad nativa ya
+normalizada, clase, evidencia concreta (URI/parámetro), y `estado_validez`,
+que solo vale `falso_positivo_declarado` cuando la PROPIA herramienta lo
+dice (`confidence: "0"` de ZAP). Sigue sin haber LLM acá: todo es un `if`
+sobre datos que la herramienta ya produjo.
 """
 
 from __future__ import annotations
@@ -22,15 +42,14 @@ import re
 from orchestrator.state import PipelineState, make_trace_event
 from tools._shared import ToolExecutionError
 from tools.exploit_intel import find_exploits_for_cve
+from tools.triage import FALSO_POSITIVO_DECLARADO, triage_hallazgo
 
-SYSTEM_PROMPT = (
-    "Recibes hallazgos crudos del Agente de Escaneo. Para cada uno: confirmas contra\n"
-    "la base OSV/Exploit-DB si el CVE referenciado es real y vigente, y vuelves a\n"
-    "intentar reproducir el hallazgo con una segunda consulta controlada. Solo\n"
-    "los hallazgos que pasan esta doble verificación avanzan al siguiente agente.\n"
-    "Todo lo demás se descarta o se marca como \"no confirmado\" — nunca se reporta al\n"
-    "cliente como si fuera un hecho."
-)
+from .prompts import get_prompt
+
+# Fase 3: fuente unica de prompts. El texto vive en
+# `eval/prompt_versions/v1_verificacion.md` (ver agents/prompts.py). Este agente
+# es determinista por diseño (no invoca LLM): el prompt documenta su contrato.
+SYSTEM_PROMPT = get_prompt("verificacion")
 
 AGENTE = "verificacion"
 
@@ -46,7 +65,8 @@ def _extraer_cves(raw_finding: dict) -> list[str]:
     return sorted({m.upper() for m in _CVE_PATTERN.findall(texto)})
 
 
-def _verificar_un_hallazgo(hallazgo: dict) -> dict:
+def _cruzar_exploitdb(hallazgo: dict) -> dict:
+    """Eje 1 (sin cambios desde Fase 1): ¿hay PoC pública para su CVE?"""
     raw = hallazgo.get("raw", hallazgo)
     cves = _extraer_cves(raw)
 
@@ -105,6 +125,20 @@ def _verificar_un_hallazgo(hallazgo: dict) -> dict:
     }
 
 
+def _verificar_un_hallazgo(hallazgo: dict) -> dict:
+    """Eje 1 (Exploit-DB) + eje 2 (triage determinista de `tools/triage.py`).
+
+    El resultado de `_cruzar_exploitdb` se conserva TAL CUAL y el triage se
+    fusiona encima solo con claves nuevas (`tipo`, `severidad`, `clase`,
+    `endpoint`, `parametro`, `evidencia`, `estado_validez`, `urgencia_base`,
+    ...). `confirmado` y `estado_verificacion` no se tocan: son el contrato
+    que fijan los tests de regresión de fases anteriores.
+    """
+    verificado = _cruzar_exploitdb(hallazgo)
+    triage = triage_hallazgo(hallazgo, exploit_publico=bool(verificado.get("confirmado")))
+    return {**verificado, **triage}
+
+
 def verificar_un_hallazgo(hallazgo: dict) -> dict:
     """Wrapper público de `_verificar_un_hallazgo` -- mismo contrato exacto,
     pensado para reutilizarse fuera del grafo LangGraph (ver
@@ -122,7 +156,25 @@ def verificar_un_hallazgo(hallazgo: dict) -> dict:
 def node(state: PipelineState) -> dict:
     hallazgos_crudos = state.get("scan_findings") or []
     verificados = [_verificar_un_hallazgo(h) for h in hallazgos_crudos]
-    confirmados = sum(1 for v in verificados if v["confirmado"])
+
+    con_exploit = sum(1 for v in verificados if v.get("confirmado"))
+    descartados = sum(
+        1 for v in verificados if v.get("estado_validez") == FALSO_POSITIVO_DECLARADO
+    )
+    validos = len(verificados) - descartados
+
+    # El trace_log tiene que decir la verdad de lo que pasó. El texto anterior
+    # ("0/10 confirmados via Exploit-DB") era técnicamente cierto y comunicaba
+    # "no hay nada", teniendo 10 hallazgos reales encima. Ahora se reporta el
+    # número que importa (cuántos siguen al resto del pipeline) y el exploit
+    # público queda donde corresponde: como agravante, no como filtro.
+    por_severidad: dict[str, int] = {}
+    for v in verificados:
+        if v.get("estado_validez") == FALSO_POSITIVO_DECLARADO:
+            continue
+        sev = str(v.get("severidad") or "desconocida")
+        por_severidad[sev] = por_severidad.get(sev, 0) + 1
+    desglose = ", ".join(f"{sev}={n}" for sev, n in sorted(por_severidad.items())) or "ninguno"
 
     return {
         "verified_findings": verificados,
@@ -131,9 +183,12 @@ def node(state: PipelineState) -> dict:
                 agente=AGENTE,
                 accion=f"verificar_deterministico({len(hallazgos_crudos)} hallazgos crudos)",
                 resultado=(
-                    f"{confirmados}/{len(hallazgos_crudos)} confirmados via Exploit-DB; "
-                    "resto marcado no_confirmado (no se descartan silenciosamente, "
-                    "quedan en verified_findings con confirmado=False)"
+                    f"{validos}/{len(hallazgos_crudos)} hallazgos válidos pasan a priorización "
+                    f"(severidad: {desglose}); {con_exploit} con exploit público conocido en "
+                    f"Exploit-DB (agravante de urgencia, no requisito de entrada); "
+                    f"{descartados} descartados por confidence=0 (falso positivo declarado por "
+                    "la propia herramienta). Nada se descarta en silencio: todo queda en "
+                    "verified_findings con su estado_validez."
                 ),
             )
         ],

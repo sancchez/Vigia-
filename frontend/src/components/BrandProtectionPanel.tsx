@@ -26,7 +26,16 @@ export function claseScore(score: number): "score-bajo" | "score-medio" | "score
   return "score-bajo";
 }
 
-function ScreenshotThumbnail({ findingId }: { findingId: string }) {
+/** Miniatura de la captura del sitio clon.
+ *
+ * `disponible` viene del backend (`DominioClonOut.screenshot` es `null` cuando
+ * el hallazgo no tiene captura persistida). Antes este componente ofrecía
+ * "Ver screenshot" en TODAS las filas y recién tras el fetch fallido mostraba
+ * "Sin screenshot disponible" -- con N hallazgos sin captura eso son N
+ * peticiones 404 y N mensajes con pinta de error. Ahora, si el backend ya dijo
+ * que no hay captura, no se ofrece el botón y se explica el estado como lo que
+ * es (falta de evidencia visual, no un fallo). */
+function ScreenshotThumbnail({ findingId, disponible }: { findingId: string; disponible: boolean }) {
   const [url, setUrl] = useState<string | null>(null);
   const [cargando, setCargando] = useState(false);
   const [intentado, setIntentado] = useState(false);
@@ -59,8 +68,15 @@ function ScreenshotThumbnail({ findingId }: { findingId: string }) {
     );
   }
 
-  if (intentado && !cargando) {
-    return <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Sin screenshot disponible</span>;
+  if (!disponible || (intentado && !cargando)) {
+    return (
+      <span
+        style={{ fontSize: 12, color: "var(--text-muted)", maxWidth: 160, display: "inline-block" }}
+        title="La captura se toma cuando el sitio clon responde y el navegador headless está instalado en el servidor."
+      >
+        Sin captura del sitio
+      </span>
+    );
   }
 
   return (
@@ -68,6 +84,18 @@ function ScreenshotThumbnail({ findingId }: { findingId: string }) {
       {cargando ? "Cargando…" : "Ver screenshot"}
     </button>
   );
+}
+
+/** Chip de la etapa del ciclo de vida de marca. `etapa_marca` la calcula el
+ * backend (`api/main.py::_etapa_marca`) a partir del `estado` genérico -- acá
+ * solo se elige el color. Ver ese docstring para por qué no se muestra el
+ * estado crudo ("En progreso" no le dice nada a quien mandó una carta a un
+ * registrador). */
+function claseEtapa(d: DominioClon): string {
+  if (d.estado === "cerrado" || d.estado === "verificado") return "verificado";
+  if (d.estado === "aceptado_riesgo") return "info";
+  if (d.registrador_sin_respuesta > 0) return "high";
+  return "info";
 }
 
 type Props = { refreshKey?: number };
@@ -78,6 +106,7 @@ export default function BrandProtectionPanel({ refreshKey }: Props) {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copiado, setCopiado] = useState<string | null>(null);
+  const [accionando, setAccionando] = useState<string | null>(null);
 
   useEffect(() => {
     let activo = true;
@@ -100,6 +129,34 @@ export default function BrandProtectionPanel({ refreshKey }: Props) {
       activo = false;
     };
   }, [refreshKey]);
+
+  /** Aplica una acción del ciclo de vida y refleja la fila devuelta por el
+   * backend, sin re-fetchear toda la lista: la respuesta ES el `DominioClon`
+   * actualizado (mismo contrato que `GET /antisuplantacion/dominios`), así que
+   * refrescar entero solo agregaría latencia y un parpadeo. */
+  const aplicarAccion = async (
+    findingId: string,
+    accion: (id: string) => Promise<DominioClon>,
+  ) => {
+    setAccionando(findingId);
+    setError(null);
+    try {
+      const actualizado = await accion(findingId);
+      setDominios((prev) => prev.map((d) => (d.finding_id === findingId ? actualizado : d)));
+      // Los KPIs (TTTD) dependen de las transiciones que esta acción acaba de
+      // escribir, así que sí hace falta refrescarlos.
+      try {
+        setKpis(await api.getAntisuplantacionKpis());
+      } catch {
+        /* el KPI es secundario -- no invalida la acción que sí se aplicó */
+      }
+    } catch (e) {
+      const mensaje = e instanceof Error ? e.message : "acción rechazada";
+      setError(`No se pudo registrar la acción: ${mensaje}`);
+    } finally {
+      setAccionando(null);
+    }
+  };
 
   const copiarTakedown = async (findingId: string, texto: string) => {
     try {
@@ -155,10 +212,22 @@ export default function BrandProtectionPanel({ refreshKey }: Props) {
       )}
 
       {dominios.length === 0 ? (
-        <p style={{ fontSize: 14, color: "var(--text-secondary)" }}>
-          Todavía no se detectaron dominios clon ni perfiles falsos. Usá "Proteger marca" sobre un dominio verificado
-          para correr la búsqueda.
-        </p>
+        <div style={{ fontSize: 14, color: "var(--text-secondary)" }}>
+          <p style={{ marginBottom: 6 }}>
+            Todavía no se detectaron dominios clon ni perfiles falsos. Usá "Proteger marca" sobre un dominio verificado
+            para correr la búsqueda.
+          </p>
+          {/* Expectativa honesta: medido contra un dominio real con 45 lookalikes,
+              la corrida bajo demanda supera los 15 minutos (ver la advertencia en
+              `api/main.py::ejecutar_antisuplantacion`). Desde que el endpoint es
+              asíncrono (202 + polling) ya no hay timeout del proxy que confundir
+              con "no encontró nada", pero la espera real sigue existiendo. */}
+          <p style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
+            La primera búsqueda sobre un dominio con muchas variantes puede tardar varios minutos: se verifica
+            infraestructura y se captura evidencia de cada dominio sospechoso, con pausas deliberadas entre consultas.
+            La corrida sigue en el servidor aunque cierres la pestaña — los hallazgos aparecen acá al terminar.
+          </p>
+        </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {dominios.map((d) => (
@@ -168,14 +237,69 @@ export default function BrandProtectionPanel({ refreshKey }: Props) {
                   {d.endpoint}
                 </span>
                 <span className={`chip ${d.severidad}`}>{SEV_LABEL[d.severidad] ?? d.severidad}</span>
-                <span className={`chip ${claseScore(d.score)}`} title="Señales de infraestructura activa: DNS-A + MX + SSL + HTTP">
-                  score {d.score}/4
+                {/* El score 0-4 solo tiene sentido sobre un dominio: un perfil de red
+                    social no tiene MX ni certificado TLS propio, así que un "0/4" ahí
+                    se leería como "inofensivo" cuando la métrica simplemente no aplica. */}
+                {d.tipo !== "perfil_red_social" && (
+                  <span className={`chip ${claseScore(d.score)}`} title="Señales de infraestructura activa: DNS-A + MX + SSL + HTTP">
+                    score {d.score}/4
+                  </span>
+                )}
+                {d.tipo === "perfil_red_social" && (
+                  <span className="chip info" title="Perfil con el mismo nombre de marca. Sherlock confirma que existe, no que suplante — requiere revisión humana.">
+                    perfil · revisión humana
+                  </span>
+                )}
+                <span
+                  className={`chip ${claseEtapa(d)}`}
+                  title={`Estado interno del ciclo de vida: ${d.estado}`}
+                >
+                  {d.etapa_marca}
                 </span>
-                <span className="chip info">{d.estado}</span>
               </div>
 
+              {/* Acciones del ciclo de vida de marca. Antes de esto el panel
+                  terminaba en "Copiar" el borrador: el cliente se llevaba la
+                  carta y el producto no volvía a saber nada del caso, así que
+                  TTTD nunca tenía datos y "¿y después qué?" no tenía respuesta
+                  dentro de la herramienta. Solo se ofrecen sobre dominios: un
+                  perfil de red social no se da de baja escribiéndole a un
+                  registrador. */}
+              {d.tipo !== "perfil_red_social" && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                  {!d.takedown_enviado_en && (
+                    <button
+                      onClick={() => aplicarAccion(d.finding_id, (id) => api.marcarTakedownEnviado(id))}
+                      disabled={accionando === d.finding_id}
+                      style={{ fontSize: 11.5 }}
+                      title="Registra que ya enviaste la solicitud al registrador. Arranca el reloj de TTTD."
+                    >
+                      {accionando === d.finding_id ? "Guardando…" : "Marcar takedown enviado"}
+                    </button>
+                  )}
+                  {d.takedown_enviado_en && (
+                    <button
+                      onClick={() => aplicarAccion(d.finding_id, (id) => api.marcarSinRespuesta(id))}
+                      disabled={accionando === d.finding_id}
+                      style={{ fontSize: 11.5 }}
+                      title="El registrador no contestó. Queda auditado para justificar el escalamiento."
+                    >
+                      {accionando === d.finding_id ? "Guardando…" : "Sin respuesta del registrador"}
+                    </button>
+                  )}
+                  {d.takedown_enviado_en && (
+                    <span style={{ fontSize: 11.5, color: "var(--text-muted)", alignSelf: "center" }}>
+                      Enviado {new Date(d.takedown_enviado_en).toLocaleDateString()}
+                      {d.takedown_destinatario ? ` a ${d.takedown_destinatario}` : ""}
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
-                <ScreenshotThumbnail findingId={d.finding_id} />
+                {d.tipo !== "perfil_red_social" && (
+                  <ScreenshotThumbnail findingId={d.finding_id} disponible={d.screenshot != null} />
+                )}
 
                 {d.takedown && (
                   <div style={{ flex: 1, minWidth: 240 }}>
